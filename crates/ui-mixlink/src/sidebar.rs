@@ -124,15 +124,18 @@ fn paint_record(
     clip: Rect,
 ) {
     // MixLink SidebarView: VStack spacing 10, .padding(8).
+    // Header→first content is MixLink 10 (EFFECTS) / 6 (SETTINGS); +2 so
+    // the title is not flush against the first row.
     const SIDE: f32 = 8.0;
     const GAP: f32 = 6.0;
     const OUTER: f32 = 10.0;
+    const HEAD_GAP: f32 = 12.0;
     let inner_x = x + SIDE;
     let inner_w = Layout::SIDEBAR_WIDTH - SIDE * 2.0;
 
     // MixLink EFFECTS: 13 semibold MixerTheme.primaryText
     theme::text(cmds, Rect { x: inner_x, y: *y, w: inner_w, h: 18.0 }, "EFFECTS", 13.0, theme::PRIMARY_TEXT, true);
-    *y += 18.0 + OUTER;
+    *y += 18.0 + HEAD_GAP;
 
     row_plus(cmds, hits, x, *y, "Hardware effects", SidebarHit::AddHardware, true);
     *y += Layout::HEADER_BUTTON + GAP;
@@ -160,19 +163,35 @@ fn paint_record(
         return;
     }
     *y += OUTER - GAP;
-    // MixLink SETTINGS: 12 semibold MixerTheme.secondaryText
+    // MixLink SETTINGS: 12 semibold MixerTheme.secondaryText, VStack spacing 6.
     theme::text(cmds, Rect { x: inner_x, y: *y, w: inner_w, h: 16.0 }, "SETTINGS", 12.0, theme::SECONDARY_TEXT, true);
-    *y += 16.0 + GAP;
+    *y += 16.0 + 8.0;
     paint_settings(view, cmds, hits, inner_x, y, inner_w);
     let _ = ReturnLane::SendA;
 }
 
-/// MixLink `HardwareModuleModifier` padding 7, `VStack` spacing 6,
-/// `ChannelPicker` label+menu spacing 4, `MenuLabel` ~22 pt.
+// MixLink `HardwareEffectCard` / `PluginSlotView`:
+//   VStack(alignment: .leading, spacing: 6) {
+//     HStack(spacing: 6) { NameField; HardwareIconButton("minus") }
+//     ChannelPicker(title: "Output"|"Input", ...)          // hardware
+//     Menu { MenuLabel(plugin) }                           // plugin
+//     HStack(spacing: 6) { SmallButton("Edit"); SmallButton("Bypass") }
+//     HStack(spacing: 8) { Text("Software playback"); ChannelPicker(title: nil) }
+//   }
+//   .hardwareModule()   // padding 7, recessed card, thin light rim
+// MixLink `ChannelPicker`: VStack(spacing: 4) { Text(11 medium textDim); Menu { MenuLabel } }
+//   .menuStyle(.borderlessButton) .menuIndicator(.hidden)
+// MixLink `MenuLabel` closed: HStack(spacing: 3) { Text; chevron.up.chevron.down }
+//   .padding(.vertical, 5) .padding(.horizontal, 6) — screenshot Heat/EffectRack
+//   drops the recessed well, leading chevron, no diamond.
+// Sidebar EDIT/BYPASS stay MixLink compact 26 (`Layout::BUTTON_H`); mixer SOLO unchanged.
+// NEW PROJECT is MixLink compact full-width; 27 is slightly larger than 26.
 const CARD_GAP: f32 = 6.0;
 const PICKER_GAP: f32 = 4.0;
-const LABEL_H: f32 = 14.0;
-const MENU_H: f32 = 22.0;
+const LABEL_H: f32 = 16.0;
+const MENU_H: f32 = 24.0;
+const PLUGIN_PAD_H: f32 = Layout::BUTTON_H;
+const NEW_PROJECT_H: f32 = Layout::COMPACT_BUTTON_H;
 
 fn hardware_card_h() -> f32 {
     Layout::MODULE_PAD
@@ -194,7 +213,7 @@ fn plugin_card_h() -> f32 {
         + CARD_GAP
         + MENU_H
         + CARD_GAP
-        + Layout::COMPACT_BUTTON_H
+        + PLUGIN_PAD_H
         + CARD_GAP
         + MENU_H
         + Layout::MODULE_PAD
@@ -284,12 +303,13 @@ fn paint_plugin_card(
         .as_deref()
         .and_then(|p| std::path::Path::new(p).file_stem().and_then(|s| s.to_str()))
         .unwrap_or("No plugin");
-    widgets::menu_label(cmds, Rect { x: cx, y: cy, w: cw, h: MENU_H }, bundle);
-    hits.push((Rect { x: cx, y: cy, w: cw, h: MENU_H }, SidebarHit::PluginBundle(plug.id)));
+    let bundle_row = Rect { x: cx, y: cy, w: cw, h: MENU_H };
+    widgets::channel_picker(cmds, bundle_row, bundle, widgets::ChannelPickerStyle::plugin());
+    hits.push((bundle_row, SidebarHit::PluginBundle(plug.id)));
     cy += MENU_H + CARD_GAP;
     let btn_gap = CARD_GAP;
     let btn_w = (cw - btn_gap) * 0.5;
-    let btn_h = Layout::COMPACT_BUTTON_H;
+    let btn_h = PLUGIN_PAD_H;
     widgets::hardware_pad(cmds, Rect { x: cx, y: cy, w: btn_w, h: btn_h }, "Edit", false, theme::PRIMARY_TEXT);
     widgets::hardware_pad(
         cmds,
@@ -301,23 +321,27 @@ fn paint_plugin_card(
     hits.push((Rect { x: cx, y: cy, w: btn_w, h: btn_h }, SidebarHit::PluginEdit(plug.id)));
     hits.push((Rect { x: cx + btn_w + btn_gap, y: cy, w: btn_w, h: btn_h }, SidebarHit::PluginBypass(plug.id)));
     cy += btn_h + CARD_GAP;
-    // MixLink PluginSlotView: HStack spacing 8, 11 medium textDim + ChannelPicker.
+    // MixLink PluginSlotView: HStack spacing 8, 11 medium textDim + ChannelPicker(title: nil).
+    const PLAYBACK_LABEL_W: f32 = 108.0;
+    const PLAYBACK_GAP: f32 = 8.0;
     theme::text(
         cmds,
-        Rect { x: cx, y: cy, w: 108.0, h: MENU_H },
+        Rect { x: cx, y: cy, w: PLAYBACK_LABEL_W, h: MENU_H },
         "Software playback",
         11.0,
         theme::TEXT_DIM,
         false,
     );
-    let menu_x = cx + 108.0 + 8.0;
+    let menu_x = cx + PLAYBACK_LABEL_W + PLAYBACK_GAP;
     let menu_w = (cx + cw - menu_x).max(36.0);
-    widgets::menu_label(
+    let playback = Rect { x: menu_x, y: cy, w: menu_w, h: MENU_H };
+    widgets::channel_picker(
         cmds,
-        Rect { x: menu_x, y: cy, w: menu_w, h: MENU_H },
+        playback,
         &format!("{}/{}", plug.return_channel + 1, plug.return_channel + 2),
+        widgets::ChannelPickerStyle::playback(),
     );
-    hits.push((Rect { x: menu_x, y: cy, w: menu_w, h: MENU_H }, SidebarHit::PluginPlayback(plug.id)));
+    hits.push((playback, SidebarHit::PluginPlayback(plug.id)));
 }
 
 fn paint_settings(
@@ -331,16 +355,18 @@ fn paint_settings(
     const GROUP: f32 = 6.0;
     field_label(cmds, x, *y, w, "Projects folder");
     *y += LABEL_H + GROUP;
-    widgets::menu_label(cmds, Rect { x, y: *y, w, h: MENU_H }, view.project_name);
-    hits.push((Rect { x, y: *y, w, h: MENU_H }, SidebarHit::ProjectsFolder));
+    let folder = Rect { x, y: *y, w, h: MENU_H };
+    widgets::channel_picker(cmds, folder, view.project_name, widgets::ChannelPickerStyle::value());
+    hits.push((folder, SidebarHit::ProjectsFolder));
     *y += MENU_H + GROUP;
     if !view.project_suffix.is_empty() || !view.project_date.is_empty() {
         field_label(cmds, x, *y, w, "Project");
         *y += LABEL_H + GROUP;
         let row = Rect { x, y: *y, w, h: MENU_H };
         widgets::recessed_field(cmds, row);
+        // MixLink project well is `.padding(.horizontal, 6)`; 8 matches MenuLabel.
         let date = format!("{} -", view.project_date);
-        theme::text(cmds, Rect { x: x + 6.0, y: *y, w: 90.0, h: MENU_H }, date, 12.0, theme::TEXT_DIM, false);
+        theme::text(cmds, Rect { x: x + 8.0, y: *y, w: 90.0, h: MENU_H }, date, 12.0, theme::TEXT_DIM, false);
         let name = if *view.focus == TextFocus::ProjectName && view.caret {
             format!("{}|", view.project_suffix)
         } else {
@@ -348,24 +374,24 @@ fn paint_settings(
         };
         theme::text(
             cmds,
-            Rect { x: x + 96.0, y: *y, w: w - 102.0, h: MENU_H },
+            Rect { x: x + 98.0, y: *y, w: w - 106.0, h: MENU_H },
             name,
             12.0,
             theme::PRIMARY_TEXT,
             false,
         );
-        hits.push((Rect { x: x + 96.0, y: *y, w: w - 102.0, h: MENU_H }, SidebarHit::ProjectName));
+        hits.push((Rect { x: x + 98.0, y: *y, w: w - 106.0, h: MENU_H }, SidebarHit::ProjectName));
         *y += MENU_H + GROUP;
     }
     widgets::hardware_pad(
         cmds,
-        Rect { x, y: *y, w, h: Layout::COMPACT_BUTTON_H },
+        Rect { x, y: *y, w, h: NEW_PROJECT_H },
         "New project",
         false,
         theme::PRIMARY_TEXT,
     );
-    hits.push((Rect { x, y: *y, w, h: Layout::COMPACT_BUTTON_H }, SidebarHit::NewProject));
-    *y += Layout::COMPACT_BUTTON_H + GROUP;
+    hits.push((Rect { x, y: *y, w, h: NEW_PROJECT_H }, SidebarHit::NewProject));
+    *y += NEW_PROJECT_H + GROUP;
     picker_stack(
         cmds,
         hits,
@@ -418,7 +444,7 @@ fn paint_mix(
             + CARD_GAP
             + MENU_H
             + CARD_GAP
-            + Layout::COMPACT_BUTTON_H
+            + PLUGIN_PAD_H
             + Layout::MODULE_PAD;
         for insert in &track.inserts {
             if *y > clip.y + clip.h {
@@ -446,15 +472,16 @@ fn paint_mix(
             widgets::icon_pad(cmds, icon, "−", true);
             hits.push((icon, SidebarHit::RemoveInsert(insert.id)));
             let menu = Rect { x: cx, y: cy0 + Layout::HEADER_BUTTON + CARD_GAP, w: cw, h: MENU_H };
-            widgets::menu_label(
+            widgets::channel_picker(
                 cmds,
                 menu,
                 insert.bundle_path.as_deref().and_then(|p| std::path::Path::new(p).file_name().and_then(|s| s.to_str())).unwrap_or("No plugin"),
+                widgets::ChannelPickerStyle::plugin(),
             );
             hits.push((menu, SidebarHit::InsertBundle(insert.id)));
             let by = menu.y + MENU_H + CARD_GAP;
             let btn_w = (cw - CARD_GAP) * 0.5;
-            let btn_h = Layout::COMPACT_BUTTON_H;
+            let btn_h = PLUGIN_PAD_H;
             widgets::hardware_pad(cmds, Rect { x: cx, y: by, w: btn_w, h: btn_h }, "Edit", false, theme::PRIMARY_TEXT);
             widgets::hardware_pad(
                 cmds,
@@ -518,7 +545,7 @@ fn picker_stack(
 ) {
     field_label(cmds, x, y, w, label);
     let menu = Rect { x, y: y + LABEL_H + PICKER_GAP, w, h: MENU_H };
-    widgets::menu_label(cmds, menu, value);
+    widgets::channel_picker(cmds, menu, value, widgets::ChannelPickerStyle::value());
     hits.push((menu, hit));
 }
 

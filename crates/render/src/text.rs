@@ -11,7 +11,7 @@ use std::sync::Arc;
 use glyphon::{
     Attrs, Buffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution,
     Shaping, Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
-    Weight,
+    Weight, Wrap,
 };
 
 use crate::scene::{Align, Color, Rect, TextCmd};
@@ -23,8 +23,12 @@ pub struct TextSystem {
     swash_cache: SwashCache,
     atlas: TextAtlas,
     viewport: Viewport,
-    renderer: TextRenderer,
-    /// Per-frame scratch: keeps `Buffer`s alive while they are referenced by
+    /// One glyphon renderer per `DrawCmd::Layer`. `TextRenderer::prepare`
+    /// replaces its vertex buffer via `queue.write_buffer`, so a shared
+    /// renderer would let an overlay prepare clobber sidebar glyphs before
+    /// the GPU executes the base pass.
+    renderers: Vec<TextRenderer>,
+    /// Per-prepare scratch: keeps `Buffer`s alive while they are referenced by
     /// `TextArea`s passed to `prepare`.
     frame_buffers: Vec<Buffer>,
 }
@@ -53,14 +57,29 @@ impl TextSystem {
             swash_cache,
             atlas,
             viewport,
-            renderer,
+            renderers: vec![renderer],
             frame_buffers: Vec::new(),
+        }
+    }
+
+    fn ensure_layer_renderer(&mut self, device: &wgpu::Device, layer: usize) {
+        while self.renderers.len() <= layer {
+            self.renderers.push(TextRenderer::new(
+                &mut self.atlas,
+                device,
+                wgpu::MultisampleState::default(),
+                None,
+            ));
         }
     }
 
     /// Build glyphon `TextArea`s from the DAW's scene `TextCmd`s and hand them
     /// to the text renderer for preparation. Must be called before
-    /// `render_pass(...)` on the same frame.
+    /// `render_pass(...)` on the same frame for the same `layer`.
+    ///
+    /// `layer` selects which glyphon vertex buffer to fill (one per
+    /// `DrawCmd::Layer`). Prepare every layer before encoding any text pass
+    /// so the atlas bind group is stable.
     ///
     /// `logical_size` is the UI coordinate space (points), `physical_size` is
     /// the actual surface resolution, and `scale_factor` is
@@ -72,11 +91,13 @@ impl TextSystem {
         physical_size: (u32, u32),
         scale_factor: f32,
         texts: &[TextCmd],
+        layer: usize,
     ) -> Result<(), glyphon::PrepareError> {
         self.viewport.update(
             queue,
             Resolution { width: physical_size.0, height: physical_size.1 },
         );
+        self.ensure_layer_renderer(device, layer);
 
         self.frame_buffers.clear();
         self.frame_buffers.reserve(texts.len());
@@ -88,13 +109,19 @@ impl TextSystem {
         let s = scale_factor.max(1.0);
         for cmd in texts {
             let px = cmd.size * s;
-            let metrics = Metrics::new(px, px * 1.25);
+            let line_height = px * 1.25;
+            let metrics = Metrics::new(px, line_height);
             let mut buffer = Buffer::new(&mut self.font_system, metrics);
-            buffer.set_size(
-                &mut self.font_system,
-                Some((cmd.rect.w * s).max(1.0)),
-                Some((cmd.rect.h * s).max(1.0)),
-            );
+            let buf_w = (cmd.rect.w * s).max(1.0);
+            let buf_h = (cmd.rect.h * s).max(1.0);
+            buffer.set_size(&mut self.font_system, Some(buf_w), Some(buf_h));
+            // cosmic-text default Wrap::WordOrGlyph fills the buffer height, so a
+            // short string in a tall narrow box ("EMU" in NAME_ROW) wraps. A rect
+            // that cannot fit two lines is MixLink `.lineLimit(1)`.
+            let single_line = buf_h < line_height * 1.5;
+            if single_line {
+                buffer.set_wrap(&mut self.font_system, Wrap::None);
+            }
             let attrs = ui_text_attrs(cmd.bold, cmd.monospaced);
             buffer.set_text(
                 &mut self.font_system,
@@ -103,6 +130,9 @@ impl TextSystem {
                 Shaping::Advanced,
             );
             buffer.shape_until_scroll(&mut self.font_system, false);
+            if single_line {
+                truncate_tail_ellipsis(&mut self.font_system, &mut buffer, &cmd.text, attrs, buf_w);
+            }
             self.frame_buffers.push(buffer);
         }
 
@@ -155,7 +185,7 @@ impl TextSystem {
             });
         }
 
-        self.renderer.prepare(
+        self.renderers[layer].prepare(
             device,
             queue,
             &mut self.font_system,
@@ -166,12 +196,18 @@ impl TextSystem {
         )
     }
 
-    /// Issue the text draw inside an existing render pass.
+    /// Issue the text draw for `layer` inside an existing render pass.
+    /// `prepare(..., layer)` must have run this frame.
     pub fn render_pass<'a>(
         &'a self,
         pass: &mut wgpu::RenderPass<'a>,
+        layer: usize,
     ) -> Result<(), glyphon::RenderError> {
-        self.renderer.render(&self.atlas, &self.viewport, pass)
+        let renderer = self
+            .renderers
+            .get(layer)
+            .expect("text prepare must run before render_pass");
+        renderer.render(&self.atlas, &self.viewport, pass)
     }
 
     /// Trim the glyph atlas LRU. Call once per frame.
@@ -198,6 +234,45 @@ fn longest_line_w(buffer: &Buffer) -> f32 {
         w = w.max(run.line_w);
     }
     w
+}
+
+/// MixLink `.truncationMode(.tail)`: keep one line and append an ellipsis when
+/// the shaped advance exceeds `max_w`. Call after `Wrap::None` + `set_text`.
+fn truncate_tail_ellipsis(
+    font_system: &mut FontSystem,
+    buffer: &mut Buffer,
+    text: &str,
+    attrs: Attrs<'static>,
+    max_w: f32,
+) {
+    if longest_line_w(buffer) <= max_w {
+        return;
+    }
+    const ELLIPSIS: &str = "…";
+    buffer.set_text(font_system, ELLIPSIS, attrs, Shaping::Advanced);
+    buffer.shape_until_scroll(font_system, false);
+    if longest_line_w(buffer) > max_w {
+        return;
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut lo = 0usize;
+    let mut hi = chars.len();
+    let mut best = ELLIPSIS.to_string();
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2;
+        let mut candidate: String = chars[..mid].iter().collect();
+        candidate.push_str(ELLIPSIS);
+        buffer.set_text(font_system, &candidate, attrs, Shaping::Advanced);
+        buffer.shape_until_scroll(font_system, false);
+        if longest_line_w(buffer) <= max_w {
+            best = candidate;
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    buffer.set_text(font_system, &best, attrs, Shaping::Advanced);
+    buffer.shape_until_scroll(font_system, false);
 }
 
 /// MixLink `.font(.system(size:weight:design:))` — SF via SansSerif, SF Mono
@@ -412,5 +487,110 @@ impl Rect {
             w: (self.w - 2.0 * dx).max(0.0),
             h: (self.h - 2.0 * dy).max(0.0),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Layout line count using the same wrap/ellipsis rules as `TextSystem::prepare`.
+    fn prepare_line_count(text: &str, w: f32, h: f32, size: f32) -> usize {
+        let mut font_system = FontSystem::new();
+        let line_height = size * 1.25;
+        let metrics = Metrics::new(size, line_height);
+        let mut buffer = Buffer::new(&mut font_system, metrics);
+        buffer.set_size(&mut font_system, Some(w.max(1.0)), Some(h.max(1.0)));
+        let single_line = h < line_height * 1.5;
+        if single_line {
+            buffer.set_wrap(&mut font_system, Wrap::None);
+        }
+        let attrs = ui_text_attrs(false, false);
+        buffer.set_text(&mut font_system, text, attrs, Shaping::Advanced);
+        buffer.shape_until_scroll(&mut font_system, false);
+        if single_line {
+            truncate_tail_ellipsis(&mut font_system, &mut buffer, text, attrs, w.max(1.0));
+        }
+        buffer.layout_runs().count()
+    }
+
+    #[test]
+    fn strip_names_stay_one_line() {
+        // Channel strip 100pt, MixLink pad 2, diamond 6.5, gap 4 → remaining text width.
+        let text_w = 100.0 - 2.0 * 2.0 - 6.5 - 4.0;
+        let line_h = 17.0;
+        let font = 11.5;
+        for name in ["EMU", "XV", "303", "Main", "EffectRack", "No effect"] {
+            assert_eq!(
+                prepare_line_count(name, text_w, line_h, font),
+                1,
+                "{name} must stay on one line"
+            );
+        }
+        // Main uses the full inner width.
+        assert_eq!(prepare_line_count("Main", 100.0 - 4.0, line_h, font), 1);
+    }
+
+    #[test]
+    fn guessed_width_in_name_row_wraps_short_names() {
+        // Regression: chars * 11.5 * 0.56 ≈ 19pt in a 42pt NAME_ROW wraps "EMU".
+        let guessed = 3.0 * 11.5 * 0.56;
+        assert!(
+            prepare_line_count("EMU", guessed, 42.0, 11.5) > 1,
+            "old guessed box should wrap so the name-row height constraint stays necessary"
+        );
+    }
+
+    /// Shared `FontSystem` + many buffers (sidebar labels then a tall menu).
+    /// Each string must keep a full one-line advance — wrap/ellipsis must not
+    /// leak a stale width from the last clip into earlier labels.
+    #[test]
+    fn sidebar_texts_survive_a_tall_menu_prepare() {
+        let mut font_system = FontSystem::new();
+        let mut widths = Vec::new();
+        let labels = [
+            "EFFECTS",
+            "Hardware effects",
+            "Plugins",
+            "Software playback",
+            "SETTINGS",
+            "Projects folder",
+            "ADAT 5/6 - Analog Heat",
+        ];
+        for text in labels {
+            widths.push(shape_advance(&mut font_system, text, 220.0, 18.0, 12.0));
+        }
+        for i in 0..16 {
+            let item = format!("ADAT {}/{} - Analog Heat", i * 2 + 1, i * 2 + 2);
+            widths.push(shape_advance(&mut font_system, &item, 240.0, 26.0, 13.0));
+        }
+        for (i, text) in labels.iter().enumerate() {
+            assert!(
+                widths[i] > 24.0,
+                "{text} collapsed to a stub after menu prepare, width={}",
+                widths[i]
+            );
+        }
+        for w in &widths[labels.len()..] {
+            assert!(*w > 40.0, "menu item collapsed, width={w}");
+        }
+    }
+
+    fn shape_advance(font_system: &mut FontSystem, text: &str, w: f32, h: f32, size: f32) -> f32 {
+        let line_height = size * 1.25;
+        let metrics = Metrics::new(size, line_height);
+        let mut buffer = Buffer::new(font_system, metrics);
+        buffer.set_size(font_system, Some(w.max(1.0)), Some(h.max(1.0)));
+        let single_line = h < line_height * 1.5;
+        if single_line {
+            buffer.set_wrap(font_system, Wrap::None);
+        }
+        let attrs = ui_text_attrs(false, false);
+        buffer.set_text(font_system, text, attrs, Shaping::Advanced);
+        buffer.shape_until_scroll(font_system, false);
+        if single_line {
+            truncate_tail_ellipsis(font_system, &mut buffer, text, attrs, w.max(1.0));
+        }
+        longest_line_w(&buffer)
     }
 }

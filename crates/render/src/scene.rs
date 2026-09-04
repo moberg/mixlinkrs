@@ -112,6 +112,8 @@ pub enum DrawCmd {
     Text(TextCmd),
     /// Start a new paint layer. Geometry and text before this command are
     /// flushed so later commands (menus, Settings, Channels) draw on top.
+    /// Each layer gets its own glyphon vertex buffer; do not share one
+    /// `TextRenderer` across layers in a single encoder.
     Layer,
 }
 

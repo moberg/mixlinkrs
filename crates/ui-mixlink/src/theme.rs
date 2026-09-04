@@ -36,40 +36,43 @@ pub enum SurfaceStyle {
     Recessed,
 }
 
+/// MixLink `Color.white.opacity` composites in gamma sRGB. wgpu blends the same
+/// alpha in linear, which reads as a gray wash — keep fills as MixLink sRGB and
+/// scale only white overlay alphas (~⅓ of MixLink for broad washes).
 pub const UPPER_FACEPLATE: Material = Material {
     top: [0.26, 0.26, 0.26, 1.0],
     middle: [0.20, 0.20, 0.20, 1.0],
     bottom: [0.16, 0.16, 0.16, 1.0],
-    grain_light: 0.020,
+    grain_light: 0.007, // MixLink 0.020
     grain_dark: 0.014,
-    top_highlight: 0.055,
+    top_highlight: 0.016, // MixLink 0.055
     bottom_shadow: 0.08,
 };
 pub const FADER_BAY: Material = Material {
     top: [0x24 as f32 / 255.0, 0x26 as f32 / 255.0, 0x24 as f32 / 255.0, 1.0],
     middle: [0x1B as f32 / 255.0, 0x1D as f32 / 255.0, 0x1B as f32 / 255.0, 1.0],
     bottom: [0x15 as f32 / 255.0, 0x17 as f32 / 255.0, 0x15 as f32 / 255.0, 1.0],
-    grain_light: 0.017,
+    grain_light: 0.006, // MixLink 0.017
     grain_dark: 0.024,
-    top_highlight: 0.035,
+    top_highlight: 0.008, // MixLink 0.035
     bottom_shadow: 0.55,
 };
 pub const SIDEBAR_MAT: Material = Material {
     top: [0.130, 0.135, 0.130, 1.0],
     middle: [0.115, 0.120, 0.115, 1.0],
     bottom: [0.100, 0.105, 0.100, 1.0],
-    grain_light: 0.014,
+    grain_light: 0.005, // MixLink 0.014
     grain_dark: 0.016,
-    top_highlight: 0.04,
+    top_highlight: 0.010, // MixLink 0.04
     bottom_shadow: 0.50,
 };
 pub const RECESSED: Material = Material {
     top: [0.075, 0.078, 0.075, 1.0],
     middle: [0.065, 0.068, 0.065, 1.0],
     bottom: [0.055, 0.058, 0.055, 1.0],
-    grain_light: 0.010,
+    grain_light: 0.004, // MixLink 0.010
     grain_dark: 0.014,
-    top_highlight: 0.02,
+    top_highlight: 0.006, // MixLink 0.02
     bottom_shadow: 0.62,
 };
 
@@ -125,15 +128,16 @@ pub fn mixer_chassis(cmds: &mut Vec<DrawCmd>, rect: Rect, upper_height: f32) {
     fader_bay_inset_shadow(cmds, bay);
 }
 
-/// MixLink `MixerUpperPanelBackground`.
+/// MixLink `MixerUpperPanelBackground`. White stop alphas are lower than MixLink
+/// (0.048 / 0.022 / 0.02) so linear blending does not lift the 0.20 fill to gray.
 fn upper_faceplate(cmds: &mut Vec<DrawCmd>, rect: Rect) {
     fill(cmds, rect, [0.20, 0.20, 0.20, 1.0]);
     vert_stops(
         cmds,
         rect,
         &[
-            (0.00, [1.0, 1.0, 1.0, 0.048]),
-            (0.22, [1.0, 1.0, 1.0, 0.022]),
+            (0.00, [1.0, 1.0, 1.0, 0.016]),
+            (0.22, [1.0, 1.0, 1.0, 0.007]),
             (0.52, [0.0, 0.0, 0.0, 0.0]),
             (0.78, [0.0, 0.0, 0.0, 0.035]),
             (1.00, [0.0, 0.0, 0.0, 0.07]),
@@ -145,7 +149,7 @@ fn upper_faceplate(cmds: &mut Vec<DrawCmd>, rect: Rect) {
         &[
             (0.00, [0.0, 0.0, 0.0, 0.04]),
             (0.20, [0.0, 0.0, 0.0, 0.0]),
-            (0.50, [1.0, 1.0, 1.0, 0.02]),
+            (0.50, [1.0, 1.0, 1.0, 0.007]),
             (0.80, [0.0, 0.0, 0.0, 0.0]),
             (1.00, [0.0, 0.0, 0.0, 0.04]),
         ],
@@ -181,14 +185,16 @@ fn stacked_surface(cmds: &mut Vec<DrawCmd>, rect: Rect, mat: &Material, fader_ba
         top: [0.0, 0.0, 0.0, 0.0],
         bottom: [0.0, 0.0, 0.0, mat.bottom_shadow * 0.22],
     });
+    // MixLink diagonal is white 0.018 at topLeading only. A full-width 0.010
+    // white wash is extra heat in linear; keep a faint top sheen + the darken.
     cmds.push(DrawCmd::VertGradient {
         rect,
-        top: [1.0, 1.0, 1.0, 0.010],
+        top: [1.0, 1.0, 1.0, 0.003],
         bottom: [0.0, 0.0, 0.0, 0.0],
     });
     cmds.push(DrawCmd::HorzGradient {
         rect,
-        left: [1.0, 1.0, 1.0, 0.004],
+        left: [0.0, 0.0, 0.0, 0.0],
         right: [0.0, 0.0, 0.0, 0.06],
     });
 }
@@ -199,7 +205,7 @@ fn brushed_texture(cmds: &mut Vec<DrawCmd>, rect: Rect) {
     while local < rect.h {
         let f = grain_fraction(local);
         let use_light = f > 0.5;
-        let opacity = if use_light { 0.008 + f * 0.010 } else { 0.008 + f * 0.012 };
+        let opacity = if use_light { 0.003 + f * 0.003 } else { 0.008 + f * 0.012 };
         let color = if use_light { [1.0, 1.0, 1.0, opacity] } else { [0.0, 0.0, 0.0, opacity] };
         cmds.push(DrawCmd::Line {
             a: (rect.x, rect.y + local),
@@ -243,7 +249,7 @@ fn fader_bay_metal(cmds: &mut Vec<DrawCmd>, rect: Rect) {
         let (opacity, thickness, step) = if dark {
             (0.030 + fine * 0.018, 0.7, 2.2)
         } else {
-            (0.004 + fine * 0.008, 0.35, 1.15)
+            (0.002 + fine * 0.003, 0.35, 1.15)
         };
         let color = if dark { [0.0, 0.0, 0.0, opacity] } else { [1.0, 1.0, 1.0, opacity] };
         cmds.push(DrawCmd::Line {
@@ -397,7 +403,9 @@ pub fn faceplate_cell(cmds: &mut Vec<DrawCmd>, rect: Rect, last_send: bool, pan:
     }
 }
 
-/// MixLink `ChannelBayShading` on the fader + name + pads.
+/// MixLink `ChannelBayShading`: soft left/right black falloff on fader + name + pads.
+/// MixLink's extra white stop at 0.10 is omitted — `horz_stops` would start there
+/// and draw a 1px highlight left of the meter.
 pub fn channel_bay_shading(cmds: &mut Vec<DrawCmd>, rect: Rect) {
     horz_stops(
         cmds,
@@ -407,16 +415,6 @@ pub fn channel_bay_shading(cmds: &mut Vec<DrawCmd>, rect: Rect) {
             (0.09, [0.0, 0.0, 0.0, 0.0]),
             (0.87, [0.0, 0.0, 0.0, 0.0]),
             (1.00, [0.0, 0.0, 0.0, 0.13]),
-        ],
-    );
-    horz_stops(
-        cmds,
-        rect,
-        &[
-            (0.10, [1.0, 1.0, 1.0, 0.014]),
-            (0.18, [0.0, 0.0, 0.0, 0.0]),
-            (0.78, [0.0, 0.0, 0.0, 0.0]),
-            (0.92, [0.0, 0.0, 0.0, 0.025]),
         ],
     );
 }

@@ -232,10 +232,18 @@ impl Renderer {
         });
         let sf = self.effective_scale();
         let phys = (self.config.width, self.config.height);
+        // Prepare every layer before encoding any pass. Glyphon's prepare
+        // uploads vertices with `queue.write_buffer`; one renderer would let
+        // the overlay prepare overwrite sidebar vertices before the GPU ran
+        // the base text draw. Each layer has its own renderer, and preparing
+        // them all first also keeps the atlas bind group stable.
         for (i, layer) in packed.iter().enumerate() {
-            if let Err(e) = self.text.prepare(&self.device, &self.queue, phys, sf, &layer.texts) {
+            if let Err(e) = self.text.prepare(&self.device, &self.queue, phys, sf, &layer.texts, i)
+            {
                 log::error!("text prepare failed: {e:?}");
             }
+        }
+        for (i, layer) in packed.iter().enumerate() {
             let load = if i == 0 {
                 wgpu::LoadOp::Clear(self.clear_color)
             } else {
@@ -264,7 +272,7 @@ impl Renderer {
                     pass.set_vertex_buffer(0, self.images.vbo.slice(..));
                     pass.draw(layer.image_start..layer.image_start + layer.image_count, 0..1);
                 }
-                if let Err(e) = self.text.render_pass(&mut pass) {
+                if let Err(e) = self.text.render_pass(&mut pass, i) {
                     log::error!("text render failed: {e:?}");
                 }
             }
@@ -342,6 +350,59 @@ fn split_layers(scene: &[DrawCmd]) -> Vec<&[DrawCmd]> {
         out.push(scene);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_text(s: &str) -> DrawCmd {
+        DrawCmd::Text(TextCmd {
+            rect: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 200.0,
+                h: 18.0,
+            },
+            text: s.into(),
+            size: 12.0,
+            color: [1.0; 4],
+            h_align: Align::Start,
+            v_align: Align::Center,
+            bold: false,
+            monospaced: false,
+            clip: None,
+        })
+    }
+
+    #[test]
+    fn overlay_layer_keeps_sidebar_text_cmds() {
+        let mut scene = vec![dummy_text("Plugins"), dummy_text("SETTINGS"), DrawCmd::Layer];
+        for i in 0..16 {
+            scene.push(dummy_text(&format!(
+                "ADAT {}/{} - Analog Heat",
+                i * 2 + 1,
+                i * 2 + 2
+            )));
+        }
+        let layers = split_layers(&scene);
+        assert_eq!(layers.len(), 2);
+        let base: Vec<&str> = layers[0]
+            .iter()
+            .filter_map(|c| match c {
+                DrawCmd::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(base, ["Plugins", "SETTINGS"]);
+        assert_eq!(
+            layers[1]
+                .iter()
+                .filter(|c| matches!(c, DrawCmd::Text(_)))
+                .count(),
+            16
+        );
+    }
 }
 
 fn upload_vbo(

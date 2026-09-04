@@ -33,13 +33,30 @@ pub fn fader_cap(cmds: &mut Vec<DrawCmd>, rect: Rect) {
 const FACE_TOP: Color = [0x30 as f32 / 255.0, 0x31 as f32 / 255.0, 0x33 as f32 / 255.0, 1.0];
 const FACE_MID: Color = [0x24 as f32 / 255.0, 0x25 as f32 / 255.0, 0x27 as f32 / 255.0, 1.0];
 const FACE_BOT: Color = [0x19 as f32 / 255.0, 0x1A as f32 / 255.0, 0x1C as f32 / 255.0, 1.0];
+/// MixLink `HardwarePadStyle` uses `accent.opacity(0.46)` over metal. wgpu
+/// blends in linear after sRGB→linear, so 0.46 composites as a solid brick.
+/// 0.24 keeps MUTE red / SOLO green / BUS amber / Rec as a tint the grain
+/// still shows through.
+const LIT_PAD_WASH: f32 = 0.24;
+/// MixLink `Color.white.opacity(0.28)` face sheen, scaled the same way so the
+/// top does not linearize into an opaque orange-red slab.
+const LIT_PAD_SHEEN: f32 = 0.12;
+/// MixLink `HardwarePadStyle` `strokeBorder` is a TL→BR gradient
+/// (`white 0.18 / 0.08` off, `white 0.55` lit). MixLinkRs draws 1px bars and
+/// blends in linear, so those alphas read as a near-white rim. Use the
+/// MixLink inner-highlight look (white 0.045–0.08), ~⅓ of the MixLink stops.
+const PAD_BEVEL_TOP: f32 = 0.06; // MixLink 0.18
+const PAD_BEVEL_TOP_SUNKEN: f32 = 0.027; // MixLink 0.08
+const PAD_BEVEL_TOP_LIT: f32 = 0.18; // MixLink 0.55
+const PAD_BEVEL_LEFT: f32 = 0.045; // was 0.08
+const PAD_BEVEL_LEFT_LIT: f32 = 0.07; // was 0.22
 
 /// MixLink `HardwarePadStyle`: mounting well, 3-stop metal, bevel, drop shadow.
 pub fn hardware_pad(cmds: &mut Vec<DrawCmd>, rect: Rect, title: &str, on: bool, accent: Color) {
     pad_face(cmds, rect, on, accent);
     // MixLink off-state title is `Color.white.opacity(0.72)`. Accent is the face
-    // wash (`accent.opacity(0.46)`), not the glyph fill — full-accent type on that
-    // tint reads as red-on-red for MUTE / SOLO / BUS.
+    // wash (`LIT_PAD_WASH` over metal), not the glyph fill — full-accent type on
+    // that tint reads as red-on-red for MUTE / SOLO / BUS.
     let label = [1.0, 1.0, 1.0, 0.72];
     // MixLink `HardwareButton`: `.font(.system(size: 10.5, weight: .semibold))` + `uppercased()`.
     theme::text_center(cmds, rect, title.to_uppercase(), 10.5, label, true);
@@ -156,7 +173,7 @@ fn stroke_border(cmds: &mut Vec<DrawCmd>, rect: Rect, color: Color) {
 }
 
 fn pad_face(cmds: &mut Vec<DrawCmd>, rect: Rect, lit: bool, accent: Color) {
-    // Hardware SOLO/MUTE/BUS pads: MixLink lights the metal with `accent.opacity(0.46)`,
+    // Hardware SOLO/MUTE/BUS pads: MixLink lights the metal with an accent wash,
     // not a hard expanded halo. `enable_toggle` draws its own Gaussian chassis glow.
     pad_face_ex(cmds, rect, lit, accent, false);
 }
@@ -219,19 +236,32 @@ fn pad_face_ex(cmds: &mut Vec<DrawCmd>, rect: Rect, lit: bool, accent: Color, ge
     if lit {
         cmds.push(DrawCmd::RoundedRect {
             rect: face,
-            color: [accent[0], accent[1], accent[2], 0.46],
+            color: [accent[0], accent[1], accent[2], LIT_PAD_WASH],
             radius: r,
         });
+        // White→clear sheen (not white→accent): a full-face accent gradient is
+        // what linearized into the loud red slab.
         cmds.push(DrawCmd::VertGradient {
             rect: face,
-            top: [1.0, 1.0, 1.0, 0.28],
-            bottom: [accent[0], accent[1], accent[2], 0.0],
+            top: [1.0, 1.0, 1.0, LIT_PAD_SHEEN],
+            bottom: [1.0, 1.0, 1.0, 0.0],
         });
     }
     theme::fill(
         cmds,
         Rect { x: face.x, y: face.y, w: face.w, h: 1.0 },
-        if lit { [1.0, 1.0, 1.0, 0.55] } else { [1.0, 1.0, 1.0, if sunken { 0.08 } else { 0.18 }] },
+        [
+            1.0,
+            1.0,
+            1.0,
+            if lit {
+                PAD_BEVEL_TOP_LIT
+            } else if sunken {
+                PAD_BEVEL_TOP_SUNKEN
+            } else {
+                PAD_BEVEL_TOP
+            },
+        ],
     );
     theme::fill(
         cmds,
@@ -242,7 +272,11 @@ fn pad_face_ex(cmds: &mut Vec<DrawCmd>, rect: Rect, lit: bool, accent: Color, ge
             [0.0, 0.0, 0.0, if sunken { 0.38 } else { 0.58 }]
         },
     );
-    theme::fill(cmds, Rect { x: face.x, y: face.y, w: 1.0, h: face.h }, [1.0, 1.0, 1.0, if lit { 0.22 } else { 0.08 }]);
+    theme::fill(
+        cmds,
+        Rect { x: face.x, y: face.y, w: 1.0, h: face.h },
+        [1.0, 1.0, 1.0, if lit { PAD_BEVEL_LEFT_LIT } else { PAD_BEVEL_LEFT }],
+    );
     theme::fill(cmds, Rect { x: face.x + face.w - 1.0, y: face.y, w: 1.0, h: face.h }, [0.0, 0.0, 0.0, 0.40]);
 }
 
@@ -290,8 +324,8 @@ fn paint_send_knob(cmds: &mut Vec<DrawCmd>, cx: f32, cy: f32, d: f32, value: f32
 
     let track_r = (d - 1.0) * 0.5;
     stroke_arc(cmds, cx, cy, track_r, 120.0, 300.0, [0.0, 0.0, 0.0, 0.85], 3.2);
-    let glow = [ring[0], ring[1], ring[2], 0.28];
-    stroke_arc(cmds, cx, cy, track_r, 120.0, 300.0, glow, 3.8);
+    // MixLink: 2pt `ringColor` stroke + `.shadow(color: ringColor.opacity(0.24), radius: 0.9)`.
+    gaussian_arc_shadow(cmds, cx, cy, track_r, 120.0, 300.0, ring, 0.24, 0.9, 2.0);
     stroke_arc(cmds, cx, cy, track_r, 120.0, 300.0, ring, 2.0);
 
     let body_d = (d - 6.0).max(8.0);
@@ -308,7 +342,8 @@ fn paint_send_knob(cmds: &mut Vec<DrawCmd>, cx: f32, cy: f32, d: f32, value: f32
     pointer(cmds, cx, cy, value, 13.0, body_d * 0.18, 2.0, theme::POINTER);
 }
 
-/// MixLink `PanKnobFace` plus the same `hardwareElevation` as send knobs.
+/// MixLink `PanKnobFace` — black well, silver rim, white pointer, no dB label.
+/// Disc contact shadow matches send: `hardwareElevation(diameter: size + 4)`.
 fn paint_pan_knob(cmds: &mut Vec<DrawCmd>, cx: f32, cy: f32, d: f32, value: f32) {
     hardware_elevation(cmds, cx, cy, d + 4.0);
     disc(cmds, cx, cy, d, [0.0, 0.0, 0.0, 0.90]);
@@ -355,14 +390,19 @@ fn gray(v: f32, a: f32) -> Color {
     [v, v, v, a]
 }
 
-/// MixLink `hardwareElevation`: SwiftUI-like blurred drop, not a hard disc.
+/// MixLink `hardwareElevation(diameter:)` on send and pan disc wells (`size + 4`):
+/// `.shadow(color: .black.opacity(0.75), radius: 2, x: 1, y: 2)`
+/// `.shadow(color: .black.opacity(0.32), radius: drop * 0.42, x: drop * 0.14, y: drop * 0.58)`
+/// where `drop = diameter * 0.5`. Pan uses this body drop only — no send ring glow.
 fn hardware_elevation(cmds: &mut Vec<DrawCmd>, cx: f32, cy: f32, diameter: f32) {
     let drop = diameter * 0.5;
-    soft_disc_shadow(cmds, cx, cy, diameter, 0.32, drop * 0.42, drop * 0.14, drop * 0.58);
-    soft_disc_shadow(cmds, cx, cy, diameter, 0.75, 2.5, 1.0, 2.0);
+    gaussian_disc_shadow(cmds, cx, cy, diameter, 0.32, drop * 0.42, drop * 0.14, drop * 0.58);
+    gaussian_disc_shadow(cmds, cx, cy, diameter, 0.75, 2.0, 1.0, 2.0);
 }
 
-fn soft_disc_shadow(
+/// MixLink SwiftUI `.shadow(color: .black.opacity, radius, x, y)` on a disc.
+/// Incremental Gaussian (same SDF rings as pads), not stacked neon silhouettes.
+fn gaussian_disc_shadow(
     cmds: &mut Vec<DrawCmd>,
     cx: f32,
     cy: f32,
@@ -372,12 +412,69 @@ fn soft_disc_shadow(
     ox: f32,
     oy: f32,
 ) {
-    let rings = 10;
-    for i in (1..=rings).rev() {
-        let t = i as f32 / rings as f32;
-        let d = diameter + blur * 2.0 * t;
-        let a = opacity * (-3.2 * t * t).exp() * 0.16;
-        disc(cmds, cx + ox, cy + oy, d, [0.0, 0.0, 0.0, a]);
+    let d = diameter.max(1.0);
+    sdf_shadow_rings(
+        cmds,
+        Rect { x: cx - d * 0.5, y: cy - d * 0.5, w: d, h: d },
+        [0.0, 0.0, 0.0, 1.0],
+        opacity,
+        blur,
+        ox,
+        oy,
+        d * 0.5,
+        true,
+        false,
+    );
+}
+
+/// MixLink send-ring `.shadow(color: ring.opacity, radius)` on a 2pt stroke.
+fn gaussian_arc_shadow(
+    cmds: &mut Vec<DrawCmd>,
+    cx: f32,
+    cy: f32,
+    r: f32,
+    start_deg: f32,
+    sweep_deg: f32,
+    color: Color,
+    opacity: f32,
+    blur: f32,
+    stroke_w: f32,
+) {
+    let sigma = blur.max(0.05);
+    let inner = -2.0 * sigma;
+    let outer = 3.0 * sigma;
+    const RINGS: i32 = 20;
+    let profile = |d: f32| opacity * 0.5 * (1.0 - (d / (sigma * std::f32::consts::SQRT_2)).tanh());
+    for i in (0..=RINGS).rev() {
+        let t = i as f32 / RINGS as f32;
+        let d = inner + (outer - inner) * t;
+        if d < 0.0 {
+            continue;
+        }
+        let g = profile(d);
+        let g_out = if i == RINGS {
+            0.0
+        } else {
+            let t_out = (i + 1) as f32 / RINGS as f32;
+            profile(inner + (outer - inner) * t_out)
+        };
+        if g_out >= 0.999 {
+            continue;
+        }
+        let a = ((g - g_out) / (1.0 - g_out)).max(0.0);
+        if a < 0.003 {
+            continue;
+        }
+        stroke_arc(
+            cmds,
+            cx,
+            cy,
+            r,
+            start_deg,
+            sweep_deg,
+            [color[0], color[1], color[2], a],
+            (stroke_w + d * 2.0).max(0.5),
+        );
     }
 }
 
@@ -395,7 +492,7 @@ fn soft_rect_shadow(
     oy: f32,
     corner: f32,
 ) {
-    sdf_shadow_rings(cmds, rect, [0.0, 0.0, 0.0, 1.0], opacity, blur, ox, oy, corner, false);
+    sdf_shadow_rings(cmds, rect, [0.0, 0.0, 0.0, 1.0], opacity, blur, ox, oy, corner, false, false);
 }
 
 /// SwiftUI `.shadow(color: tint.opacity, radius)` with no offset.
@@ -404,7 +501,7 @@ fn soft_rect_shadow(
 /// of the Gaussian (not the absolute profile). Stacking the absolute profile
 /// in a bright tint reads as a neon plate; the increment stays a chassis haze.
 fn gaussian_tint_shadow(cmds: &mut Vec<DrawCmd>, rect: Rect, color: Color, opacity: f32, blur: f32, corner: f32) {
-    sdf_shadow_rings(cmds, rect, color, opacity, blur, 0.0, 0.0, corner, true);
+    sdf_shadow_rings(cmds, rect, color, opacity, blur, 0.0, 0.0, corner, true, true);
 }
 
 fn sdf_shadow_rings(
@@ -417,6 +514,7 @@ fn sdf_shadow_rings(
     oy: f32,
     corner: f32,
     glow: bool,
+    skip_umbra: bool,
 ) {
     let sigma = blur.max(0.05);
     let inner = -2.0 * sigma;
@@ -427,9 +525,9 @@ fn sdf_shadow_rings(
         let t = i as f32 / RINGS as f32;
         let d = inner + (outer - inner) * t;
         let a = if glow {
-            // Umbra sits under the pad. Drawing it would leak through the
-            // 78%-opaque well and paint a second green rectangle.
-            if d < 0.0 {
+            // Pad tints skip the umbra so it does not leak through a translucent well.
+            // Opaque knobs keep it: the offset crescent is the drop-shadow silhouette.
+            if skip_umbra && d < 0.0 {
                 continue;
             }
             let g = profile(d);
@@ -536,26 +634,118 @@ pub fn checkbox(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, on: bool, label: &str) 
     theme::text(cmds, Rect { x: x + 18.0, y: y - 1.0, w: 110.0, h: 16.0 }, label, 9.0, theme::TEXT_DIM, false);
 }
 
-pub fn menu_label(cmds: &mut Vec<DrawCmd>, rect: Rect, text: &str) {
-    recessed_field(cmds, rect);
+/// MixLink closed sidebar picker (`ChannelPicker` / `MenuLabel` as it paints on
+/// a hardware module): `chevron.up.chevron.down` + value on the card, no second
+/// recessed well and no diamond. MixLink Swift still wraps `MenuLabel` in a
+/// recessed surface; on the card that well disappears — MixLinkRs draws the
+/// screenshot: flat type, MixLink `.padding(.vertical, 5) .padding(.horizontal, 6)`.
+#[derive(Clone, Copy)]
+pub struct ChannelPickerStyle {
+    pub size: f32,
+    pub color: Color,
+    /// Pack the chevron+text cluster to the trailing edge (plugin 3/4).
+    pub trailing: bool,
+}
+
+impl ChannelPickerStyle {
+    /// Heat Output/Input, Mix Out, Audio Device, Projects folder — white, a
+    /// point larger than the 11pt `textDim` field label.
+    pub fn value() -> Self {
+        Self { size: 12.0, color: theme::PRIMARY_TEXT, trailing: false }
+    }
+
+    /// MixLink `MenuLabel` 11 medium `MixerTheme.primaryText` — plugin bundle
+    /// reads as regular light gray under the bold slot title.
+    pub fn plugin() -> Self {
+        Self { size: 11.0, color: theme::TEXT, trailing: false }
+    }
+
+    /// PluginSlotView footer: `HStack` + `ChannelPicker(title: nil)` trailing.
+    pub fn playback() -> Self {
+        Self { size: 11.0, color: theme::PRIMARY_TEXT, trailing: true }
+    }
+}
+
+pub fn channel_picker(cmds: &mut Vec<DrawCmd>, rect: Rect, text: &str, style: ChannelPickerStyle) {
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
     // MixLink MenuLabel: `.padding(.vertical, 5) .padding(.horizontal, 6)`,
-    // 11 medium `MixerTheme.primaryText`, `chevron.up.chevron.down`.
+    // `HStack(spacing: 3)`. Screenshot Heat/EffectRack: leading chevron, not
+    // the Swift `Text` then trailing symbol order.
+    const PAD_X: f32 = 6.0;
+    const GAP: f32 = 3.0;
+    const CHEVRON_W: f32 = 8.0;
+    let text_w = approx_ui_advance(text, style.size);
+    let cluster = CHEVRON_W + GAP + text_w;
+    let inner = (rect.w - PAD_X * 2.0).max(0.0);
+    let x0 = if style.trailing {
+        rect.x + PAD_X + (inner - cluster).max(0.0)
+    } else {
+        rect.x + PAD_X
+    };
+    let chevron_box = Rect { x: x0, y: rect.y, w: CHEVRON_W, h: rect.h };
+    chevron_up_chevron_down(cmds, chevron_box, style.color);
+    let label_x = x0 + CHEVRON_W + GAP;
+    let label_w = if style.trailing {
+        text_w.max(1.0)
+    } else {
+        (rect.x + rect.w - PAD_X - label_x).max(0.0)
+    };
     theme::text(
         cmds,
-        Rect { x: rect.x + 6.0, y: rect.y, w: (rect.w - 22.0).max(0.0), h: rect.h },
+        Rect { x: label_x, y: rect.y, w: label_w, h: rect.h },
         text,
-        11.0,
-        theme::PRIMARY_TEXT,
+        style.size,
+        style.color,
         false,
     );
-    theme::text(
-        cmds,
-        Rect { x: rect.x + rect.w - 16.0, y: rect.y, w: 12.0, h: rect.h },
-        "↕",
-        8.0,
-        theme::PRIMARY_TEXT,
-        false,
-    );
+}
+
+/// Sidebar pickers use [`channel_picker`]; kept so other agents can call the
+/// old name. No recessed well.
+pub fn menu_label(cmds: &mut Vec<DrawCmd>, rect: Rect, text: &str) {
+    channel_picker(cmds, rect, text, ChannelPickerStyle::value());
+}
+
+/// MixLink `Image(systemName: "chevron.up.chevron.down")` ~11pt semibold.
+fn chevron_up_chevron_down(cmds: &mut Vec<DrawCmd>, rect: Rect, color: Color) {
+    let cx = rect.x + rect.w * 0.5;
+    let cy = rect.y + rect.h * 0.5;
+    let w = 5.2;
+    let h = 2.6;
+    let gap = 1.4;
+    let up_cy = cy - (h + gap) * 0.5;
+    let dn_cy = cy + (h + gap) * 0.5;
+    let stroke = 1.15;
+    chevron_arm(cmds, cx, up_cy, w, h, true, color, stroke);
+    chevron_arm(cmds, cx, dn_cy, w, h, false, color, stroke);
+}
+
+fn chevron_arm(
+    cmds: &mut Vec<DrawCmd>,
+    cx: f32,
+    cy: f32,
+    w: f32,
+    h: f32,
+    up: bool,
+    color: Color,
+    thickness: f32,
+) {
+    let peak_y = if up { cy - h * 0.5 } else { cy + h * 0.5 };
+    let base_y = if up { cy + h * 0.5 } else { cy - h * 0.5 };
+    cmds.push(DrawCmd::Line {
+        a: (cx - w * 0.5, base_y),
+        b: (cx, peak_y),
+        color,
+        thickness,
+    });
+    cmds.push(DrawCmd::Line {
+        a: (cx, peak_y),
+        b: (cx + w * 0.5, base_y),
+        color,
+        thickness,
+    });
 }
 
 /// MixLink `StripNameLabel` — diamond + text on the fader bay, bottom hairline.
@@ -587,23 +777,56 @@ pub fn strip_name_label(cmds: &mut Vec<DrawCmd>, rect: Rect, text: &str, style: 
         theme::SECONDARY_TEXT
     };
     let font = 11.5;
-    let text_w = (text.chars().count() as f32 * font * 0.56).clamp(8.0, (rect.w - 18.0).max(8.0));
+    // MixLink `StripNameLabel` is an HStack (diamond + text) with
+    // `.frame(maxWidth: .infinity)` — the pair is centered as a group.
+    // Main is Text only, still centered. Layout height is one line (~17pt)
+    // so cosmic-text cannot wrap inside the 42pt NAME_ROW.
+    let line_h = 17.0;
+    let text_y = rect.y + (rect.h - line_h) * 0.5;
     let dia = 6.5;
     let gap = 4.0;
-    let cluster = if style.diamond { dia + gap + text_w } else { text_w };
-    let x0 = rect.x + (rect.w - cluster) * 0.5;
+    // MixLink nameSlot `.padding(.horizontal, 2)`.
+    let pad = 2.0;
+    let inner_w = (rect.w - pad * 2.0).max(0.0);
+    let (group_x, text_w) = strip_name_group(inner_w, text, style.diamond);
+    let x0 = rect.x + pad + group_x;
     if style.diamond {
         hollow_diamond(cmds, x0 + dia * 0.5, rect.y + rect.h * 0.5, dia, gem);
         theme::text(
             cmds,
-            Rect { x: x0 + dia + gap, y: rect.y, w: text_w, h: rect.h },
+            Rect { x: x0 + dia + gap, y: text_y, w: text_w, h: line_h },
             text,
             font,
             label,
             false,
         );
     } else {
-        theme::text_center(cmds, rect, text, font, label, false);
+        theme::text(
+            cmds,
+            Rect { x: x0, y: text_y, w: text_w, h: line_h },
+            text,
+            font,
+            label,
+            false,
+        );
+    }
+}
+
+/// Origin of the diamond+text (or Main text) block inside the padded name row,
+/// plus the text box width. Short names sit as a centered group; long names
+/// fill the row and truncate.
+fn strip_name_group(inner_w: f32, text: &str, diamond: bool) -> (f32, f32) {
+    const FONT: f32 = 11.5;
+    const DIA: f32 = 6.5;
+    const GAP: f32 = 4.0;
+    let measured = approx_ui_advance(text, FONT);
+    if diamond {
+        let text_w = measured.min((inner_w - DIA - GAP).max(0.0)).max(1.0);
+        let cluster = DIA + GAP + text_w;
+        (((inner_w - cluster) * 0.5).max(0.0), text_w)
+    } else {
+        let text_w = measured.min(inner_w).max(1.0);
+        (((inner_w - text_w) * 0.5).max(0.0), text_w)
     }
 }
 
@@ -811,6 +1034,36 @@ pub fn menu_height(items: &[MenuItem]) -> f32 {
     h
 }
 
+/// Width needed to draw labels without clipping, including the check column.
+pub fn menu_content_width(items: &[MenuItem]) -> f32 {
+    const LABEL_SIZE: f32 = 13.0;
+    const SECTION_SIZE: f32 = 11.0;
+    const PAD_RIGHT: f32 = 12.0;
+    let mut inner = 0.0_f32;
+    for item in items {
+        if let Some(sec) = item.section.as_deref() {
+            inner = inner.max(approx_ui_advance(sec, SECTION_SIZE));
+        }
+        inner = inner.max(approx_ui_advance(&item.label, LABEL_SIZE));
+    }
+    MENU_LABEL_X + inner + PAD_RIGHT
+}
+
+/// Slightly wide vs SF Pro so a menu is never sized to a short glyph run
+/// ("Digifa") when the sidebar field is already ~230pt.
+fn approx_ui_advance(s: &str, size: f32) -> f32 {
+    s.chars()
+        .map(|ch| {
+            size
+                * match ch {
+                    ' ' | '.' | ',' | ':' | ';' | 'i' | 'l' | 'I' | 'j' | 't' | 'f' | '\'' => 0.30,
+                    'm' | 'M' | 'w' | 'W' => 0.90,
+                    _ => 0.62,
+                }
+        })
+        .sum()
+}
+
 /// AppKit menu window shadow: ambient `black.opacity(0.45), radius 20, y 8`
 /// plus a short contact drop. Radius follows the 9pt panel.
 fn menu_drop_shadow(cmds: &mut Vec<DrawCmd>, rect: Rect) {
@@ -955,5 +1208,21 @@ pub fn decibel_scale(cmds: &mut Vec<DrawCmd>, x: f32, top: f32, h: f32, placemen
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_name_group_centers_short_names() {
+        let inner = 100.0 - 4.0;
+        let (x_emu, w_emu) = strip_name_group(inner, "EMU", true);
+        let (x_main, w_main) = strip_name_group(inner, "Main", false);
+        assert!(x_emu > 20.0, "diamond+EMU should sit inward, x={x_emu}");
+        assert!(x_main > 20.0, "Main should sit inward, x={x_main}");
+        assert!(x_emu + 6.5 + 4.0 + w_emu < inner);
+        assert!((x_main - (inner - w_main) * 0.5).abs() < 0.01);
     }
 }

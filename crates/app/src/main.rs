@@ -20,7 +20,7 @@ use render::Rect;
 use ui_mixlink::arrangement::ArrangementLayout;
 use ui_mixlink::chrome::{self, ChromeHit, ChromeState, Page, HEADER_H};
 use ui_mixlink::hit::{self, Hit, Pad};
-use ui_mixlink::mixer::{MixerExtraHit, MixerLayout, StripKind};
+use ui_mixlink::mixer::{self, MixerExtraHit, MixerLayout, StripKind};
 use ui_mixlink::overlay::{self, MenuAction, Overlay, TextFocus};
 use ui_mixlink::sidebar::{self, SidebarHit};
 use ui_mixlink::theme::Layout;
@@ -29,7 +29,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 mod alloc;
@@ -92,6 +92,8 @@ struct AppState {
     mixer_scroll: f32,
     sidebar_scroll: f32,
     overlay: Option<Overlay>,
+    channels: Option<ChannelsWindow>,
+    modifiers: ModifiersState,
     text_focus: TextFocus,
     caret_on: bool,
     caret_at: Instant,
@@ -102,6 +104,14 @@ struct AppState {
     plugin_refs: HashMap<i32, vst3_host::MixLinkVST3Ref>,
     insert_refs: HashMap<uuid::Uuid, vst3_host::MixLinkVST3Ref>,
     take_number: i32,
+}
+
+/// MixLink `Window("Channels")` — dedicated wgpu window, not a mixer overlay.
+struct ChannelsWindow {
+    renderer: render::Renderer,
+    window: Arc<Window>,
+    cursor: (f32, f32),
+    scroll: f32,
 }
 
 enum MidiIo {
@@ -257,6 +267,8 @@ impl ApplicationHandler for App {
             mixer_scroll: 0.0,
             sidebar_scroll: 0.0,
             overlay: None,
+            channels: None,
+            modifiers: ModifiersState::empty(),
             text_focus: TextFocus::None,
             caret_on: true,
             caret_at: Instant::now(),
@@ -275,9 +287,17 @@ impl ApplicationHandler for App {
         self.state.as_ref().unwrap().window.request_redraw();
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         let Some(state) = self.state.as_mut() else { return };
+        let is_channels = state.channels.as_ref().is_some_and(|c| c.window.id() == id);
+        let is_main = id == state.window.id();
+        if !is_main && !is_channels {
+            return;
+        }
         match event {
+            WindowEvent::CloseRequested if is_channels => {
+                close_channels(state);
+            }
             WindowEvent::CloseRequested => {
                 state.analog.config.save();
                 for slot in 0..vst3_host::SLOT_COUNT {
@@ -285,9 +305,21 @@ impl ApplicationHandler for App {
                 }
                 event_loop.exit();
             }
+            WindowEvent::Resized(size) if is_channels => {
+                if let Some(ch) = &mut state.channels {
+                    ch.renderer.resize(size.width, size.height);
+                    ch.window.request_redraw();
+                }
+            }
             WindowEvent::Resized(size) => {
                 state.renderer.resize(size.width, size.height);
                 state.window.request_redraw();
+            }
+            WindowEvent::CursorMoved { position, .. } if is_channels => {
+                if let Some(ch) = &mut state.channels {
+                    let s = ch.renderer.effective_scale();
+                    ch.cursor = (position.x as f32 / s, position.y as f32 / s);
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let s = state.renderer.effective_scale();
@@ -297,22 +329,50 @@ impl ApplicationHandler for App {
                 apply_drag(state, x, y);
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                let scale = if is_channels {
+                    state
+                        .channels
+                        .as_ref()
+                        .map(|c| c.renderer.effective_scale())
+                        .unwrap_or(1.0)
+                } else {
+                    state.renderer.effective_scale()
+                };
                 let (dx, dy) = match delta {
-                    MouseScrollDelta::PixelDelta(p) => {
-                        let s = state.renderer.effective_scale();
-                        (p.x as f32 / s, p.y as f32 / s)
-                    }
+                    MouseScrollDelta::PixelDelta(p) => (p.x as f32 / scale, p.y as f32 / scale),
                     MouseScrollDelta::LineDelta(x, y) => (x * 40.0, y * 40.0),
                 };
-                on_wheel(state, dx, dy);
+                if is_channels {
+                    on_channels_wheel(state, dy);
+                } else {
+                    on_wheel(state, dx, dy);
+                }
+            }
+            WindowEvent::MouseInput { state: st, button: MouseButton::Left, .. } if is_channels => {
+                if st == ElementState::Pressed {
+                    on_channels_press(state);
+                }
             }
             WindowEvent::MouseInput { state: st, button: MouseButton::Left, .. } => match st {
-                ElementState::Pressed => on_press(state),
+                ElementState::Pressed => on_press(state, event_loop),
                 ElementState::Released => on_release(state),
             },
-            WindowEvent::MouseInput { state: st, button: MouseButton::Right, .. } => {
+            WindowEvent::MouseInput { state: st, button: MouseButton::Right, .. } if is_main => {
                 if st == ElementState::Pressed {
                     log::info!("context menu at {:?}", state.cursor);
+                }
+            }
+            WindowEvent::Focused(true) if is_main => {
+                if matches!(state.text_focus, TextFocus::GearAlias(_)) {
+                    state.text_focus = TextFocus::None;
+                }
+            }
+            WindowEvent::ModifiersChanged(mods) => {
+                state.modifiers = mods.state();
+            }
+            WindowEvent::KeyboardInput { event, .. } if is_channels => {
+                if event.state == ElementState::Pressed {
+                    on_channels_key(state, &event.logical_key);
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -323,6 +383,7 @@ impl ApplicationHandler for App {
                     return;
                 }
                 match event.logical_key {
+                    Key::Named(NamedKey::Tab) => cycle_page(state, state.modifiers.shift_key()),
                     Key::Named(NamedKey::Space) if state.page == Page::Mix => toggle_play(state),
                     Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace) if state.page == Page::Mix => {
                         delete_clips(state);
@@ -339,9 +400,15 @@ impl ApplicationHandler for App {
                     _ => {}
                 }
             }
+            WindowEvent::RedrawRequested if is_channels => {
+                paint_channels_window(state);
+            }
             WindowEvent::RedrawRequested => {
                 tick(state);
                 paint(state);
+                if let Some(ch) = &state.channels {
+                    ch.window.request_redraw();
+                }
                 state.window.request_redraw();
             }
             _ => {}
@@ -523,6 +590,14 @@ fn toggle_play(state: &mut AppState) {
     }
 }
 
+/// MixLinkRs: Tab swaps `Page::Record` ↔ `Page::Mix` (sidebar RECORD/MIX). MixLink has no Tab binding.
+fn cycle_page(state: &mut AppState, _reverse: bool) {
+    state.page = match state.page {
+        Page::Record => Page::Mix,
+        Page::Mix => Page::Record,
+    };
+}
+
 fn delete_clips(state: &mut AppState) {
     let ids = state.selected_clips.clone();
     if let Some(mut mix) = state.mix.take() {
@@ -587,7 +662,7 @@ fn hit_body(state: &AppState, x: f32, y: f32) -> Option<Hit> {
     }
 }
 
-fn on_press(state: &mut AppState) {
+fn on_press(state: &mut AppState, event_loop: &ActiveEventLoop) {
     let (x, y) = state.cursor;
     let (w, h) = state.renderer.logical_size();
 
@@ -612,8 +687,13 @@ fn on_press(state: &mut AppState) {
         return;
     }
 
-    if let Some(hit) = sidebar::hit(&state.sidebar_hits, x, y) {
-        handle_sidebar(state, hit, x, y);
+    if let Some((rect, hit)) = state
+        .sidebar_hits
+        .iter()
+        .rev()
+        .find(|(r, _)| overlay::contains(*r, x, y))
+    {
+        handle_sidebar(state, hit.clone(), *rect, event_loop);
         return;
     }
 
@@ -1246,17 +1326,15 @@ fn paint(state: &mut AppState) {
         match overlay {
             Overlay::Menu { .. } => {
                 let hover = match overlay {
-                    Overlay::Menu { rect, items, .. } => overlay::menu_at(*rect, items, state.cursor.1),
+                    Overlay::Menu { rect, items, .. } => {
+                        overlay::menu_at(*rect, items, state.cursor.0, state.cursor.1)
+                    }
                     _ => None,
                 };
                 scene.extend(overlay::paint_menu(overlay, hover));
             }
             Overlay::Settings => {
                 let (cmds, _) = overlay::paint_settings(&state.analog, w, h, &state.text_focus, state.caret_on);
-                scene.extend(cmds);
-            }
-            Overlay::Channels => {
-                let (cmds, _) = overlay::paint_channels(&state.analog, w, h, &state.text_focus, state.caret_on);
                 scene.extend(cmds);
             }
         }
@@ -1268,7 +1346,7 @@ fn handle_overlay_press(state: &mut AppState, overlay: &Overlay, x: f32, y: f32,
     match overlay {
         Overlay::Menu { rect, items, action } => {
             if overlay::contains(*rect, x, y) {
-                if let Some(i) = overlay::menu_at(*rect, items, y) {
+                if let Some(i) = overlay::menu_at(*rect, items, x, y) {
                     if let Some(item) = items.get(i).cloned() {
                         apply_menu(state, action.clone(), &item);
                     }
@@ -1303,25 +1381,127 @@ fn handle_overlay_press(state: &mut AppState, overlay: &Overlay, x: f32, y: f32,
             }
             true
         }
-        Overlay::Channels => {
-            let body_w = (w - Layout::SIDEBAR_WIDTH - 48.0).min(720.0);
-            let panel = Rect { x: 24.0, y: 48.0, w: body_w, h: h - 96.0 };
-            if !overlay::contains(panel, x, y) {
-                state.overlay = None;
-                state.text_focus = TextFocus::None;
-                return true;
-            }
-            let (_, fields) = overlay::paint_channels(&state.analog, w, h, &state.text_focus, false);
-            if let Some((_, id)) = fields.into_iter().find(|(r, _)| overlay::contains(*r, x, y)) {
-                state.text_focus = TextFocus::GearAlias(id);
-            }
-            true
-        }
     }
 }
 
-fn handle_sidebar(state: &mut AppState, hit: SidebarHit, x: f32, y: f32) {
-    let anchor = Rect { x: x - 20.0, y, w: 220.0, h: 22.0 };
+fn open_or_focus_channels(state: &mut AppState, event_loop: &ActiveEventLoop) {
+    if let Some(ch) = &state.channels {
+        ch.window.set_minimized(false);
+        ch.window.focus_window();
+        ch.window.request_redraw();
+        return;
+    }
+    let window = match event_loop.create_window(
+        Window::default_attributes()
+            .with_title("Channels")
+            .with_inner_size(LogicalSize::new(
+                overlay::CHANNELS_WINDOW_W,
+                overlay::CHANNELS_WINDOW_H,
+            ))
+            .with_min_inner_size(LogicalSize::new(
+                overlay::CHANNELS_WINDOW_W,
+                overlay::CHANNELS_WINDOW_H,
+            )),
+    ) {
+        Ok(w) => Arc::new(w),
+        Err(e) => {
+            log::error!("channels window: {e}");
+            return;
+        }
+    };
+    let zoom = state.renderer.ui_zoom();
+    let mut renderer = pollster::block_on(render::Renderer::new(window.clone()));
+    renderer.set_ui_zoom(zoom);
+    window.focus_window();
+    window.request_redraw();
+    state.channels = Some(ChannelsWindow {
+        renderer,
+        window,
+        cursor: (0.0, 0.0),
+        scroll: 0.0,
+    });
+    state.text_focus = TextFocus::None;
+}
+
+fn close_channels(state: &mut AppState) {
+    if matches!(state.text_focus, TextFocus::GearAlias(_)) {
+        state.text_focus = TextFocus::None;
+    }
+    state.channels = None;
+}
+
+fn paint_channels_window(state: &mut AppState) {
+    let (cmds, scroll) = {
+        let Some(ch) = state.channels.as_ref() else { return };
+        let (w, h) = ch.renderer.logical_size();
+        let max = overlay::channels_max_scroll(&state.analog, h);
+        let scroll = ch.scroll.min(max);
+        let (cmds, _) = overlay::paint_channels(
+            &state.analog,
+            w,
+            h,
+            &state.text_focus,
+            state.caret_on,
+            scroll,
+        );
+        (cmds, scroll)
+    };
+    let Some(ch) = state.channels.as_mut() else { return };
+    ch.scroll = scroll;
+    if let Err(e) = ch.renderer.render_scene(&cmds) {
+        log::error!("channels render: {e}");
+    }
+}
+
+fn on_channels_press(state: &mut AppState) {
+    let (x, y, w, h, scroll) = {
+        let Some(ch) = state.channels.as_ref() else { return };
+        let (w, h) = ch.renderer.logical_size();
+        (ch.cursor.0, ch.cursor.1, w, h, ch.scroll)
+    };
+    let (_, fields) = overlay::paint_channels(&state.analog, w, h, &state.text_focus, false, scroll);
+    if let Some((_, id)) = fields.into_iter().find(|(r, _)| overlay::contains(*r, x, y)) {
+        state.text_focus = TextFocus::GearAlias(id);
+    } else if matches!(state.text_focus, TextFocus::GearAlias(_)) {
+        state.text_focus = TextFocus::None;
+    }
+}
+
+fn on_channels_wheel(state: &mut AppState, dy: f32) {
+    let h = match state.channels.as_ref() {
+        Some(ch) => ch.renderer.logical_size().1,
+        None => return,
+    };
+    let max = overlay::channels_max_scroll(&state.analog, h);
+    if let Some(ch) = state.channels.as_mut() {
+        ch.scroll = (ch.scroll - dy).clamp(0.0, max);
+    }
+}
+
+fn on_channels_key(state: &mut AppState, key: &Key) {
+    if matches!(key, Key::Named(NamedKey::Escape)) {
+        if matches!(state.text_focus, TextFocus::GearAlias(_)) {
+            state.text_focus = TextFocus::None;
+        }
+        return;
+    }
+    if !matches!(state.text_focus, TextFocus::GearAlias(_)) {
+        return;
+    }
+    match key {
+        Key::Named(NamedKey::Enter) => commit_focus(state),
+        Key::Named(NamedKey::Backspace) => edit_focus(state, |s| {
+            s.pop();
+        }),
+        Key::Character(c) if c.chars().all(|ch| !ch.is_control()) => {
+            let add = c.to_string();
+            edit_focus(state, |s| s.push_str(&add));
+        }
+        _ => {}
+    }
+}
+
+fn handle_sidebar(state: &mut AppState, hit: SidebarHit, anchor: Rect, event_loop: &ActiveEventLoop) {
     match hit {
         SidebarHit::Page(p) => state.page = p,
         SidebarHit::AddHardware => state.analog.add_hardware_effect(),
@@ -1375,10 +1555,7 @@ fn handle_sidebar(state: &mut AppState, hit: SidebarHit, x: f32, y: f32) {
         SidebarHit::MixOut => open_output_menu(state, MenuAction::MixOut, anchor),
         SidebarHit::AudioDevice => open_device_menu(state, anchor),
         SidebarHit::AudioBuffer => open_buffer_menu(state, anchor),
-        SidebarHit::Channels => {
-            state.overlay = Some(Overlay::Channels);
-            state.text_focus = TextFocus::None;
-        }
+        SidebarHit::Channels => open_or_focus_channels(state, event_loop),
         SidebarHit::Settings => {
             state.overlay = Some(Overlay::Settings);
             state.text_focus = TextFocus::None;
@@ -1421,9 +1598,28 @@ fn handle_sidebar(state: &mut AppState, hit: SidebarHit, x: f32, y: f32) {
     }
 }
 
-fn open_name_menu(state: &mut AppState, kind: StripKind, x: f32, y: f32) {
+fn place_menu(state: &mut AppState, anchor: Rect, items: Vec<MenuItem>, action: MenuAction) {
     let (w, h) = state.renderer.logical_size();
-    let anchor = Rect { x: x - 40.0, y, w: 200.0, h: 18.0 };
+    let rect = overlay::layout_popup(anchor, &items, w, h);
+    state.overlay = Some(Overlay::Menu { rect, items, action });
+}
+
+fn name_row_anchor(state: &AppState, kind: StripKind) -> Rect {
+    let (bx, by, bw, bh) = body_rect(state);
+    let send_count = state.analog.config.effect_return_count as usize;
+    let layout = MixerLayout::new(bx, by, bw, bh, send_count);
+    let (sx, sw) = mixer::strip_frame(&layout, send_count, kind);
+    let (bay_y, bay_h) = mixer::fader_bay_frame(&layout, send_count);
+    Rect {
+        x: sx,
+        y: bay_y + bay_h,
+        w: sw,
+        h: Layout::NAME_ROW,
+    }
+}
+
+fn open_name_menu(state: &mut AppState, kind: StripKind, _x: f32, _y: f32) {
+    let anchor = name_row_anchor(state, kind);
     match kind {
         StripKind::Input(i) => {
             let current = state.analog.config.strips.get(i).map(|s| s.channel_id().index);
@@ -1439,10 +1635,11 @@ fn open_name_menu(state: &mut AppState, kind: StripKind, x: f32, y: f32) {
                     section: None,
                 })
                 .collect();
-            let rect = overlay::layout_popup(anchor, &items, h.min(w));
-            state.overlay = Some(Overlay::Menu { rect, items, action: MenuAction::StripSource { strip: i } });
+            place_menu(state, anchor, items, MenuAction::StripSource { strip: i });
         }
-        StripKind::Return(lane) if lane.is_send() => {
+        // MixLink `ReturnEffectMenu` applies to effect AND bus returns
+        // (`case .effectReturn, .busReturn`). Main is plain Text — no menu.
+        StripKind::Return(lane) => {
             let current = state.analog.config.effect_ref(lane);
             let mut items = vec![MenuItem {
                 id: "none".into(),
@@ -1466,15 +1663,13 @@ fn open_name_menu(state: &mut AppState, kind: StripKind, x: f32, y: f32) {
                     section: Some("Plugins".into()),
                 });
             }
-            let rect = overlay::layout_popup(anchor, &items, h);
-            state.overlay = Some(Overlay::Menu { rect, items, action: MenuAction::ReturnEffect { lane } });
+            place_menu(state, anchor, items, MenuAction::ReturnEffect { lane });
         }
-        _ => {}
+        StripKind::Main => {}
     }
 }
 
 fn open_output_menu(state: &mut AppState, action: MenuAction, anchor: Rect) {
-    let (_, h) = state.renderer.logical_size();
     let current = match action {
         MenuAction::MixOut => Some(state.analog.config.main_output),
         MenuAction::HardwareOutput { id } => state.analog.config.hardware_effects.iter().find(|e| e.id == id).map(|e| e.output),
@@ -1492,12 +1687,10 @@ fn open_output_menu(state: &mut AppState, action: MenuAction, anchor: Rect) {
             section: None,
         })
         .collect();
-    let rect = overlay::layout_popup(anchor, &items, h);
-    state.overlay = Some(Overlay::Menu { rect, items, action });
+    place_menu(state, anchor, items, action);
 }
 
 fn open_input_menu(state: &mut AppState, action: MenuAction, anchor: Rect) {
-    let (_, h) = state.renderer.logical_size();
     let current = match action {
         MenuAction::HardwareInput { id } => state.analog.config.hardware_effects.iter().find(|e| e.id == id).map(|e| e.input),
         _ => None,
@@ -1514,12 +1707,10 @@ fn open_input_menu(state: &mut AppState, action: MenuAction, anchor: Rect) {
             section: None,
         })
         .collect();
-    let rect = overlay::layout_popup(anchor, &items, h);
-    state.overlay = Some(Overlay::Menu { rect, items, action });
+    place_menu(state, anchor, items, action);
 }
 
 fn open_plugin_menu(state: &mut AppState, action: MenuAction, anchor: Rect) {
-    let (_, h) = state.renderer.logical_size();
     let mut items = vec![MenuItem { id: String::new(), label: "None".into(), checked: false, section: None }];
     for p in vst3_host::scan_plugins() {
         items.push(MenuItem {
@@ -1529,12 +1720,10 @@ fn open_plugin_menu(state: &mut AppState, action: MenuAction, anchor: Rect) {
             section: Some("VST3".into()),
         });
     }
-    let rect = overlay::layout_popup(anchor, &items, h);
-    state.overlay = Some(Overlay::Menu { rect, items, action });
+    place_menu(state, anchor, items, action);
 }
 
 fn open_playback_menu(state: &mut AppState, id: i32, anchor: Rect) {
-    let (_, h) = state.renderer.logical_size();
     let current = state.analog.config.plugin(id).map(|p| p.return_channel);
     let items: Vec<MenuItem> = state
         .analog
@@ -1548,12 +1737,10 @@ fn open_playback_menu(state: &mut AppState, id: i32, anchor: Rect) {
             section: None,
         })
         .collect();
-    let rect = overlay::layout_popup(anchor, &items, h);
-    state.overlay = Some(Overlay::Menu { rect, items, action: MenuAction::PluginPlayback { id } });
+    place_menu(state, anchor, items, MenuAction::PluginPlayback { id });
 }
 
 fn open_device_menu(state: &mut AppState, anchor: Rect) {
-    let (_, h) = state.renderer.logical_size();
     let current = state.analog.config.audio_device_contains.clone();
     let items: Vec<MenuItem> = audio_io::enumerate_devices()
         .into_iter()
@@ -1565,12 +1752,10 @@ fn open_device_menu(state: &mut AppState, anchor: Rect) {
             section: None,
         })
         .collect();
-    let rect = overlay::layout_popup(anchor, &items, h);
-    state.overlay = Some(Overlay::Menu { rect, items, action: MenuAction::AudioDevice });
+    place_menu(state, anchor, items, MenuAction::AudioDevice);
 }
 
 fn open_buffer_menu(state: &mut AppState, anchor: Rect) {
-    let (_, h) = state.renderer.logical_size();
     let current = state.analog.config.audio_buffer_frames.unwrap_or(64);
     let items: Vec<MenuItem> = [32, 64, 128, 256, 512]
         .into_iter()
@@ -1581,8 +1766,7 @@ fn open_buffer_menu(state: &mut AppState, anchor: Rect) {
             section: None,
         })
         .collect();
-    let rect = overlay::layout_popup(anchor, &items, h);
-    state.overlay = Some(Overlay::Menu { rect, items, action: MenuAction::AudioBuffer });
+    place_menu(state, anchor, items, MenuAction::AudioBuffer);
 }
 
 fn apply_menu(state: &mut AppState, action: MenuAction, item: &MenuItem) {

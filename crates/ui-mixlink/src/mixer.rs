@@ -162,7 +162,6 @@ fn paint_strip(
             },
             enabled,
         );
-        theme::seam_h(cmds, x, y + Layout::ENABLE_ROW - 2.0, w, false);
     }
     y += Layout::ENABLE_ROW;
 
@@ -180,10 +179,11 @@ fn paint_strip(
                     Some(*lane) == sends.last().copied(),
                     false,
                 );
+                let knob = send_knob_rect(x, y, w, row_h);
                 widgets::knob(
                     cmds,
-                    x + (w - Layout::SEND_KNOB) * 0.5,
-                    y + 4.0,
+                    knob.x,
+                    knob.y,
                     Layout::SEND_KNOB,
                     aux,
                     widgets::KnobKind::Send(theme::send_color(*lane)),
@@ -209,10 +209,11 @@ fn paint_strip(
     y += Layout::SEND_NAME_BAR;
     theme::faceplate_cell(cmds, Rect { x, y, w, h: Layout::PAN_ROW }, false, true);
     if !matches!(kind, StripKind::Main) {
+        let knob = pan_knob_rect(x, y, w);
         widgets::knob(
             cmds,
-            x + (w - Layout::PAN_KNOB) * 0.5,
-            y + 6.0,
+            knob.x,
+            knob.y,
             Layout::PAN_KNOB,
             pan,
             widgets::KnobKind::Pan,
@@ -444,6 +445,57 @@ fn paint_fader(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, w: f32, h: f32, lin: f32
     );
 }
 
+/// MixLink `KnobView` VStack spacing (2) + dB `Text` (MixLinkRs paints 12pt).
+const SEND_KNOB_LABEL_STACK: f32 = 2.0 + 12.0;
+/// MixLink `panSlot` `.padding(.top, 8)`.
+const PAN_KNOB_TOP_PAD: f32 = 8.0;
+/// MixLink `KnobView` `.frame(width: size+8, height: size+8)` — disc inset.
+const KNOB_FRAME_INSET: f32 = 4.0;
+
+/// Send disc in the control row (below the name bar).
+///
+/// MixLink `SendControlView` has no extra padding; `.frame(height: sendRowHeight)`
+/// default-centers the `KnobView` VStack (disc frame `size+8`, spacing 2, dB).
+/// MixLinkRs paints the 48pt disc (not the +8 frame), so
+/// `knob_y = row_y + (row_h - 48 - 14) * 0.5` equals MixLink's disc top
+/// `(row_h - 70) / 2 + 4` — send A 14, other lanes 15. The dB sits in the
+/// lower padding without un-centering that stack.
+pub fn send_knob_rect(strip_x: f32, row_y: f32, strip_w: f32, row_h: f32) -> Rect {
+    let d = Layout::SEND_KNOB;
+    Rect {
+        x: strip_x + (strip_w - d) * 0.5,
+        y: row_y + (row_h - d - SEND_KNOB_LABEL_STACK) * 0.5,
+        w: d,
+        h: d,
+    }
+}
+
+/// Pan disc in the pan control row (below the PAN name bar).
+///
+/// MixLink pins `KnobView` under `.padding(.top, 8)` then centers the 40pt disc
+/// in the `size+8` frame (4pt inset). Remaining space is the channel ID
+/// (`maxHeight: .infinity`) — the disc is not shifted by the ID. MixLinkRs
+/// `knob_y = row_y + 8 + 4` (was `row_y + 6`).
+pub fn pan_knob_rect(strip_x: f32, row_y: f32, strip_w: f32) -> Rect {
+    let d = Layout::PAN_KNOB;
+    Rect {
+        x: strip_x + (strip_w - d) * 0.5,
+        y: row_y + PAN_KNOB_TOP_PAD + KNOB_FRAME_INSET,
+        w: d,
+        h: d,
+    }
+}
+
+/// MixLink `KnobView` `.contentShape` on the `size+8` frame around the disc.
+pub fn knob_hit_rect(disc: Rect) -> Rect {
+    Rect {
+        x: disc.x - KNOB_FRAME_INSET,
+        y: disc.y - KNOB_FRAME_INSET,
+        w: disc.w + KNOB_FRAME_INSET * 2.0,
+        h: disc.h + KNOB_FRAME_INSET * 2.0,
+    }
+}
+
 pub fn strip_frame(layout: &MixerLayout, send_count: usize, kind: StripKind) -> (f32, f32) {
     let n_send = send_count.max(2).min(6);
     let mut sx = layout.x + Layout::MIXER_LEADING + 4.0 - layout.scroll_x;
@@ -544,4 +596,24 @@ pub fn control_with_pan_rect(layout: &MixerLayout, send_count: usize) -> Option<
         y += Layout::SEND_NAME_BAR + Layout::send_row_h(*lane);
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn send_knob_y_matches_mixlink_centered_stack() {
+        // MixLink: no send padding; disc top = (row_h - 70) / 2 + 4.
+        assert_eq!(send_knob_rect(0.0, 0.0, 100.0, Layout::SEND_ROW_A).y, 14.0);
+        assert_eq!(send_knob_rect(0.0, 0.0, 100.0, Layout::SEND_ROW).y, 15.0);
+        assert_eq!(send_knob_rect(0.0, 0.0, 100.0, Layout::SEND_ROW_A).x, (100.0 - Layout::SEND_KNOB) * 0.5);
+    }
+
+    #[test]
+    fn pan_knob_y_matches_mixlink_top_pad_plus_frame_inset() {
+        // MixLink: padding(.top, 8) + disc centered in size+8 → 12.
+        assert_eq!(pan_knob_rect(0.0, 0.0, 100.0).y, 12.0);
+        assert_eq!(pan_knob_rect(0.0, 0.0, 100.0).x, (100.0 - Layout::PAN_KNOB) * 0.5);
+    }
 }

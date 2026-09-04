@@ -42,23 +42,37 @@ pub fn hit_mixer(layout: &MixerLayout, send_count: usize, x: f32, y: f32) -> Opt
     if y < y0 + Layout::ENABLE_ROW {
         return Some(Hit::Enable { kind });
     }
+    let (sx, sw) = mixer::strip_frame(layout, send_count, kind);
     let mut yy = y0 + Layout::ENABLE_ROW;
     let n = send_count.max(2).min(6);
     for i in 0..n {
         let lane = analog::ALL_SEND_LANES[i];
-        let h = Layout::send_row_h(lane) + Layout::SEND_NAME_BAR;
-        if y >= yy && y < yy + h {
-            return Some(Hit::Knob { kind, lane: Some(lane), start_value: 0.0 });
+        let row_h = Layout::send_row_h(lane);
+        let lane_h = Layout::SEND_NAME_BAR + row_h;
+        if y >= yy && y < yy + lane_h {
+            let row_y = yy + Layout::SEND_NAME_BAR;
+            if matches!(kind, StripKind::Input(_)) {
+                let disc = mixer::send_knob_rect(sx, row_y, sw, row_h);
+                if widgets::contains(mixer::knob_hit_rect(disc), x, y) {
+                    return Some(Hit::Knob { kind, lane: Some(lane), start_value: 0.0 });
+                }
+            }
+            return None;
         }
-        yy += h;
+        yy += lane_h;
     }
-    yy += Layout::SEND_NAME_BAR;
-    if y >= yy && y < yy + Layout::PAN_ROW {
-        return Some(Hit::Knob { kind, lane: None, start_value: 0.0 });
+    let pan_lane_h = Layout::SEND_NAME_BAR + Layout::PAN_ROW;
+    if y >= yy && y < yy + pan_lane_h {
+        if !matches!(kind, StripKind::Main) {
+            let disc = mixer::pan_knob_rect(sx, yy + Layout::SEND_NAME_BAR, sw);
+            if widgets::contains(mixer::knob_hit_rect(disc), x, y) {
+                return Some(Hit::Knob { kind, lane: None, start_value: 0.0 });
+            }
+        }
+        return None;
     }
     let (bay_y, bay_h) = mixer::fader_bay_frame(layout, send_count);
     if y >= bay_y && y < bay_y + bay_h {
-        let (sx, sw) = mixer::strip_frame(layout, send_count, kind);
         let bay = mixer::FaderBay::layout(sx, bay_y, sw, bay_h);
         if widgets::contains(bay.hit, x, y) {
             return Some(Hit::Fader {
@@ -88,6 +102,50 @@ pub fn hit_mixer(layout: &MixerLayout, send_count: usize, x: f32, y: f32) -> Opt
         return Some(Hit::Pad { kind, which });
     }
     Some(Hit::Name { kind })
+}
+
+#[cfg(test)]
+mod tests {
+    use analog::ReturnLane;
+
+    use super::*;
+    use crate::mixer::{self, MixerLayout, StripKind};
+
+    fn name_y(layout: &MixerLayout, send_count: usize) -> f32 {
+        let (bay_y, bay_h) = mixer::fader_bay_frame(layout, send_count);
+        bay_y + bay_h + Layout::NAME_ROW * 0.5
+    }
+
+    #[test]
+    fn bus_and_send_name_rows_hit_name() {
+        let layout = MixerLayout::new(0.0, 0.0, 1600.0, 900.0, 2);
+        let y = name_y(&layout, 2);
+        for kind in [
+            StripKind::Return(ReturnLane::SendA),
+            StripKind::Return(ReturnLane::Bus1),
+            StripKind::Return(ReturnLane::Bus2),
+        ] {
+            let (sx, sw) = mixer::strip_frame(&layout, 2, kind);
+            match hit_mixer(&layout, 2, sx + sw * 0.5, y) {
+                Some(Hit::Name { kind: got }) => assert!(matches!(
+                    (kind, got),
+                    (StripKind::Return(a), StripKind::Return(b)) if a == b
+                )),
+                other => panic!("{kind:?} name row should be Hit::Name, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn main_name_row_hits_name_but_is_not_a_menu_kind() {
+        let layout = MixerLayout::new(0.0, 0.0, 1600.0, 900.0, 2);
+        let (sx, sw) = mixer::strip_frame(&layout, 2, StripKind::Main);
+        let y = name_y(&layout, 2);
+        match hit_mixer(&layout, 2, sx + sw * 0.5, y) {
+            Some(Hit::Name { kind: StripKind::Main }) => {}
+            other => panic!("Main name row should be Hit::Name(Main), got {other:?}"),
+        }
+    }
 }
 
 pub fn hit_arrangement(layout: &ArrangementLayout, track_count: usize, x: f32, y: f32) -> Option<Hit> {
