@@ -1,0 +1,10 @@
+[package]
+name = "audio-io"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+platform-mac.workspace = true
+engine.workspace = true

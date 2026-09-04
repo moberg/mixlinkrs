@@ -1,0 +1,15 @@
+[package]
+name = "render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wgpu.workspace = true
+winit.workspace = true
+pollster.workspace = true
+raw-window-handle.workspace = true
+bytemuck.workspace = true
+log.workspace = true
+glyphon.workspace = true
+png.workspace = true

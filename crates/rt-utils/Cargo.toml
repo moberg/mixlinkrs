@@ -1,0 +1,18 @@
+[package]
+name = "rt-utils"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rtrb.workspace = true
+arc-swap.workspace = true
+atomic_float.workspace = true
+arrayvec.workspace = true
+libc.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+mach2.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

@@ -1,0 +1,15 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+*.profraw
+.DS_Store
+/xcode/
+/.vscode/
+
+# VST3 SDK (fetched by Scripts/build-vst3-sdk.sh)
+Vendor/vst3sdk
+/build/
+
+# Runtime artifacts
+/test-artifacts/
+/tmp-records/

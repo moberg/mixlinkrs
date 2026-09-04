@@ -1,0 +1,13 @@
+disallowed-methods = [
+    # These are forbidden on the RT audio thread. They are still callable from
+    # non-RT code, but crates that do RT work opt in via `#![deny(clippy::disallowed_methods)]`
+    # on their RT modules.
+    { path = "std::sync::Mutex::lock", reason = "no locks on the RT audio thread" },
+    { path = "std::sync::RwLock::read", reason = "no locks on the RT audio thread" },
+    { path = "std::sync::RwLock::write", reason = "no locks on the RT audio thread" },
+    { path = "std::boxed::Box::new", reason = "no allocation on the RT audio thread" },
+    { path = "std::vec::Vec::push", reason = "no allocation on the RT audio thread" },
+]
+
+# Keep clippy focused; perf/style warnings mostly tolerable at this stage.
+avoid-breaking-exported-api = false

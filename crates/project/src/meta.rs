@@ -1,0 +1,96 @@
+//! Sidecar `project.json` metadata.
+
+use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::document::{MixArrangement, MixGrid, MixLane};
+
+/// One mix in the project browser list.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MixListEntry {
+    pub id: Uuid,
+    pub name: String,
+}
+
+/// Dated-folder sidecar. Field names match MixLink `ProjectMeta` CodingKeys.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectMeta {
+    #[serde(default = "default_next_take")]
+    pub next_take: i32,
+    #[serde(default = "default_tempo")]
+    pub tempo: f64,
+    #[serde(default)]
+    pub mixes: Vec<MixListEntry>,
+    #[serde(default)]
+    pub active_mix_id: Option<Uuid>,
+    #[serde(default)]
+    pub arrangement: Option<MixArrangement>,
+    #[serde(default)]
+    pub selected_lane: Option<MixLane>,
+    #[serde(default)]
+    pub take_start_frames: HashMap<String, i64>,
+    #[serde(default = "default_true")]
+    pub grid_enabled: bool,
+    #[serde(default)]
+    pub grid: MixGrid,
+    #[serde(default = "default_pixels_per_bar")]
+    pub pixels_per_bar: f64,
+}
+
+fn default_next_take() -> i32 {
+    1
+}
+
+fn default_tempo() -> f64 {
+    120.0
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_pixels_per_bar() -> f64 {
+    48.0
+}
+
+impl Default for ProjectMeta {
+    fn default() -> Self {
+        Self {
+            next_take: 1,
+            tempo: 120.0,
+            mixes: Vec::new(),
+            active_mix_id: None,
+            arrangement: None,
+            selected_lane: None,
+            take_start_frames: HashMap::new(),
+            grid_enabled: true,
+            grid: MixGrid::Bar1,
+            pixels_per_bar: 48.0,
+        }
+    }
+}
+
+impl ProjectMeta {
+    pub fn normalize(&mut self) {
+        self.next_take = self.next_take.max(1);
+        if self.tempo < 20.0 {
+            self.tempo = 120.0;
+        }
+        self.pixels_per_bar = self.pixels_per_bar.clamp(10.0, 16_000.0);
+    }
+
+    pub fn take_start_frame(&self, number: i32) -> i64 {
+        self.take_start_frames
+            .get(&number.to_string())
+            .copied()
+            .unwrap_or(0)
+            .max(0)
+    }
+
+    pub fn set_take_start_frame(&mut self, number: i32, frame: i64) {
+        self.take_start_frames.insert(number.to_string(), frame.max(0));
+    }
+}
