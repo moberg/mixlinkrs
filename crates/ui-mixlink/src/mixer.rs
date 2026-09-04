@@ -59,6 +59,7 @@ pub fn paint(view: &MixerView<'_>) -> (Vec<DrawCmd>, Vec<(Rect, MixerExtraHit)>)
     );
 
     let mut x = l.x + Layout::MIXER_LEADING + 4.0 - l.scroll_x;
+    paint_name_bar_rails(&mut cmds, x, l.y, l.ch_w, &sends);
     group_header(&mut cmds, x, l.y, l.ch_w * 8.0, "Channels", None, &mut extras);
     for i in 0..8 {
         paint_strip(&mut cmds, view, StripKind::Input(i), x + i as f32 * l.ch_w, l.ch_w, &sends, &mut extras);
@@ -146,9 +147,8 @@ fn paint_strip(
         StripKind::Main => (view.engine.mixer.main_fader, 0.5, "Main".into(), "M".into(), false, false, true),
     };
 
-    if dim {
-        theme::fill(cmds, Rect { x, y: y0, w, h: l.h - Layout::GROUP_HEADER }, [0.0, 0.0, 0.0, 0.36]);
-    }
+    // MixLink dims strip chrome via opacity; the MixerChassis stays fully lit.
+    // A per-strip black fill would hide the continuous grain.
 
     let mut y = y0;
     if !matches!(kind, StripKind::Main) {
@@ -162,6 +162,7 @@ fn paint_strip(
             },
             enabled,
         );
+        theme::seam_h(cmds, x, y + Layout::ENABLE_ROW - 2.0, w, false);
     }
     y += Layout::ENABLE_ROW;
 
@@ -169,7 +170,7 @@ fn paint_strip(
     if has_sends {
         if let StripKind::Input(i) = kind {
             for lane in sends {
-                name_bar(cmds, x, y, w, first_input, true, Some(*lane), view.engine);
+                name_bar(cmds, x, y, w, first_input, Some(*lane), view.engine);
                 y += Layout::SEND_NAME_BAR;
                 let aux = view.engine.surface.strips[i].aux(*lane);
                 let row_h = Layout::send_row_h(*lane);
@@ -193,7 +194,7 @@ fn paint_strip(
         }
     } else {
         for lane in sends {
-            name_bar(cmds, x, y, w, false, false, None, view.engine);
+            name_bar(cmds, x, y, w, false, None, view.engine);
             y += Layout::SEND_NAME_BAR;
             if matches!(kind, StripKind::Return(ReturnLane::SendC)) && sends.len() >= 3 && *lane == ReturnLane::SendC {
                 let box_r = Rect { x: x + 10.0, y: y + 10.0, w: w - 16.0, h: 24.0 };
@@ -204,7 +205,7 @@ fn paint_strip(
         }
     }
 
-    name_bar(cmds, x, y, w, first_input, !matches!(kind, StripKind::Main), None, view.engine);
+    name_bar(cmds, x, y, w, first_input, None, view.engine);
     y += Layout::SEND_NAME_BAR;
     theme::faceplate_cell(cmds, Rect { x, y, w, h: Layout::PAN_ROW }, false, true);
     if !matches!(kind, StripKind::Main) {
@@ -230,7 +231,7 @@ fn paint_strip(
 
     let bay_h = (l.y + l.h - y - Layout::NAME_ROW - Layout::BUTTON_STACK).max(80.0);
     theme::channel_bay_shading(cmds, Rect { x, y, w, h: bay_h + Layout::NAME_ROW + Layout::BUTTON_STACK });
-    paint_fader(cmds, x, y, w, bay_h, fader, peak_for(view, kind), first_input || matches!(kind, StripKind::Main));
+    paint_fader(cmds, x, y, w, bay_h, fader, peak_for(view, kind));
     y += bay_h;
 
     widgets::strip_name_label(
@@ -240,7 +241,6 @@ fn paint_strip(
         widgets::StripNameStyle {
             diamond: !matches!(kind, StripKind::Main),
             dim,
-            selected: matches!(kind, StripKind::Main),
         },
     );
     y += Layout::NAME_ROW;
@@ -263,7 +263,43 @@ fn paint_strip(
         StripKind::Main => {}
     }
 
-    theme::channel_seam(cmds, x + w - 1.0, y0, l.h - Layout::GROUP_HEADER, false);
+    // MixLink `ChannelSeam`: enable row always; body skips the send stack on
+    // non-last effect/bus returns so the upper faceplate stays one sheet.
+    theme::channel_seam(cmds, x + w - 1.0, y0, Layout::ENABLE_ROW, false);
+    let send_area: f32 = sends.iter().copied().map(Layout::send_lane_h).sum();
+    let skip_upper = match kind {
+        StripKind::Return(lane) if lane.is_send() => Some(lane) != sends.last().copied(),
+        StripKind::Return(ReturnLane::Bus1) => true,
+        _ => false,
+    };
+    let body_y = y0 + Layout::ENABLE_ROW + if skip_upper { send_area } else { 0.0 };
+    let body_h = (l.y + l.h - body_y).max(0.0);
+    if body_h > 0.0 {
+        theme::channel_seam(cmds, x + w - 1.0, body_y, body_h, false);
+    }
+}
+
+/// MixLink `SendLaneNameBar` plates as one rail per row (not a fill per strip).
+/// Send plates cover the leading gutter + input group (`MixerLeadingNameGutter`).
+fn paint_name_bar_rails(cmds: &mut Vec<DrawCmd>, origin: f32, mixer_y: f32, ch_w: f32, sends: &[ReturnLane]) {
+    let gutter = Layout::MIXER_LEADING + 4.0;
+    let rail_x = origin - gutter;
+    let inputs_w = gutter + ch_w * 8.0;
+    let mut y = mixer_y + Layout::GROUP_HEADER + Layout::ENABLE_ROW;
+    for lane in sends {
+        name_bar_plate(cmds, rail_x, y, inputs_w);
+        y += Layout::send_lane_h(*lane);
+    }
+    // MixLink `showsPlate: showsPan` — every strip except Main.
+    let pan_w = inputs_w + 1.0 + ch_w * sends.len() as f32 + 1.0 + ch_w * 2.0;
+    name_bar_plate(cmds, rail_x, y, pan_w);
+}
+
+fn name_bar_plate(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, w: f32) {
+    // MixLink `SendLaneNameBar`: `Color(white: 0.105)` + 1pt black/white edges.
+    theme::fill(cmds, Rect { x, y, w, h: Layout::SEND_NAME_BAR }, [0.105, 0.105, 0.105, 1.0]);
+    theme::fill(cmds, Rect { x, y, w, h: 1.0 }, [0.0, 0.0, 0.0, 0.40]);
+    theme::fill(cmds, Rect { x, y: y + Layout::SEND_NAME_BAR - 1.0, w, h: 1.0 }, [1.0, 1.0, 1.0, 0.04]);
 }
 
 fn name_bar(
@@ -272,15 +308,9 @@ fn name_bar(
     y: f32,
     w: f32,
     show_title: bool,
-    show_plate: bool,
     lane: Option<ReturnLane>,
     engine: &AnalogEngine,
 ) {
-    if show_plate {
-        theme::fill(cmds, Rect { x, y, w, h: Layout::SEND_NAME_BAR }, [0.08, 0.08, 0.08, 1.0]);
-        theme::fill(cmds, Rect { x, y, w, h: 1.0 }, [0.0, 0.0, 0.0, 0.40]);
-        theme::fill(cmds, Rect { x, y: y + Layout::SEND_NAME_BAR - 1.0, w, h: 1.0 }, [1.0, 1.0, 1.0, 0.04]);
-    }
     if show_title {
         let label = if let Some(lane) = lane {
             format!("SEND {} · {}", lane.strip_title(), engine.return_display_name(lane))
@@ -299,57 +329,168 @@ fn peak_for(view: &MixerView<'_>, kind: StripKind) -> f32 {
     }
 }
 
-fn paint_fader(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, w: f32, h: f32, lin: f32, peak: f32, labels: bool) {
-    let trough_x = x + w * 0.42;
-    let meter_x = trough_x + Layout::FADER_TROUGH + 6.0;
-    let track_top = y + 8.0;
-    let track_h = (h - 16.0).max(Layout::FADER_CAP_H);
-    widgets::decibel_scale(cmds, meter_x + Layout::METER_HOUSING + 2.0, track_top, track_h, labels);
-    let slot_x = trough_x + (Layout::FADER_TROUGH - Layout::FADER_SLOT) * 0.5;
+/// MixLink `ChannelStripView.faderBay`:
+/// `[meter + leading ticks | slot reserve | trailing ticks+labels]`, cap overlayed on the slot.
+#[derive(Clone, Copy, Debug)]
+pub struct FaderBay {
+    pub track_top: f32,
+    pub track_h: f32,
+    pub meter: Rect,
+    pub leading_x: f32,
+    pub trailing_x: f32,
+    pub cap_cx: f32,
+    pub hit: Rect,
+    pub rail_top: f32,
+    pub rail_bot: f32,
+}
+
+impl FaderBay {
+    pub fn layout(strip_x: f32, strip_y: f32, strip_w: f32, bay_h: f32) -> Self {
+        let inner_w = (strip_w - Layout::FADER_BAY_PAD_X * 2.0).max(1.0);
+        let slot_reserve = Layout::FADER_SLOT + 8.0;
+        let flex = ((inner_w - slot_reserve) * 0.5).max(0.0);
+        let origin = strip_x + Layout::FADER_BAY_PAD_X;
+        let meter_group_w = Layout::METER_HOUSING + 2.0 + Layout::SCALE_LEADING;
+        let meter_group_right = origin + flex;
+        let meter_x = meter_group_right - meter_group_w;
+        let leading_x = meter_group_right - Layout::SCALE_LEADING;
+        let slot_left = origin + flex;
+        let cap_cx = slot_left + slot_reserve * 0.5;
+        let trailing_x = slot_left + slot_reserve;
+        let track_top = strip_y + Layout::FADER_BAY_PAD_Y;
+        let track_h = (bay_h - Layout::FADER_BAY_PAD_Y * 2.0).max(Layout::FADER_CAP_H);
+        let travel = (track_h - Layout::FADER_CAP_H).max(0.0);
+        Self {
+            track_top,
+            track_h,
+            meter: Rect { x: meter_x, y: track_top, w: Layout::METER_HOUSING, h: track_h },
+            leading_x,
+            trailing_x,
+            cap_cx,
+            hit: Rect {
+                x: cap_cx - Layout::FADER_HIT_W * 0.5,
+                y: track_top,
+                w: Layout::FADER_HIT_W,
+                h: track_h,
+            },
+            rail_top: track_top,
+            rail_bot: track_top + travel,
+        }
+    }
+}
+
+fn paint_fader(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, w: f32, h: f32, lin: f32, peak: f32) {
+    let bay = FaderBay::layout(x, y, w, h);
+    widgets::level_meter(cmds, bay.meter, peak);
+    widgets::decibel_scale(
+        cmds,
+        bay.leading_x,
+        bay.track_top,
+        bay.track_h,
+        widgets::ScalePlacement::Leading,
+    );
+
+    let slot_outer = Layout::FADER_SLOT + 3.0;
+    let slot_x = bay.cap_cx - Layout::FADER_SLOT * 0.5;
     cmds.push(DrawCmd::RoundedRect {
-        rect: Rect { x: slot_x - 1.5, y: track_top, w: Layout::FADER_SLOT + 3.0, h: track_h },
+        rect: Rect {
+            x: bay.cap_cx - slot_outer * 0.5,
+            y: bay.track_top,
+            w: slot_outer,
+            h: bay.track_h,
+        },
         color: [0.04, 0.04, 0.04, 1.0],
-        radius: (Layout::FADER_SLOT + 3.0) * 0.5,
+        radius: slot_outer * 0.5,
     });
     cmds.push(DrawCmd::RoundedRect {
-        rect: Rect { x: slot_x, y: track_top, w: Layout::FADER_SLOT, h: track_h },
+        rect: Rect { x: slot_x, y: bay.track_top, w: Layout::FADER_SLOT, h: bay.track_h },
         color: [0.01, 0.01, 0.01, 1.0],
         radius: Layout::FADER_SLOT * 0.5,
     });
-    theme::fill(cmds, Rect { x: slot_x, y: track_top + 1.0, w: 1.2, h: track_h - 2.0 }, [0.0, 0.0, 0.0, 0.55]);
     theme::fill(
         cmds,
-        Rect { x: slot_x + Layout::FADER_SLOT - 0.8, y: track_top + 1.0, w: 0.8, h: track_h - 2.0 },
+        Rect { x: slot_x, y: bay.track_top + 1.0, w: 1.2, h: bay.track_h - 2.0 },
+        [0.0, 0.0, 0.0, 0.55],
+    );
+    theme::fill(
+        cmds,
+        Rect {
+            x: slot_x + Layout::FADER_SLOT - 0.8,
+            y: bay.track_top + 1.0,
+            w: 0.8,
+            h: bay.track_h - 2.0,
+        },
         [1.0, 1.0, 1.0, 0.08],
     );
-    theme::fill(cmds, Rect { x: meter_x, y: track_top, w: Layout::METER_HOUSING, h: track_h }, theme::DEEP_SLOT);
-    let segs = Layout::METER_SEGMENTS;
-    let fill_n = (peak * segs as f32).round() as i32;
-    let seg_h = track_h / segs as f32;
-    for i in 0..segs {
-        if i >= fill_n {
-            continue;
-        }
-        let t = i as f32 / segs as f32;
-        let color = if t > 0.9 { theme::METER_RED } else if t > 0.7 { theme::METER_YELLOW } else { theme::METER_GREEN };
-        theme::fill(
-            cmds,
-            Rect { x: meter_x + 2.0, y: track_top + track_h - (i as f32 + 1.0) * seg_h, w: Layout::METER_W, h: seg_h - 0.4 },
-            color,
-        );
-    }
-    let travel = (track_h - Layout::FADER_CAP_H).max(0.0);
-    let cap_y = track_top + travel * (1.0 - lin.clamp(0.0, 1.0));
-    let cap_x = trough_x + Layout::FADER_TROUGH * 0.5 - Layout::FADER_CAP_W * 0.5;
+
+    widgets::decibel_scale(
+        cmds,
+        bay.trailing_x,
+        bay.track_top,
+        bay.track_h,
+        widgets::ScalePlacement::Trailing,
+    );
+
+    let travel = (bay.track_h - Layout::FADER_CAP_H).max(0.0);
+    let cap_y = bay.track_top + travel * (1.0 - lin.clamp(0.0, 1.0));
     widgets::fader_cap(
         cmds,
-        Rect { x: cap_x, y: cap_y, w: Layout::FADER_CAP_W, h: Layout::FADER_CAP_H },
+        Rect {
+            x: bay.cap_cx - Layout::FADER_CAP_W * 0.5,
+            y: cap_y,
+            w: Layout::FADER_CAP_W,
+            h: Layout::FADER_CAP_H,
+        },
     );
 }
 
-pub fn fader_rail(layout: &MixerLayout, _strip_x: f32, _strip_w: f32) -> (f32, f32) {
-    let y0 = layout.y + Layout::GROUP_HEADER + Layout::ENABLE_ROW;
-    (y0 + 200.0, y0 + 200.0 + 220.0 - Layout::FADER_CAP_H)
+pub fn strip_frame(layout: &MixerLayout, send_count: usize, kind: StripKind) -> (f32, f32) {
+    let n_send = send_count.max(2).min(6);
+    let mut sx = layout.x + Layout::MIXER_LEADING + 4.0 - layout.scroll_x;
+    match kind {
+        StripKind::Input(i) => (sx + i as f32 * layout.ch_w, layout.ch_w),
+        StripKind::Return(lane) if lane.is_send() => {
+            sx += layout.ch_w * 8.0 + 1.0;
+            let idx = ALL_SEND_LANES.iter().take(n_send).position(|&l| l == lane).unwrap_or(0);
+            (sx + idx as f32 * layout.ch_w, layout.ch_w)
+        }
+        StripKind::Return(ReturnLane::Bus1) => {
+            sx += layout.ch_w * 8.0 + 1.0 + layout.ch_w * n_send as f32 + 1.0;
+            (sx, layout.ch_w)
+        }
+        StripKind::Return(ReturnLane::Bus2) => {
+            sx += layout.ch_w * 8.0 + 1.0 + layout.ch_w * n_send as f32 + 1.0;
+            (sx + layout.ch_w, layout.ch_w)
+        }
+        StripKind::Return(_) => (sx, layout.ch_w),
+        StripKind::Main => {
+            sx += layout.ch_w * 8.0
+                + 1.0
+                + layout.ch_w * n_send as f32
+                + 1.0
+                + layout.ch_w * 2.0
+                + 1.0;
+            (sx, layout.main_w)
+        }
+    }
+}
+
+pub fn fader_bay_frame(layout: &MixerLayout, send_count: usize) -> (f32, f32) {
+    let n = send_count.max(2).min(6);
+    let y = layout.y
+        + Layout::GROUP_HEADER
+        + Layout::ENABLE_ROW
+        + ALL_SEND_LANES.iter().take(n).copied().map(Layout::send_lane_h).sum::<f32>()
+        + Layout::SEND_NAME_BAR
+        + Layout::PAN_ROW;
+    let h = (layout.y + layout.h - y - Layout::NAME_ROW - Layout::BUTTON_STACK).max(80.0);
+    (y, h)
+}
+
+pub fn fader_rail(layout: &MixerLayout, send_count: usize, strip_x: f32, strip_w: f32) -> (f32, f32) {
+    let (y, h) = fader_bay_frame(layout, send_count);
+    let bay = FaderBay::layout(strip_x, y, strip_w, h);
+    (bay.rail_top, bay.rail_bot)
 }
 
 pub fn strip_at(layout: &MixerLayout, send_count: usize, x: f32, _y: f32) -> Option<StripKind> {

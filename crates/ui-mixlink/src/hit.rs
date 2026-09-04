@@ -3,6 +3,7 @@ use analog::ReturnLane;
 use crate::arrangement::{self, ArrangementLayout, HEADER_W, RULER_H, TIME_RULER_H, TRACK_H};
 use crate::mixer::{self, MixerLayout, StripKind};
 use crate::theme::Layout;
+use crate::widgets;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Hit {
@@ -55,16 +56,20 @@ pub fn hit_mixer(layout: &MixerLayout, send_count: usize, x: f32, y: f32) -> Opt
     if y >= yy && y < yy + Layout::PAN_ROW {
         return Some(Hit::Knob { kind, lane: None, start_value: 0.0 });
     }
-    yy += Layout::PAN_ROW + 18.0;
-    let bay_h = (layout.y + layout.h - yy - Layout::NAME_ROW - Layout::BUTTON_STACK).max(80.0);
-    if y >= yy && y < yy + bay_h {
-        return Some(Hit::Fader {
-            kind,
-            rail_top: yy + 8.0,
-            rail_bot: yy + 8.0 + (bay_h - 16.0 - Layout::FADER_CAP_H).max(0.0),
-        });
+    let (bay_y, bay_h) = mixer::fader_bay_frame(layout, send_count);
+    if y >= bay_y && y < bay_y + bay_h {
+        let (sx, sw) = mixer::strip_frame(layout, send_count, kind);
+        let bay = mixer::FaderBay::layout(sx, bay_y, sw, bay_h);
+        if widgets::contains(bay.hit, x, y) {
+            return Some(Hit::Fader {
+                kind,
+                rail_top: bay.rail_top,
+                rail_bot: bay.rail_bot,
+            });
+        }
+        return None;
     }
-    yy += bay_h;
+    yy = bay_y + bay_h;
     if y >= yy && y < yy + Layout::NAME_ROW {
         return Some(Hit::Name { kind });
     }

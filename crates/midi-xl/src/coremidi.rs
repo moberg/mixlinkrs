@@ -1,6 +1,14 @@
 //! Thin CoreMIDI client for the Launch Control XL (macOS only).
 //!
 //! Input packets are copied onto a channel; output implements [`crate::MidiSink`].
+//!
+//! CoreMIDI’s `MIDIPacket` / `MIDIPacketList` are `#pragma pack(push, 4)` (see
+//! `MIDIServices.h`). MixLink’s `copyPackets` uses Swift `MemoryLayout` offsets
+//! from those packed types: first packet at **4**, payload at **+10**. A naive
+//! Rust `#[repr(C)]` list inserts 4 bytes of padding after `numPackets` (because
+//! `MIDITimeStamp` is `u64` / align 8), so `addr_of!(list.packet)` points at the
+//! middle of the timestamp and every CC is garbage. Walk with the pack(4)
+//! offsets — do not project a padded Rust struct onto the list.
 
 use std::ffi::c_void;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -285,19 +293,36 @@ extern "C" fn read_proc(
     let Ok(tx) = state.tx.lock() else {
         return;
     };
-    // SAFETY: walk the variable-length MIDIPacketList via MIDIPacketNext.
+    for bytes in copy_packets(pkt_list) {
+        let _ = tx.send(bytes);
+    }
+}
+
+/// MixLink `MidiSession.copyPackets`: copy each packet’s `length` bytes,
+/// including SysEx longer than the 256-byte `data` tuple.
+///
+/// Offsets match CoreMIDI `#pragma pack(push, 4)` / Swift `MemoryLayout`:
+/// `MIDIPacketList.packet` at 4, `MIDIPacket.length` at 8, `MIDIPacket.data` at 10.
+fn copy_packets(pkt_list: *const ffi::MIDIPacketList) -> Vec<Vec<u8>> {
+    if pkt_list.is_null() {
+        return Vec::new();
+    }
+    let mut collected = Vec::new();
+    // SAFETY: `pkt_list` is a live CoreMIDI packet list; we only read the
+    // documented pack(4) fields and `length` payload bytes.
     unsafe {
-        let list = &*pkt_list;
-        let mut pkt_ptr: *const ffi::MIDIPacket = std::ptr::addr_of!(list.packet);
-        for _ in 0..list.numPackets {
-            let pkt = &*pkt_ptr;
-            let len = pkt.length as usize;
-            let payload = std::ptr::addr_of!(pkt.data).cast::<u8>();
-            let bytes = std::slice::from_raw_parts(payload, len);
-            let _ = tx.send(bytes.to_vec());
-            pkt_ptr = ffi::MIDIPacketNext(pkt_ptr);
+        let base = pkt_list.cast::<u8>();
+        let num_packets = std::ptr::read_unaligned(base.cast::<u32>());
+        let mut pkt = base.add(ffi::PACKET_LIST_PACKET_OFFSET);
+        for _ in 0..num_packets {
+            let len =
+                std::ptr::read_unaligned(pkt.add(ffi::PACKET_LENGTH_OFFSET).cast::<u16>()) as usize;
+            let payload = pkt.add(ffi::PACKET_DATA_OFFSET);
+            collected.push(std::slice::from_raw_parts(payload, len).to_vec());
+            pkt = ffi::midi_packet_next(pkt, len);
         }
     }
+    collected
 }
 
 mod ffi {
@@ -318,14 +343,24 @@ mod ffi {
     pub type MIDIReadProc =
         Option<unsafe extern "C" fn(*const MIDIPacketList, *mut c_void, *mut c_void)>;
 
-    #[repr(C)]
+    /// CoreMIDI `MIDIServices.h`: `#pragma pack(push, 4)` around these structs.
+    /// First packet starts immediately after `UInt32 numPackets`.
+    pub const PACKET_LIST_PACKET_OFFSET: usize = 4;
+    /// `MIDITimeStamp` (8) + `UInt16 length` (2).
+    pub const PACKET_DATA_OFFSET: usize = 10;
+    pub const PACKET_LENGTH_OFFSET: usize = 8;
+
+    /// Packed to match CoreMIDI. Do not walk a live list through these fields —
+    /// `copy_packets` uses the offsets above (first packet is 4-byte aligned,
+    /// so `timeStamp` is unaligned).
+    #[repr(C, packed(4))]
     pub struct MIDIPacket {
         pub timeStamp: MIDITimeStamp,
         pub length: u16,
         pub data: [u8; 256],
     }
 
-    #[repr(C)]
+    #[repr(C, packed(4))]
     pub struct MIDIPacketList {
         pub numPackets: u32,
         pub packet: MIDIPacket,
@@ -387,22 +422,95 @@ mod ffi {
     }
 
     /// `MIDIPacketNext` is a `CF_INLINE` — not an exported symbol.
+    /// On ARM the next packet is 4-byte aligned; on Intel it is packed tight.
     #[inline]
-    pub unsafe fn MIDIPacketNext(pkt: *const MIDIPacket) -> *const MIDIPacket {
-        // SAFETY: caller asserts `pkt` is a valid packet with initialized `length`.
-        let len = unsafe { (*pkt).length as usize };
-        let base = pkt.cast::<u8>();
-        // timeStamp (u64) + length (u16); matches the C MIDIPacket layout.
-        const DATA_OFFSET: usize = 10;
-        let after = unsafe { base.add(DATA_OFFSET + len) };
+    pub unsafe fn midi_packet_next(pkt: *const u8, len: usize) -> *const u8 {
+        // SAFETY: caller asserts `pkt` is a valid packet with `len` data bytes.
+        let after = unsafe { pkt.add(PACKET_DATA_OFFSET + len) };
         #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
         {
             let addr = after as usize;
-            ((addr + 3) & !3usize) as *const MIDIPacket
+            ((addr + 3) & !3usize) as *const u8
         }
         #[cfg(not(any(target_arch = "arm", target_arch = "aarch64")))]
         {
-            after as *const MIDIPacket
+            after
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a pack(4) `MIDIPacketList` in a byte buffer (no CoreMIDI needed).
+    fn write_packet(buf: &mut [u8], offset: usize, data: &[u8]) -> usize {
+        let len = data.len() as u16;
+        buf[offset + ffi::PACKET_LENGTH_OFFSET..offset + ffi::PACKET_LENGTH_OFFSET + 2]
+            .copy_from_slice(&len.to_ne_bytes());
+        let start = offset + ffi::PACKET_DATA_OFFSET;
+        buf[start..start + data.len()].copy_from_slice(data);
+        let after = start + data.len();
+        #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+        {
+            (after + 3) & !3
+        }
+        #[cfg(not(any(target_arch = "arm", target_arch = "aarch64")))]
+        {
+            after
+        }
+    }
+
+    #[test]
+    fn packed_layout_matches_coremidi_and_mixlink() {
+        assert_eq!(ffi::PACKET_LIST_PACKET_OFFSET, 4);
+        assert_eq!(ffi::PACKET_LENGTH_OFFSET, 8);
+        assert_eq!(ffi::PACKET_DATA_OFFSET, 10);
+        assert_eq!(std::mem::align_of::<ffi::MIDIPacket>(), 4);
+        assert_eq!(std::mem::align_of::<ffi::MIDIPacketList>(), 4);
+
+        let list = ffi::MIDIPacketList {
+            numPackets: 0,
+            packet: ffi::MIDIPacket { timeStamp: 0, length: 0, data: [0; 256] },
+        };
+        let base = &list as *const _ as usize;
+        let pkt = std::ptr::addr_of!(list.packet) as usize;
+        let len = std::ptr::addr_of!(list.packet.length) as usize;
+        let data = std::ptr::addr_of!(list.packet.data) as usize;
+        assert_eq!(pkt - base, 4, "naive #[repr(C)] would put packet at 8");
+        assert_eq!(len - pkt, 8);
+        assert_eq!(data - pkt, 10);
+    }
+
+    #[test]
+    fn copy_packets_reads_user_fader_cc() {
+        let mut buf = [0u8; 64];
+        buf[0..4].copy_from_slice(&1u32.to_ne_bytes());
+        write_packet(&mut buf, ffi::PACKET_LIST_PACKET_OFFSET, &[0xB0, 77, 127]);
+        let packets = copy_packets(buf.as_ptr().cast());
+        assert_eq!(packets, vec![vec![0xB0, 77, 127]]);
+    }
+
+    #[test]
+    fn copy_packets_walks_two_aligned_packets() {
+        let mut buf = [0u8; 128];
+        buf[0..4].copy_from_slice(&2u32.to_ne_bytes());
+        let second = write_packet(&mut buf, ffi::PACKET_LIST_PACKET_OFFSET, &[0xB0, 13, 64]);
+        write_packet(&mut buf, second, &[0xB0, 49, 32]);
+        let packets = copy_packets(buf.as_ptr().cast());
+        assert_eq!(packets, vec![vec![0xB0, 13, 64], vec![0xB0, 49, 32]]);
+    }
+
+    #[test]
+    fn naive_repr_c_offset_would_miss_first_cc() {
+        // Document the bug: a padded list would start the packet at 8, reading
+        // length from the first two MIDI bytes instead of the UInt16 at +8.
+        let mut buf = [0u8; 64];
+        buf[0..4].copy_from_slice(&1u32.to_ne_bytes());
+        write_packet(&mut buf, 4, &[0xB0, 77, 127]);
+        let wrong_len = u16::from_ne_bytes([buf[8 + 8], buf[8 + 9]]);
+        assert_ne!(wrong_len, 3, "offset-8 walk must not see the real length");
+        let packets = copy_packets(buf.as_ptr().cast());
+        assert_eq!(packets[0], vec![0xB0, 77, 127]);
     }
 }

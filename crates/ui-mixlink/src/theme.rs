@@ -495,10 +495,24 @@ impl Layout {
     pub const FADER_SLOT: f32 = 7.5;
     pub const FADER_CAP_W: f32 = 30.0;
     pub const FADER_CAP_H: f32 = 48.0;
+    /// MixLink `DecibelScaleView` leading column (ticks only).
+    pub const SCALE_LEADING: f32 = 12.0;
+    /// MixLink `Layout.scaleWidth` trailing column (ticks + numeric labels).
+    pub const SCALE_WIDTH: f32 = 28.0;
+    pub const FADER_BAY_PAD_X: f32 = 2.0;
+    pub const FADER_BAY_PAD_Y: f32 = 8.0;
+    /// MixLink `FaderView` hit width: `faderCapWidth + 12`.
+    pub const FADER_HIT_W: f32 = 42.0;
     pub const METER_W: f32 = 6.0;
     pub const METER_HOUSING: f32 = 10.0;
     pub const NAME_ROW: f32 = 42.0;
     pub const BUTTON_H: f32 = 26.0;
+    /// MixLink `HardwareButton.Style.compact` height is `buttonHeight + 1`.
+    pub const COMPACT_BUTTON_H: f32 = 27.0;
+    /// MixLink `Layout.headerButtonSize` / `HardwareIconButton`.
+    pub const HEADER_BUTTON: f32 = 22.0;
+    /// MixLink `HardwareModuleModifier` `.padding(7)`.
+    pub const MODULE_PAD: f32 = 7.0;
     pub const BUTTON_STACK: f32 = 130.0;
     pub const BUTTON_RADIUS: f32 = 1.5;
     pub const KNOB_DRAG_PX: f32 = 180.0;
