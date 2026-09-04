@@ -44,7 +44,7 @@ pub fn paint(view: &ArrangementView<'_>) -> Vec<DrawCmd> {
     theme::fill(&mut cmds, Rect { x: l.x, y: l.y, w: HEADER_W, h: l.h - TIME_RULER_H }, [0.0, 0.0, 0.0, 0.22]);
     theme::seam_v(&mut cmds, l.x + HEADER_W - 2.0, l.y, l.h - TIME_RULER_H, true);
 
-    theme::material(&mut cmds, Rect { x: l.x, y: l.y, w: HEADER_W, h: RULER_H }, &theme::UPPER_FACEPLATE);
+    theme::hardware_surface(&mut cmds, Rect { x: l.x, y: l.y, w: HEADER_W, h: RULER_H }, theme::SurfaceStyle::UpperFaceplate);
     paint_bar_ruler(&mut cmds, view);
     let _n = view.tracks.len();
     for (i, track) in view.tracks.iter().enumerate() {
@@ -92,7 +92,7 @@ fn x_of(view: &ArrangementView<'_>, frame: i64) -> f32 {
 
 fn paint_bar_ruler(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
     let l = view.layout;
-    theme::material(cmds, Rect { x: l.x + HEADER_W, y: l.y, w: l.w - HEADER_W, h: RULER_H }, &theme::UPPER_FACEPLATE);
+    theme::hardware_surface(cmds, Rect { x: l.x + HEADER_W, y: l.y, w: l.w - HEADER_W, h: RULER_H }, theme::SurfaceStyle::UpperFaceplate);
     let ppb = l.pixels_per_bar;
     let step = if ppb >= 36.0 { 1.0 } else if ppb * 4.0 >= 36.0 { 4.0 } else { 8.0 };
     let start_bar = MixTime::bar_of(-view.origin, view.tempo, view.sample_rate);
@@ -113,7 +113,7 @@ fn paint_bar_ruler(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
                     } else {
                         theme::TEXT_DIM
                     };
-                    theme::text(cmds, Rect { x: x + 3.0, y: l.y + 2.0, w: 24.0, h: 14.0 }, format!("{n}"), 9.0, color, musical == 0.0);
+                    theme::text_mono(cmds, Rect { x: x + 3.0, y: l.y + 2.0, w: 24.0, h: 14.0 }, format!("{n}"), 9.0, color, musical == 0.0);
                 }
             }
         }
@@ -237,7 +237,7 @@ fn paint_start_marker(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
         thickness: 1.4,
     });
     theme::fill(cmds, Rect { x: x - 8.0, y: l.y + 1.0, w: 50.0, h: 14.0 }, theme::METER_GREEN);
-    theme::text(cmds, Rect { x: x - 4.0, y: l.y + 1.0, w: 44.0, h: 14.0 }, "▶ START", 8.0, [0.0, 0.0, 0.0, 0.85], true);
+    theme::text_mono(cmds, Rect { x: x - 4.0, y: l.y + 1.0, w: 44.0, h: 14.0 }, "▶ START", 8.0, [0.0, 0.0, 0.0, 0.85], true);
 }
 
 fn paint_playhead(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
@@ -250,16 +250,95 @@ fn paint_playhead(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
 fn paint_time_ruler(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
     let l = view.layout;
     let y = l.y + l.h - TIME_RULER_H;
-    theme::material(cmds, Rect { x: l.x, y, w: HEADER_W, h: TIME_RULER_H }, &theme::UPPER_FACEPLATE);
-    theme::material(cmds, Rect { x: l.x + HEADER_W, y, w: l.w - HEADER_W, h: TIME_RULER_H }, &theme::UPPER_FACEPLATE);
+    theme::hardware_surface(cmds, Rect { x: l.x, y, w: HEADER_W, h: TIME_RULER_H }, theme::SurfaceStyle::UpperFaceplate);
+    theme::hardware_surface(cmds, Rect { x: l.x + HEADER_W, y, w: l.w - HEADER_W, h: TIME_RULER_H }, theme::SurfaceStyle::UpperFaceplate);
     theme::seam_h(cmds, l.x, y, l.w, true);
     theme::seam_v(cmds, l.x + HEADER_W - 2.0, y, TIME_RULER_H, true);
     let clock = MixTime::format_clock(view.playhead, view.sample_rate);
-    theme::text_center(cmds, Rect { x: l.x, y, w: HEADER_W, h: TIME_RULER_H }, clock, 10.0, theme::TEXT, true);
+    theme::text_center_mono(cmds, Rect { x: l.x, y, w: HEADER_W, h: TIME_RULER_H }, clock, 10.0, theme::TEXT, true);
+    paint_time_ticks(cmds, view, y);
     let play_x = x_of(view, view.playhead);
     if play_x >= l.x + HEADER_W && play_x <= l.x + l.w {
         cmds.push(DrawCmd::Line { a: (play_x, y), b: (play_x, y + TIME_RULER_H), color: theme::ORANGE, thickness: 1.2 });
     }
+}
+
+/// MixLink `drawTimeRuler` — major ticks with 9 medium mono clock labels.
+fn paint_time_ticks(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>, y: f32) {
+    let l = view.layout;
+    let rate = view.sample_rate.max(1.0);
+    let pps = l.pixels_per_bar as f64 * view.tempo / 240.0;
+    if pps <= 0.01 || l.w <= HEADER_W + 1.0 {
+        return;
+    }
+    let (major, minor) = time_tick_steps(pps);
+    let start_sec = frame_at(l.x + HEADER_W, &l, view.tempo, rate) as f64 / rate;
+    let end_sec = frame_at(l.x + l.w, &l, view.tempo, rate) as f64 / rate;
+    let first_minor = ((start_sec / minor).floor() as i32).max(0);
+    let last_minor = (end_sec / minor).ceil() as i32;
+    if first_minor > last_minor {
+        return;
+    }
+    let majors_every = ((major / minor).round() as i32).max(1);
+    let edge = l.x + l.w;
+    for i in first_minor..=last_minor {
+        let t = i as f64 * minor;
+        let frame = (t * rate).round() as i64;
+        let x = x_of(view, frame);
+        if x < l.x + HEADER_W - 2.0 || x > edge + 2.0 {
+            continue;
+        }
+        if i % majors_every == 0 {
+            cmds.push(DrawCmd::Line {
+                a: (x, y),
+                b: (x, y + 12.0),
+                color: [1.0, 1.0, 1.0, 0.42],
+                thickness: 1.0,
+            });
+            if x < edge - 8.0 {
+                theme::text_mono(
+                    cmds,
+                    Rect { x: x + 4.0, y: y + 3.0, w: 48.0, h: 12.0 },
+                    MixTime::format_clock_seconds(t),
+                    9.0,
+                    theme::TEXT_DIM,
+                    false,
+                );
+            }
+        } else {
+            cmds.push(DrawCmd::Line {
+                a: (x, y),
+                b: (x, y + 7.0),
+                color: [1.0, 1.0, 1.0, 0.22],
+                thickness: 1.0,
+            });
+        }
+    }
+}
+
+fn time_tick_steps(pixels_per_second: f64) -> (f64, f64) {
+    const MIN_MAJOR: f64 = 52.0;
+    const STEPS: [(f64, f64); 13] = [
+        (0.1, 0.02),
+        (0.2, 0.05),
+        (0.5, 0.1),
+        (1.0, 0.25),
+        (2.0, 0.5),
+        (5.0, 1.0),
+        (10.0, 2.0),
+        (15.0, 5.0),
+        (30.0, 5.0),
+        (60.0, 10.0),
+        (120.0, 30.0),
+        (300.0, 60.0),
+        (600.0, 120.0),
+    ];
+    for (major, minor) in STEPS {
+        if major * pixels_per_second >= MIN_MAJOR {
+            return (major, minor);
+        }
+    }
+    (1200.0, 300.0)
 }
 
 pub fn visible_bars(last: i64, play: i64, origin: i64, tempo: f64, rate: f64) -> i32 {

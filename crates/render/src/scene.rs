@@ -4,6 +4,20 @@
 
 pub type Color = [f32; 4];
 
+/// MixLink / SwiftUI colors are display-referred sRGB. wgpu sRGB targets treat
+/// vertex colors as linear and encode on present, so 0.20 would show as ~0.48.
+pub fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+pub fn srgb_to_gpu(c: Color) -> Color {
+    [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2]), c[3]]
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Rect {
     pub x: f32,
@@ -32,6 +46,8 @@ pub struct TextCmd {
     pub h_align: Align,
     pub v_align: Align,
     pub bold: bool,
+    /// MixLink `.font(.system(..., design: .monospaced))`.
+    pub monospaced: bool,
     /// Optional tighter clip rectangle. When set, the text renderer uses this
     /// as glyphon's visibility bounds while still laying text out relative to
     /// `rect`. Useful when a widget emits text inside a larger rect that
@@ -50,6 +66,27 @@ pub enum DrawCmd {
     Rect { rect: Rect, color: Color },
     RoundedRect { rect: Rect, color: Color, radius: f32 },
     VertGradient { rect: Rect, top: Color, bottom: Color },
+    HorzGradient { rect: Rect, left: Color, right: Color },
+    /// Circle with a top-leading → bottom-trailing gradient (MixLink knob wells).
+    LitDisc {
+        cx: f32,
+        cy: f32,
+        d: f32,
+        top_leading: Color,
+        middle: Color,
+        bottom_trailing: Color,
+    },
+    /// Circle with an offset radial fill (MixLink knob bodies).
+    RadialDisc {
+        cx: f32,
+        cy: f32,
+        d: f32,
+        /// Highlight center in 0..1 disc space (MixLink uses (0.32, 0.28)).
+        center: (f32, f32),
+        inner: Color,
+        mid: Color,
+        outer: Color,
+    },
     Line { a: (f32, f32), b: (f32, f32), color: Color, thickness: f32 },
     /// Textured quad. `uv` is the source rect in 0..1 texture space (aspect-fill crop).
     Image {
@@ -107,6 +144,15 @@ pub fn tessellate(scene: &[DrawCmd], viewport_size: (f32, f32)) -> Vec<Vertex> {
             }
             DrawCmd::VertGradient { rect, top, bottom } => {
                 push_vert_gradient(&mut out, rect, *top, *bottom, px_to_ndc);
+            }
+            DrawCmd::HorzGradient { rect, left, right } => {
+                push_horz_gradient(&mut out, rect, *left, *right, px_to_ndc);
+            }
+            DrawCmd::LitDisc { cx, cy, d, top_leading, middle, bottom_trailing } => {
+                push_lit_disc(&mut out, *cx, *cy, *d, *top_leading, *middle, *bottom_trailing, px_to_ndc);
+            }
+            DrawCmd::RadialDisc { cx, cy, d, center, inner, mid, outer } => {
+                push_radial_disc(&mut out, *cx, *cy, *d, *center, *inner, *mid, *outer, px_to_ndc);
             }
             DrawCmd::Line { a, b, color, thickness } => {
                 let (ax, ay) = *a;
@@ -170,6 +216,7 @@ fn push_quad(
 }
 
 fn push_tri(out: &mut Vec<Vertex>, a: [f32; 2], b: [f32; 2], c: [f32; 2], color: [f32; 4]) {
+    let color = srgb_to_gpu(color);
     out.push(Vertex { pos: a, color });
     out.push(Vertex { pos: b, color });
     out.push(Vertex { pos: c, color });
@@ -186,12 +233,134 @@ fn push_vert_gradient(
     let p1 = map(rect.x + rect.w, rect.y);
     let p2 = map(rect.x + rect.w, rect.y + rect.h);
     let p3 = map(rect.x, rect.y + rect.h);
+    let top = srgb_to_gpu(top);
+    let bottom = srgb_to_gpu(bottom);
     out.push(Vertex { pos: p0, color: top });
     out.push(Vertex { pos: p1, color: top });
     out.push(Vertex { pos: p2, color: bottom });
     out.push(Vertex { pos: p0, color: top });
     out.push(Vertex { pos: p2, color: bottom });
     out.push(Vertex { pos: p3, color: bottom });
+}
+
+fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+        a[3] + (b[3] - a[3]) * t,
+    ]
+}
+
+fn push_lit_disc(
+    out: &mut Vec<Vertex>,
+    cx: f32,
+    cy: f32,
+    d: f32,
+    top_leading: Color,
+    middle: Color,
+    bottom_trailing: Color,
+    map: impl Fn(f32, f32) -> [f32; 2],
+) {
+    let r = (d * 0.5).max(0.5);
+    let segs = 36;
+    let origin = map(cx, cy);
+    for i in 0..segs {
+        let a0 = std::f32::consts::TAU * (i as f32 / segs as f32);
+        let a1 = std::f32::consts::TAU * ((i + 1) as f32 / segs as f32);
+        let color_at = |a: f32| {
+            let t = (a.cos() + a.sin() + 2.0) * 0.25;
+            if t < 0.5 {
+                lerp_color(top_leading, middle, t * 2.0)
+            } else {
+                lerp_color(middle, bottom_trailing, (t - 0.5) * 2.0)
+            }
+        };
+        let p1 = map(cx + a0.cos() * r, cy + a0.sin() * r);
+        let p2 = map(cx + a1.cos() * r, cy + a1.sin() * r);
+        out.push(Vertex { pos: origin, color: srgb_to_gpu(middle) });
+        out.push(Vertex { pos: p1, color: srgb_to_gpu(color_at(a0)) });
+        out.push(Vertex { pos: p2, color: srgb_to_gpu(color_at(a1)) });
+    }
+}
+
+fn push_radial_disc(
+    out: &mut Vec<Vertex>,
+    cx: f32,
+    cy: f32,
+    d: f32,
+    center: (f32, f32),
+    inner: Color,
+    mid: Color,
+    outer: Color,
+    map: impl Fn(f32, f32) -> [f32; 2],
+) {
+    let r = (d * 0.5).max(0.5);
+    let hx = cx + (center.0 - 0.5) * d;
+    let hy = cy + (center.1 - 0.5) * d;
+    let max_d = r * 1.44;
+    let color_at = |x: f32, y: f32| {
+        let t = ((x - hx).hypot(y - hy) / max_d).clamp(0.0, 1.0);
+        if t < 0.45 {
+            lerp_color(inner, mid, t / 0.45)
+        } else {
+            lerp_color(mid, outer, (t - 0.45) / 0.55)
+        }
+    };
+    let rings = 6;
+    let segs = 32;
+    for ring in 0..rings {
+        let r0 = r * (ring as f32 / rings as f32);
+        let r1 = r * ((ring + 1) as f32 / rings as f32);
+        for s in 0..segs {
+            let a0 = std::f32::consts::TAU * (s as f32 / segs as f32);
+            let a1 = std::f32::consts::TAU * ((s + 1) as f32 / segs as f32);
+            let x00 = cx + a0.cos() * r0;
+            let y00 = cy + a0.sin() * r0;
+            let x01 = cx + a1.cos() * r0;
+            let y01 = cy + a1.sin() * r0;
+            let x10 = cx + a0.cos() * r1;
+            let y10 = cy + a0.sin() * r1;
+            let x11 = cx + a1.cos() * r1;
+            let y11 = cy + a1.sin() * r1;
+            let p00 = map(x00, y00);
+            let p01 = map(x01, y01);
+            let p10 = map(x10, y10);
+            let p11 = map(x11, y11);
+            let c00 = color_at(x00, y00);
+            let c01 = color_at(x01, y01);
+            let c10 = color_at(x10, y10);
+            let c11 = color_at(x11, y11);
+            out.push(Vertex { pos: p00, color: srgb_to_gpu(c00) });
+            out.push(Vertex { pos: p10, color: srgb_to_gpu(c10) });
+            out.push(Vertex { pos: p11, color: srgb_to_gpu(c11) });
+            out.push(Vertex { pos: p00, color: srgb_to_gpu(c00) });
+            out.push(Vertex { pos: p11, color: srgb_to_gpu(c11) });
+            out.push(Vertex { pos: p01, color: srgb_to_gpu(c01) });
+        }
+    }
+}
+
+fn push_horz_gradient(
+    out: &mut Vec<Vertex>,
+    rect: &Rect,
+    left: Color,
+    right: Color,
+    map: impl Fn(f32, f32) -> [f32; 2],
+) {
+    let p0 = map(rect.x, rect.y);
+    let p1 = map(rect.x + rect.w, rect.y);
+    let p2 = map(rect.x + rect.w, rect.y + rect.h);
+    let p3 = map(rect.x, rect.y + rect.h);
+    let left = srgb_to_gpu(left);
+    let right = srgb_to_gpu(right);
+    out.push(Vertex { pos: p0, color: left });
+    out.push(Vertex { pos: p1, color: right });
+    out.push(Vertex { pos: p2, color: right });
+    out.push(Vertex { pos: p0, color: left });
+    out.push(Vertex { pos: p2, color: right });
+    out.push(Vertex { pos: p3, color: left });
 }
 
 fn push_rounded(
@@ -275,5 +444,20 @@ mod tests {
             (200.0, 100.0),
         );
         assert_eq!(v.len(), 8 * 6);
+    }
+
+    #[test]
+    fn mixlink_srgb_faceplate_is_uploaded_as_linear() {
+        let linear = srgb_to_linear(0.20);
+        assert!((linear - 0.0331).abs() < 0.002);
+        let v = tessellate(
+            &[DrawCmd::Rect {
+                rect: Rect { x: 0.0, y: 0.0, w: 10.0, h: 10.0 },
+                color: [0.20, 0.20, 0.20, 1.0],
+            }],
+            (10.0, 10.0),
+        );
+        assert!((v[0].color[0] - linear).abs() < 1e-6);
+        assert_eq!(v[0].color[3], 1.0);
     }
 }

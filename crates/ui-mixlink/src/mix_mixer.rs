@@ -2,7 +2,7 @@
 
 use analog::AnalogEngine;
 use project::{MixDocument, MixLane, MixTrack, KNOB_COUNT};
-use render::{aspect_fill_uv, DrawCmd, Rect, TextureId};
+use render::{DrawCmd, Rect};
 
 use crate::theme::{self, Layout};
 
@@ -23,7 +23,11 @@ pub struct MixMixerView<'a> {
 
 pub fn paint(view: &MixMixerView<'_>) -> Vec<DrawCmd> {
     let mut cmds = Vec::new();
-    theme::material(&mut cmds, Rect { x: view.x, y: view.y, w: view.w, h: view.h }, &theme::UPPER_FACEPLATE);
+    theme::hardware_surface(
+        &mut cmds,
+        Rect { x: view.x, y: view.y, w: view.w, h: view.h },
+        theme::SurfaceStyle::FaderBay,
+    );
     let tracks: &[MixTrack] = view.mix.map(|m| m.tracks.as_slice()).unwrap_or(&[]);
     let n = tracks.len().max(1) as f32;
     let ch_w = ((view.w - 8.0) / n).clamp(88.0, 106.0);
@@ -64,9 +68,24 @@ fn paint_track(
             y += 16.0;
         }
     }
-    theme::text_center(cmds, Rect { x, y, w, h: 16.0 }, track.name.as_str(), 10.0, theme::TEXT, selected);
+    theme::text_center(
+        cmds,
+        Rect { x, y, w, h: 16.0 },
+        track.name.as_str(),
+        9.0,
+        if selected { theme::TEXT } else { theme::TEXT_DIM },
+        true,
+    );
     y += 18.0;
-    crate::widgets::knob(cmds, x + w * 0.5 - 11.0, y, 22.0, track.pan, theme::POINTER, Some(pan_label(track.pan)));
+    crate::widgets::knob(
+        cmds,
+        x + w * 0.5 - 14.0,
+        y,
+        28.0,
+        track.pan,
+        crate::widgets::KnobKind::Pan,
+        None,
+    );
     y += 36.0;
     let peak = view.peaks.get(index).copied().unwrap_or(0.0);
     let meter_h = (view.h - (y - view.y) - 36.0).max(40.0);
@@ -84,11 +103,7 @@ fn paint_track(
         w: Layout::FADER_CAP_W,
         h: Layout::FADER_CAP_H,
     };
-    cmds.push(DrawCmd::Image {
-        rect: dest,
-        uv: aspect_fill_uv(30.0, 53.0, dest.w, dest.h),
-        texture: TextureId::FaderCap,
-    });
+    crate::widgets::fader_cap(cmds, dest);
     crate::widgets::hardware_pad(
         cmds,
         Rect { x: x + 6.0, y: view.y + view.h - 28.0, w: w * 0.5 - 8.0, h: 22.0 },
@@ -104,16 +119,6 @@ fn paint_track(
         theme::AMBER,
     );
     let _ = view.engine;
-}
-
-fn pan_label(pan: f32) -> &'static str {
-    if pan < 0.48 {
-        "L"
-    } else if pan > 0.52 {
-        "R"
-    } else {
-        "C"
-    }
 }
 
 fn paint_main_placeholder(cmds: &mut Vec<DrawCmd>, view: &MixMixerView<'_>, x: f32, w: f32) {

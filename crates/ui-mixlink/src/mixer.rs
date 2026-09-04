@@ -1,5 +1,5 @@
 use analog::{AnalogEngine, MixAssign, ReturnLane, ALL_SEND_LANES};
-use render::{aspect_fill_uv, DrawCmd, Rect, TextureId};
+use render::{DrawCmd, Rect};
 
 use crate::theme::{self, Layout};
 use crate::widgets;
@@ -48,19 +48,23 @@ pub enum MixerExtraHit {
 }
 
 pub fn paint(view: &MixerView<'_>) -> (Vec<DrawCmd>, Vec<(Rect, MixerExtraHit)>) {
-    let mut cmds = Vec::with_capacity(2048);
+    let mut cmds = Vec::with_capacity(4096);
     let mut extras = Vec::new();
     let l = view.layout;
-    theme::material(&mut cmds, Rect { x: l.x, y: l.y, w: l.w, h: l.h }, &theme::UPPER_FACEPLATE);
-
     let sends: Vec<ReturnLane> = view.engine.config.visible_send_lanes();
+    theme::mixer_chassis(
+        &mut cmds,
+        Rect { x: l.x, y: l.y, w: l.w, h: l.h },
+        Layout::upper_faceplate_height(&sends),
+    );
+
     let mut x = l.x + Layout::MIXER_LEADING + 4.0 - l.scroll_x;
     group_header(&mut cmds, x, l.y, l.ch_w * 8.0, "Channels", None, &mut extras);
     for i in 0..8 {
         paint_strip(&mut cmds, view, StripKind::Input(i), x + i as f32 * l.ch_w, l.ch_w, &sends, &mut extras);
     }
     x += l.ch_w * 8.0;
-    theme::fill(&mut cmds, Rect { x, y: l.y, w: 1.0, h: l.h }, theme::SEAM_DARK);
+    theme::fill(&mut cmds, Rect { x, y: l.y, w: 1.0, h: l.h }, [0.05, 0.05, 0.05, 1.0]);
     x += 1.0;
     group_header(
         &mut cmds,
@@ -75,13 +79,13 @@ pub fn paint(view: &MixerView<'_>) -> (Vec<DrawCmd>, Vec<(Rect, MixerExtraHit)>)
         paint_strip(&mut cmds, view, StripKind::Return(*lane), x + i as f32 * l.ch_w, l.ch_w, &sends, &mut extras);
     }
     x += l.ch_w * sends.len() as f32;
-    theme::fill(&mut cmds, Rect { x, y: l.y, w: 1.0, h: l.h }, theme::SEAM_DARK);
+    theme::fill(&mut cmds, Rect { x, y: l.y, w: 1.0, h: l.h }, [0.05, 0.05, 0.05, 1.0]);
     x += 1.0;
     group_header(&mut cmds, x, l.y, l.ch_w * 2.0, "Bus returns", None, &mut extras);
     paint_strip(&mut cmds, view, StripKind::Return(ReturnLane::Bus1), x, l.ch_w, &sends, &mut extras);
     paint_strip(&mut cmds, view, StripKind::Return(ReturnLane::Bus2), x + l.ch_w, l.ch_w, &sends, &mut extras);
     x += l.ch_w * 2.0;
-    theme::fill(&mut cmds, Rect { x, y: l.y, w: 1.0, h: l.h }, theme::SEAM_DARK);
+    theme::fill(&mut cmds, Rect { x, y: l.y, w: 1.0, h: l.h }, [0.05, 0.05, 0.05, 1.0]);
     x += 1.0;
     group_header(&mut cmds, x, l.y, l.main_w, "Main", None, &mut extras);
     paint_strip(&mut cmds, view, StripKind::Main, x, l.main_w, &sends, &mut extras);
@@ -97,8 +101,7 @@ fn group_header(
     plus_minus: Option<(i32, i32)>,
     extras: &mut Vec<(Rect, MixerExtraHit)>,
 ) {
-    theme::material(cmds, Rect { x, y, w, h: Layout::GROUP_HEADER }, &theme::UPPER_FACEPLATE);
-    theme::text(cmds, Rect { x: x + 8.0, y: y + 18.0, w: w - 12.0, h: 22.0 }, title, 13.0, theme::PRIMARY_TEXT, true);
+    theme::text(cmds, Rect { x: x + 8.0, y: y + 18.0, w: w - 12.0, h: 22.0 }, title, 11.5, theme::SECONDARY_TEXT, true);
     if let Some((count, max)) = plus_minus {
         let bx = x + w - 52.0;
         if count > 2 {
@@ -124,8 +127,6 @@ fn paint_strip(
 ) {
     let l = view.layout;
     let y0 = l.y + Layout::GROUP_HEADER;
-    theme::material(cmds, Rect { x, y: y0, w, h: l.h - Layout::GROUP_HEADER }, &theme::UPPER_FACEPLATE);
-    theme::seam_v(cmds, x + w - 1.0, y0, l.h - Layout::GROUP_HEADER, false);
 
     let (fader, pan, name, id, has_sends, dim, enabled) = match kind {
         StripKind::Input(i) => {
@@ -150,9 +151,17 @@ fn paint_strip(
     }
 
     let mut y = y0;
-    theme::fill(cmds, Rect { x: x + w * 0.5 - 8.0, y: y + 5.0, w: Layout::ENABLE_W, h: Layout::ENABLE_H }, theme::DEEP_SLOT);
-    if enabled && !matches!(kind, StripKind::Main) {
-        theme::fill(cmds, Rect { x: x + w * 0.5 - 6.0, y: y + 6.0, w: 12.0, h: 8.0 }, theme::METER_GREEN);
+    if !matches!(kind, StripKind::Main) {
+        widgets::enable_toggle(
+            cmds,
+            Rect {
+                x: x + w * 0.5 - Layout::ENABLE_W * 0.5,
+                y: y + (Layout::ENABLE_ROW - Layout::ENABLE_H) * 0.5,
+                w: Layout::ENABLE_W,
+                h: Layout::ENABLE_H,
+            },
+            enabled,
+        );
     }
     y += Layout::ENABLE_ROW;
 
@@ -160,24 +169,31 @@ fn paint_strip(
     if has_sends {
         if let StripKind::Input(i) = kind {
             for lane in sends {
-                name_bar(cmds, x, y, w, first_input, Some(*lane), view.engine);
+                name_bar(cmds, x, y, w, first_input, true, Some(*lane), view.engine);
                 y += Layout::SEND_NAME_BAR;
                 let aux = view.engine.surface.strips[i].aux(*lane);
+                let row_h = Layout::send_row_h(*lane);
+                theme::faceplate_cell(
+                    cmds,
+                    Rect { x, y, w, h: row_h },
+                    Some(*lane) == sends.last().copied(),
+                    false,
+                );
                 widgets::knob(
                     cmds,
                     x + (w - Layout::SEND_KNOB) * 0.5,
                     y + 4.0,
                     Layout::SEND_KNOB,
                     aux,
-                    theme::send_color(*lane),
+                    widgets::KnobKind::Send(theme::send_color(*lane)),
                     Some(&theme::fader_value_text(aux)),
                 );
-                y += Layout::send_row_h(*lane);
+                y += row_h;
             }
         }
     } else {
         for lane in sends {
-            name_bar(cmds, x, y, w, false, None, view.engine);
+            name_bar(cmds, x, y, w, false, false, None, view.engine);
             y += Layout::SEND_NAME_BAR;
             if matches!(kind, StripKind::Return(ReturnLane::SendC)) && sends.len() >= 3 && *lane == ReturnLane::SendC {
                 let box_r = Rect { x: x + 10.0, y: y + 10.0, w: w - 16.0, h: 24.0 };
@@ -188,8 +204,9 @@ fn paint_strip(
         }
     }
 
-    name_bar(cmds, x, y, w, first_input, None, view.engine);
+    name_bar(cmds, x, y, w, first_input, !matches!(kind, StripKind::Main), None, view.engine);
     y += Layout::SEND_NAME_BAR;
+    theme::faceplate_cell(cmds, Rect { x, y, w, h: Layout::PAN_ROW }, false, true);
     if !matches!(kind, StripKind::Main) {
         widgets::knob(
             cmds,
@@ -197,22 +214,35 @@ fn paint_strip(
             y + 6.0,
             Layout::PAN_KNOB,
             pan,
-            theme::PRIMARY_TEXT,
-            Some(&theme::pan_text(pan)),
+            widgets::KnobKind::Pan,
+            None,
         );
     }
+    theme::text_center(
+        cmds,
+        Rect { x, y: y + Layout::PAN_ROW - 18.0, w, h: 16.0 },
+        id,
+        11.0,
+        theme::SECONDARY_TEXT,
+        true,
+    );
     y += Layout::PAN_ROW;
 
-    theme::text_center(cmds, Rect { x, y, w, h: 16.0 }, id, 11.0, theme::TEXT, true);
-    y += 18.0;
-
     let bay_h = (l.y + l.h - y - Layout::NAME_ROW - Layout::BUTTON_STACK).max(80.0);
-    theme::material(cmds, Rect { x, y, w, h: bay_h }, &theme::FADER_BAY);
-    theme::fill(cmds, Rect { x, y, w, h: 10.0 }, [0.0, 0.0, 0.0, 0.28]);
+    theme::channel_bay_shading(cmds, Rect { x, y, w, h: bay_h + Layout::NAME_ROW + Layout::BUTTON_STACK });
     paint_fader(cmds, x, y, w, bay_h, fader, peak_for(view, kind), first_input || matches!(kind, StripKind::Main));
     y += bay_h;
 
-    widgets::menu_label(cmds, Rect { x: x + 4.0, y, w: w - 8.0, h: Layout::NAME_ROW }, &name);
+    widgets::strip_name_label(
+        cmds,
+        Rect { x, y, w, h: Layout::NAME_ROW },
+        &name,
+        widgets::StripNameStyle {
+            diamond: !matches!(kind, StripKind::Main),
+            dim,
+            selected: matches!(kind, StripKind::Main),
+        },
+    );
     y += Layout::NAME_ROW;
 
     match kind {
@@ -232,6 +262,8 @@ fn paint_strip(
         }
         StripKind::Main => {}
     }
+
+    theme::channel_seam(cmds, x + w - 1.0, y0, l.h - Layout::GROUP_HEADER, false);
 }
 
 fn name_bar(
@@ -240,11 +272,15 @@ fn name_bar(
     y: f32,
     w: f32,
     show_title: bool,
+    show_plate: bool,
     lane: Option<ReturnLane>,
     engine: &AnalogEngine,
 ) {
-    theme::fill(cmds, Rect { x, y, w, h: Layout::SEND_NAME_BAR }, [0.105, 0.105, 0.105, 1.0]);
-    theme::fill(cmds, Rect { x, y, w, h: 1.0 }, [0.0, 0.0, 0.0, 0.40]);
+    if show_plate {
+        theme::fill(cmds, Rect { x, y, w, h: Layout::SEND_NAME_BAR }, [0.08, 0.08, 0.08, 1.0]);
+        theme::fill(cmds, Rect { x, y, w, h: 1.0 }, [0.0, 0.0, 0.0, 0.40]);
+        theme::fill(cmds, Rect { x, y: y + Layout::SEND_NAME_BAR - 1.0, w, h: 1.0 }, [1.0, 1.0, 1.0, 0.04]);
+    }
     if show_title {
         let label = if let Some(lane) = lane {
             format!("SEND {} · {}", lane.strip_title(), engine.return_display_name(lane))
@@ -269,10 +305,22 @@ fn paint_fader(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, w: f32, h: f32, lin: f32
     let track_top = y + 8.0;
     let track_h = (h - 16.0).max(Layout::FADER_CAP_H);
     widgets::decibel_scale(cmds, meter_x + Layout::METER_HOUSING + 2.0, track_top, track_h, labels);
+    let slot_x = trough_x + (Layout::FADER_TROUGH - Layout::FADER_SLOT) * 0.5;
+    cmds.push(DrawCmd::RoundedRect {
+        rect: Rect { x: slot_x - 1.5, y: track_top, w: Layout::FADER_SLOT + 3.0, h: track_h },
+        color: [0.04, 0.04, 0.04, 1.0],
+        radius: (Layout::FADER_SLOT + 3.0) * 0.5,
+    });
+    cmds.push(DrawCmd::RoundedRect {
+        rect: Rect { x: slot_x, y: track_top, w: Layout::FADER_SLOT, h: track_h },
+        color: [0.01, 0.01, 0.01, 1.0],
+        radius: Layout::FADER_SLOT * 0.5,
+    });
+    theme::fill(cmds, Rect { x: slot_x, y: track_top + 1.0, w: 1.2, h: track_h - 2.0 }, [0.0, 0.0, 0.0, 0.55]);
     theme::fill(
         cmds,
-        Rect { x: trough_x + (Layout::FADER_TROUGH - Layout::FADER_SLOT) * 0.5, y: track_top, w: Layout::FADER_SLOT, h: track_h },
-        theme::DEEP_SLOT,
+        Rect { x: slot_x + Layout::FADER_SLOT - 0.8, y: track_top + 1.0, w: 0.8, h: track_h - 2.0 },
+        [1.0, 1.0, 1.0, 0.08],
     );
     theme::fill(cmds, Rect { x: meter_x, y: track_top, w: Layout::METER_HOUSING, h: track_h }, theme::DEEP_SLOT);
     let segs = Layout::METER_SEGMENTS;
@@ -293,13 +341,10 @@ fn paint_fader(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, w: f32, h: f32, lin: f32
     let travel = (track_h - Layout::FADER_CAP_H).max(0.0);
     let cap_y = track_top + travel * (1.0 - lin.clamp(0.0, 1.0));
     let cap_x = trough_x + Layout::FADER_TROUGH * 0.5 - Layout::FADER_CAP_W * 0.5;
-    theme::fill(cmds, Rect { x: cap_x + 1.0, y: cap_y + 2.0, w: Layout::FADER_CAP_W, h: Layout::FADER_CAP_H }, [0.0, 0.0, 0.0, 0.55]);
-    let uv = aspect_fill_uv(30.0, 48.0, Layout::FADER_CAP_W, Layout::FADER_CAP_H);
-    cmds.push(DrawCmd::Image {
-        rect: Rect { x: cap_x, y: cap_y, w: Layout::FADER_CAP_W, h: Layout::FADER_CAP_H },
-        uv,
-        texture: TextureId::FaderCap,
-    });
+    widgets::fader_cap(
+        cmds,
+        Rect { x: cap_x, y: cap_y, w: Layout::FADER_CAP_W, h: Layout::FADER_CAP_H },
+    );
 }
 
 pub fn fader_rail(layout: &MixerLayout, _strip_x: f32, _strip_w: f32) -> (f32, f32) {

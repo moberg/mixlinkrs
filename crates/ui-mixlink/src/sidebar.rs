@@ -62,7 +62,11 @@ pub fn paint(view: &SidebarView<'_>, w: f32, h: f32) -> (Vec<DrawCmd>, Vec<(Rect
     let x = w - Layout::SIDEBAR_WIDTH;
     let y = crate::chrome::HEADER_H;
     let sh = h - crate::chrome::HEADER_H - Layout::FOOTER_H;
-    theme::material_grain(&mut cmds, Rect { x, y, w: Layout::SIDEBAR_WIDTH, h: sh }, &theme::SIDEBAR_MAT);
+    theme::hardware_surface(
+        &mut cmds,
+        Rect { x, y, w: Layout::SIDEBAR_WIDTH, h: sh },
+        theme::SurfaceStyle::Sidebar,
+    );
     theme::seam_v(&mut cmds, x, y, sh, true);
 
     let body_y = y + 42.0;
@@ -76,7 +80,8 @@ pub fn paint(view: &SidebarView<'_>, w: f32, h: f32) -> (Vec<DrawCmd>, Vec<(Rect
         paint_mix(view, &mut cmds, &mut hits, x, &mut yy, clip);
     }
 
-    theme::material_grain(&mut cmds, Rect { x, y, w: Layout::SIDEBAR_WIDTH, h: 42.0 }, &theme::SIDEBAR_MAT);
+    theme::fill(&mut cmds, Rect { x, y, w: Layout::SIDEBAR_WIDTH, h: 42.0 }, [0.0, 0.0, 0.0, 0.12]);
+    theme::seam_h(&mut cmds, x, y + 40.0, Layout::SIDEBAR_WIDTH, false);
     widgets::hardware_pad(
         &mut cmds,
         Rect { x: x + 8.0, y: y + 8.0, w: 110.0, h: 26.0 },
@@ -95,7 +100,8 @@ pub fn paint(view: &SidebarView<'_>, w: f32, h: f32) -> (Vec<DrawCmd>, Vec<(Rect
     hits.push((Rect { x: x + 126.0, y: y + 8.0, w: 110.0, h: 26.0 }, SidebarHit::Page(Page::Mix)));
 
     let by = y + sh - 36.0;
-    theme::material_grain(&mut cmds, Rect { x, y: by - 4.0, w: Layout::SIDEBAR_WIDTH, h: 40.0 }, &theme::SIDEBAR_MAT);
+    theme::fill(&mut cmds, Rect { x, y: by - 4.0, w: Layout::SIDEBAR_WIDTH, h: 40.0 }, [0.0, 0.0, 0.0, 0.12]);
+    theme::seam_h(&mut cmds, x, by - 4.0, Layout::SIDEBAR_WIDTH, false);
     widgets::hardware_pad(
         &mut cmds,
         Rect { x: x + 136.0, y: by, w: 72.0, h: 26.0 },
@@ -126,7 +132,7 @@ fn paint_record(
             break;
         }
         let card = Rect { x: x + 8.0, y: *y, w: Layout::SIDEBAR_WIDTH - 16.0, h: 78.0 };
-        theme::fill(cmds, card, theme::RECESSED.middle);
+        widgets::hardware_module(cmds, card);
         widgets::text_field(
             cmds,
             Rect { x: card.x + 6.0, y: card.y + 6.0, w: card.w - 36.0, h: 20.0 },
@@ -162,7 +168,7 @@ fn paint_record(
             break;
         }
         let card = Rect { x: x + 8.0, y: *y, w: Layout::SIDEBAR_WIDTH - 16.0, h: 96.0 };
-        theme::fill(cmds, card, theme::RECESSED.middle);
+        widgets::hardware_module(cmds, card);
         widgets::text_field(
             cmds,
             Rect { x: card.x + 6.0, y: card.y + 6.0, w: card.w - 36.0, h: 20.0 },
@@ -268,7 +274,7 @@ fn paint_mix(
                 break;
             }
             let card = Rect { x: x + 8.0, y: *y, w: Layout::SIDEBAR_WIDTH - 16.0, h: 72.0 };
-            theme::fill(cmds, card, theme::RECESSED.middle);
+            widgets::hardware_module(cmds, card);
             theme::text(cmds, Rect { x: card.x + 6.0, y: card.y + 4.0, w: card.w - 32.0, h: 18.0 }, insert.title(), 12.0, theme::TEXT, true);
             widgets::icon_pad(cmds, Rect { x: card.x + card.w - 26.0, y: card.y + 4.0, w: 20.0, h: 20.0 }, "−", true);
             hits.push((Rect { x: card.x + card.w - 26.0, y: card.y + 4.0, w: 20.0, h: 20.0 }, SidebarHit::RemoveInsert(insert.id)));

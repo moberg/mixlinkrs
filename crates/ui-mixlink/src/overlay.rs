@@ -58,7 +58,7 @@ pub fn paint_settings(engine: &AnalogEngine, w: f32, h: f32, focus: &TextFocus, 
     let rect = Rect { x: w * 0.5 - 220.0, y: 64.0, w: 440.0, h: (h - 120.0).min(420.0) };
     theme::fill(&mut cmds, Rect { x: 0.0, y: 0.0, w, h }, [0.0, 0.0, 0.0, 0.62]);
     theme::fill(&mut cmds, rect, [0.12, 0.125, 0.12, 1.0]);
-    theme::material(&mut cmds, rect, &theme::SIDEBAR_MAT);
+    theme::hardware_surface(&mut cmds, rect, theme::SurfaceStyle::Sidebar);
     theme::text_center(
         &mut cmds,
         Rect { x: rect.x, y: rect.y + 10.0, w: rect.w, h: 22.0 },
@@ -129,7 +129,7 @@ pub fn paint_channels(engine: &AnalogEngine, w: f32, h: f32, focus: &TextFocus, 
     let rect = Rect { x: 24.0, y: 48.0, w: body_w, h: h - 96.0 };
     theme::fill(&mut cmds, Rect { x: 0.0, y: 0.0, w, h }, [0.0, 0.0, 0.0, 0.62]);
     theme::fill(&mut cmds, rect, [0.12, 0.125, 0.12, 1.0]);
-    theme::material(&mut cmds, rect, &theme::SIDEBAR_MAT);
+    theme::hardware_surface(&mut cmds, rect, theme::SurfaceStyle::Sidebar);
     theme::text(&mut cmds, Rect { x: rect.x + 16.0, y: rect.y + 10.0, w: 200.0, h: 20.0 }, "Channels", 14.0, theme::TEXT, true);
     let col_w = (rect.w - 24.0) * 0.5;
     let mut fields = Vec::new();
@@ -190,7 +190,7 @@ fn paint_channel_col(
 }
 
 fn field_label(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, s: &str) {
-    theme::text(cmds, Rect { x, y, w: 120.0, h: 24.0 }, s, 11.0, theme::TEXT_DIM, false);
+    theme::text(cmds, Rect { x, y, w: 120.0, h: 24.0 }, s, 14.0, theme::TEXT_DIM, false);
 }
 
 pub fn settings_hits(w: f32, h: f32) -> SettingsHits {
@@ -226,6 +226,12 @@ pub fn menu_at(rect: Rect, items: &[MenuItem], y: f32) -> Option<usize> {
 
 pub fn layout_popup(anchor: Rect, items: &[MenuItem], window_h: f32) -> Rect {
     let h = widgets::menu_height(items).min(window_h - 16.0);
-    let y = (anchor.y + anchor.h).min(window_h - h - 8.0);
-    Rect { x: anchor.x.max(8.0), y, w: anchor.w.max(240.0).min(320.0), h }
+    let gap = 4.0;
+    let y = (anchor.y + anchor.h + gap).min(window_h - h - 8.0).max(8.0);
+    Rect {
+        x: anchor.x.max(8.0),
+        y,
+        w: anchor.w.max(240.0).min(320.0),
+        h,
+    }
 }

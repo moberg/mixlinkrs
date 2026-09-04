@@ -72,7 +72,9 @@ pub fn bookmark_from_path(path: &Path) -> Result<Vec<u8>, BookmarkError> {
     #[cfg(target_os = "macos")]
     {
         if let Some(data) = macos::bookmark_from_path(path) {
-            return Ok(data);
+            if !data.is_empty() {
+                return Ok(data);
+            }
         }
     }
     let s = path.to_str().ok_or(BookmarkError::InvalidPath)?;
@@ -142,7 +144,7 @@ mod macos {
                 error: &mut error,
             ]
         };
-        data.map(|d| nsdata_bytes(&d))
+        data.filter(|d| !d.is_empty()).map(|d| d.bytes().to_vec())
     }
 
     pub fn resolve_bookmark(data: &[u8]) -> Option<PathBuf> {
@@ -163,16 +165,6 @@ mod macos {
         let _: bool = unsafe { msg_send![&*url, startAccessingSecurityScopedResource] };
         let ns_path: Option<Id<NSString>> = unsafe { msg_send_id![&*url, path] };
         ns_path.map(|p| PathBuf::from(p.to_string()))
-    }
-
-    fn nsdata_bytes(data: &NSData) -> Vec<u8> {
-        let len: usize = unsafe { msg_send![data, length] };
-        let ptr: *const u8 = unsafe { msg_send![data, bytes] };
-        if ptr.is_null() || len == 0 {
-            Vec::new()
-        } else {
-            unsafe { std::slice::from_raw_parts(ptr, len).to_vec() }
-        }
     }
 }
 

@@ -13,4 +13,4 @@ pub mod widgets;
 
 pub use chrome::{Page, HEADER_H};
 pub use mixer::MixerLayout;
-pub use theme::{Color, Layout};
+pub use theme::{Color, Layout, SurfaceStyle};

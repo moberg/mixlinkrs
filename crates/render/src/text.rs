@@ -10,7 +10,8 @@ use std::sync::Arc;
 
 use glyphon::{
     Attrs, Buffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution,
-    Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    Shaping, Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    Weight,
 };
 
 use crate::scene::{Align, Color, Rect, TextCmd};
@@ -34,7 +35,9 @@ impl TextSystem {
         queue: &wgpu::Queue,
         format: wgpu::TextureFormat,
     ) -> Self {
-        let font_system = FontSystem::new();
+        let mut font_system = FontSystem::new();
+        configure_system_ui_font(&mut font_system);
+        configure_system_mono_font(&mut font_system);
         let swash_cache = SwashCache::new();
         let cache = Cache::new(device);
         let viewport = Viewport::new(device, &cache);
@@ -92,9 +95,7 @@ impl TextSystem {
                 Some((cmd.rect.w * s).max(1.0)),
                 Some((cmd.rect.h * s).max(1.0)),
             );
-            let attrs = Attrs::new()
-                .family(Family::SansSerif)
-                .weight(if cmd.bold { glyphon::Weight::BOLD } else { glyphon::Weight::NORMAL });
+            let attrs = ui_text_attrs(cmd.bold, cmd.monospaced);
             buffer.set_text(
                 &mut self.font_system,
                 &cmd.text,
@@ -199,6 +200,191 @@ fn longest_line_w(buffer: &Buffer) -> f32 {
     w
 }
 
+/// MixLink `.font(.system(size:weight:design:))` — SF via SansSerif, SF Mono
+/// via Monospace. Semibold (not extra-bold) when `bold` is set.
+fn ui_text_attrs(bold: bool, monospaced: bool) -> Attrs<'static> {
+    Attrs::new()
+        .family(if monospaced {
+            Family::Monospace
+        } else {
+            Family::SansSerif
+        })
+        .weight(if bold {
+            Weight::SEMIBOLD
+        } else {
+            Weight::NORMAL
+        })
+}
+
+/// cosmic-text defaults sans-serif to "Fira Sans". On macOS MixLink uses the
+/// system UI font (`.font(.system)` → SF Pro / System Font). SFNS.ttf is a
+/// variable face registered only as Regular (400); requesting Bold/Semibold
+/// then skips it (`font_weight_diff == 0` required) and falls through to
+/// Menlo. Point SansSerif at that family and alias a 600-weight OS/2 copy so
+/// MixLink's `.semibold` stays on SF.
+fn configure_system_ui_font(font_system: &mut FontSystem) {
+    #[cfg(target_os = "macos")]
+    {
+        const CANDIDATES: &[&str] = &[
+            ".AppleSystemUIFont",
+            "SF Pro Text",
+            "SF Pro Display",
+            "System Font",
+            ".SF NS",
+        ];
+        let (family, regular_id) = {
+            let db = font_system.db();
+            let family = CANDIDATES
+                .iter()
+                .copied()
+                .find(|name| db.faces().any(|face| face.families.iter().any(|(n, _)| n == name)))
+                .map(str::to_string);
+            let regular_id = family.as_deref().and_then(|fam| {
+                db.faces()
+                    .find(|face| {
+                        face.weight == Weight::NORMAL
+                            && face.style == Style::Normal
+                            && face.families.iter().any(|(n, _)| n == fam)
+                    })
+                    .map(|face| face.id)
+            });
+            (family, regular_id)
+        };
+
+        if let Some(ref family) = family {
+            font_system.db_mut().set_sans_serif_family(family.clone());
+        } else if font_system
+            .db_mut()
+            .load_font_file("/System/Library/Fonts/SFNS.ttf")
+            .is_ok()
+        {
+            font_system.db_mut().set_sans_serif_family("System Font");
+        }
+
+        let id = regular_id.or_else(|| {
+            font_system.db().faces().find(|face| {
+                face.weight == Weight::NORMAL
+                    && face.style == Style::Normal
+                    && face.families.iter().any(|(n, _)| n == "System Font" || n == ".SF NS")
+            }).map(|face| face.id)
+        });
+        if let Some(id) = id {
+            if let Some(bytes) = font_system.db().with_face_data(id, |data, _| data.to_vec()) {
+                if let Some(semibold) = patch_ttf_os2_weight(&bytes, 600) {
+                    font_system.db_mut().load_font_data(semibold);
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = font_system;
+    }
+}
+
+/// MixLink `.design(.monospaced)` / `NSFont.monospacedDigitSystemFont` — SF Mono,
+/// then Menlo, then the system monospaced UI font. Do not pick a random mono.
+fn configure_system_mono_font(font_system: &mut FontSystem) {
+    #[cfg(target_os = "macos")]
+    {
+        const CANDIDATES: &[&str] = &[
+            "SF Mono",
+            "SFMono",
+            ".AppleSystemUIFontMonospaced",
+            ".SF NS Mono",
+            "Menlo",
+        ];
+        let (family, source_id) = {
+            let db = font_system.db();
+            let family = CANDIDATES
+                .iter()
+                .copied()
+                .find(|name| db.faces().any(|face| face.families.iter().any(|(n, _)| n == name)))
+                .map(str::to_string);
+            let source_id = family.as_deref().and_then(|fam| {
+                db.faces()
+                    .find(|face| {
+                        face.weight == Weight::NORMAL
+                            && face.style == Style::Normal
+                            && face.families.iter().any(|(n, _)| n == fam)
+                    })
+                    .map(|face| face.id)
+                    .or_else(|| {
+                        db.faces()
+                            .find(|face| {
+                                face.style == Style::Normal
+                                    && face.families.iter().any(|(n, _)| n == fam)
+                            })
+                            .map(|face| face.id)
+                    })
+            });
+            (family, source_id)
+        };
+
+        if let Some(ref family) = family {
+            font_system.db_mut().set_monospace_family(family.clone());
+        } else if font_system
+            .db_mut()
+            .load_font_file("/System/Library/Fonts/SFNSMono.ttf")
+            .is_ok()
+        {
+            font_system.db_mut().set_monospace_family(".SF NS Mono");
+        }
+
+        let id = source_id.or_else(|| {
+            font_system.db().faces().find(|face| {
+                face.style == Style::Normal
+                    && face.families.iter().any(|(n, _)| {
+                        n == ".SF NS Mono"
+                            || n == ".AppleSystemUIFontMonospaced"
+                            || n == "SF Mono"
+                    })
+            }).map(|face| face.id)
+        });
+        if let Some(id) = id {
+            if let Some(bytes) = font_system.db().with_face_data(id, |data, _| data.to_vec()) {
+                // SFNSMono.ttf is a Light (295) variable face; alias Regular + Semibold
+                // so MixLink medium/regular and `.semibold` stay on SF Mono.
+                for weight in [400_u16, 600] {
+                    if let Some(patched) = patch_ttf_os2_weight(&bytes, weight) {
+                        font_system.db_mut().load_font_data(patched);
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = font_system;
+    }
+}
+
+/// Rewrite `OS/2.usWeightClass` so fontdb/cosmic-text will match `weight`.
+fn patch_ttf_os2_weight(font: &[u8], weight: u16) -> Option<Vec<u8>> {
+    if font.len() < 12 || &font[0..4] == b"ttcf" {
+        return None;
+    }
+    let num_tables = u16::from_be_bytes(font[4..6].try_into().ok()?);
+    let mut os2_off = None;
+    for i in 0..num_tables as usize {
+        let rec = 12 + i * 16;
+        if rec + 16 > font.len() {
+            return None;
+        }
+        if &font[rec..rec + 4] == b"OS/2" {
+            os2_off = Some(u32::from_be_bytes(font[rec + 8..rec + 12].try_into().ok()?) as usize);
+            break;
+        }
+    }
+    let off = os2_off?;
+    if off + 6 > font.len() {
+        return None;
+    }
+    let mut data = font.to_vec();
+    data[off + 4..off + 6].copy_from_slice(&weight.to_be_bytes());
+    Some(data)
+}
+
 /// Helper for anyone building a `TextCmd`: approximate advance width for a
 /// single-line piece of text at the given font size. Uses cosmic-text's
 /// shaper so it's accurate for the exact font stack glyphon loads.
@@ -209,7 +395,7 @@ pub fn measure_text(system: &mut TextSystem, text: &str, size: f32) -> f32 {
     buffer.set_text(
         &mut system.font_system,
         text,
-        Attrs::new().family(Family::SansSerif),
+        ui_text_attrs(false, false),
         Shaping::Advanced,
     );
     buffer.shape_until_scroll(&mut system.font_system, false);

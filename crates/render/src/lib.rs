@@ -16,7 +16,10 @@ use winit::window::Window;
 pub mod image;
 pub mod scene;
 pub mod text;
-pub use scene::{aspect_fill_uv, Align, Color, DrawCmd, Rect, TextCmd, TextureId, Vertex};
+pub use scene::{
+    aspect_fill_uv, srgb_to_gpu, srgb_to_linear, Align, Color, DrawCmd, Rect, TextCmd, TextureId,
+    Vertex,
+};
 pub use text::{measure_text, TextSystem};
 
 pub struct Renderer {
@@ -161,7 +164,13 @@ impl Renderer {
             num_verts: 0,
             max_surface_dim,
             ui_zoom: 1.0,
-            clear_color: wgpu::Color { r: 0.10, g: 0.10, b: 0.11, a: 1.0 },
+            // MixLink window is sRGB (0.10, 0.10, 0.11). wgpu clear is linear.
+            clear_color: wgpu::Color {
+                r: scene::srgb_to_linear(0.10) as f64,
+                g: scene::srgb_to_linear(0.10) as f64,
+                b: scene::srgb_to_linear(0.11) as f64,
+                a: 1.0,
+            },
             text,
             images,
             num_image_verts: 0,

@@ -22,7 +22,7 @@ pub fn paint(view: &MixBrowserView<'_>) -> Vec<DrawCmd> {
     theme::fill(&mut cmds, Rect { x: view.x, y: view.y, w: WIDTH, h: view.h }, [0.0, 0.0, 0.0, 0.28]);
     theme::seam_v(&mut cmds, view.x + WIDTH - 1.0, view.y, view.h, true);
 
-    theme::text(&mut cmds, Rect { x: view.x + 10.0, y: view.y + 8.0, w: 70.0, h: 16.0 }, "MIXES", 10.0, theme::TEXT_DIM, true);
+    theme::text(&mut cmds, Rect { x: view.x + 10.0, y: view.y + 8.0, w: 70.0, h: 16.0 }, "MIXES", 11.0, theme::TEXT_DIM, true);
     crate::widgets::icon_pad(&mut cmds, Rect { x: view.x + WIDTH - 52.0, y: view.y + 6.0, w: 20.0, h: 18.0 }, "+", true);
     crate::widgets::icon_pad(&mut cmds, Rect { x: view.x + WIDTH - 28.0, y: view.y + 6.0, w: 20.0, h: 18.0 }, "−", true);
     let mut y = view.y + 28.0;
@@ -39,7 +39,7 @@ pub fn paint(view: &MixBrowserView<'_>) -> Vec<DrawCmd> {
             &mut cmds,
             Rect { x: view.x + 10.0, y, w: WIDTH - 16.0, h: 22.0 },
             &mix.name,
-            11.0,
+            12.0,
             if sel { theme::TEXT } else { theme::TEXT_DIM },
             sel,
         );
@@ -47,7 +47,7 @@ pub fn paint(view: &MixBrowserView<'_>) -> Vec<DrawCmd> {
     }
 
     y += 12.0;
-    theme::text(&mut cmds, Rect { x: view.x + 10.0, y, w: 120.0, h: 16.0 }, "TAKES", 10.0, theme::TEXT_DIM, true);
+    theme::text(&mut cmds, Rect { x: view.x + 10.0, y, w: 120.0, h: 16.0 }, "TAKES", 11.0, theme::TEXT_DIM, true);
     y += 20.0;
     for take in view.takes {
         let sel = view.selected_take == Some(*take);
@@ -62,7 +62,7 @@ pub fn paint(view: &MixBrowserView<'_>) -> Vec<DrawCmd> {
             &mut cmds,
             Rect { x: view.x + 10.0, y, w: WIDTH - 16.0, h: 22.0 },
             format!("Take {take}"),
-            11.0,
+            12.0,
             if sel { theme::TEXT } else { theme::TEXT_DIM },
             sel,
         );

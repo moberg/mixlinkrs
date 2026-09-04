@@ -44,10 +44,10 @@ pub fn paint(state: &ChromeState<'_>, w: f32, h: f32) -> Vec<DrawCmd> {
 }
 
 fn paint_header(cmds: &mut Vec<DrawCmd>, state: &ChromeState<'_>, w: f32) {
-    theme::material_grain(cmds, Rect { x: 0.0, y: 0.0, w, h: HEADER_H }, &theme::SIDEBAR_MAT);
+    theme::hardware_surface(cmds, Rect { x: 0.0, y: 0.0, w, h: HEADER_H }, theme::SurfaceStyle::Sidebar);
     theme::seam_h(cmds, 0.0, HEADER_H - 2.0, w, true);
     theme::text(cmds, Rect { x: 10.0, y: 8.0, w: 48.0, h: 20.0 }, "TEMPO", 9.0, theme::SECONDARY_TEXT, true);
-    widgets::text_field(
+    widgets::text_field_tempo(
         cmds,
         Rect { x: 58.0, y: 6.0, w: 52.0, h: 24.0 },
         &format!("{:.1}", state.tempo),
@@ -65,11 +65,11 @@ fn paint_header(cmds: &mut Vec<DrawCmd>, state: &ChromeState<'_>, w: f32) {
             theme::METER_GREEN,
         );
         x += 78.0;
-        theme::text(cmds, Rect { x, y: 8.0, w: 80.0, h: 20.0 }, &state.position, 12.0, theme::TEXT, false);
+        theme::text_mono(cmds, Rect { x, y: 8.0, w: 80.0, h: 20.0 }, &state.position, 12.0, theme::TEXT, false);
         x += 86.0;
         widgets::hardware_pad(cmds, Rect { x, y: 6.0, w: 56.0, h: 24.0 }, "Grid", state.grid_on, theme::BLUE);
         x += 60.0;
-        theme::text_center(cmds, Rect { x, y: 6.0, w: 56.0, h: 24.0 }, &state.grid_title, 11.0, theme::TEXT, true);
+        theme::text_center_mono(cmds, Rect { x, y: 6.0, w: 56.0, h: 24.0 }, &state.grid_title, 11.0, theme::TEXT, true);
         x += 62.0;
         widgets::hardware_pad(cmds, Rect { x, y: 6.0, w: 64.0, h: 24.0 }, "Auto", state.auto_on, theme::METER_RED);
         x += 70.0;
@@ -81,7 +81,7 @@ fn paint_header(cmds: &mut Vec<DrawCmd>, state: &ChromeState<'_>, w: f32) {
 
 fn paint_footer(cmds: &mut Vec<DrawCmd>, state: &ChromeState<'_>, w: f32, h: f32) {
     let y = h - Layout::FOOTER_H;
-    theme::material_grain(cmds, Rect { x: 0.0, y, w, h: Layout::FOOTER_H }, &theme::SIDEBAR_MAT);
+    theme::hardware_surface(cmds, Rect { x: 0.0, y, w, h: Layout::FOOTER_H }, theme::SurfaceStyle::Sidebar);
     theme::seam_h(cmds, 0.0, y, w, true);
     let led = if state.osc_connected { theme::METER_GREEN } else { theme::TEXT_DIM };
     cmds.push(DrawCmd::RoundedRect {
@@ -90,7 +90,19 @@ fn paint_footer(cmds: &mut Vec<DrawCmd>, state: &ChromeState<'_>, w: f32, h: f32
         radius: 3.5,
     });
     let osc = if state.osc_connected { "OSC in" } else { "Waiting for TotalMix" };
-    theme::text(cmds, Rect { x: 24.0, y: y + 12.0, w: 420.0, h: 20.0 }, format!("{osc}  ·  {}  {}", state.midi_status, state.last_midi), 11.0, theme::SECONDARY_TEXT, false);
+    let osc_w = (osc.chars().count() as f32 * 6.4).max(40.0);
+    theme::text(cmds, Rect { x: 24.0, y: y + 12.0, w: osc_w + 10.0, h: 20.0 }, osc, 11.0, theme::SECONDARY_TEXT, false);
+    let midi = format!("{}  {}", state.midi_status, state.last_midi);
+    if !midi.trim().is_empty() {
+        theme::text_mono(
+            cmds,
+            Rect { x: 24.0 + osc_w + 16.0, y: y + 12.0, w: 360.0, h: 20.0 },
+            midi,
+            11.0,
+            theme::SECONDARY_TEXT,
+            false,
+        );
+    }
     let cx = w * 0.5 - 140.0;
     widgets::hardware_pad(cmds, Rect { x: cx, y: y + 8.0, w: 90.0, h: 26.0 }, "Mute", state.mute_mode, theme::AMBER);
     widgets::hardware_pad(cmds, Rect { x: cx + 96.0, y: y + 8.0, w: 90.0, h: 26.0 }, "Solo", state.solo_mode, theme::AMBER);
@@ -103,7 +115,7 @@ fn paint_footer(cmds: &mut Vec<DrawCmd>, state: &ChromeState<'_>, w: f32, h: f32
 }
 
 fn route_pill(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, title: &str, value: &str) {
-    theme::fill(cmds, Rect { x, y, w: 112.0, h: 26.0 }, theme::RECESSED.middle);
+    widgets::hardware_module(cmds, Rect { x, y, w: 112.0, h: 26.0 });
     theme::text(cmds, Rect { x: x + 6.0, y, w: 36.0, h: 26.0 }, title, 9.0, theme::PRIMARY_TEXT, true);
     theme::text(cmds, Rect { x: x + 42.0, y, w: 66.0, h: 26.0 }, value.to_uppercase(), 9.0, theme::SECONDARY_TEXT, false);
 }
