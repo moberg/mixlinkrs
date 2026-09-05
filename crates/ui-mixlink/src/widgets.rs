@@ -360,8 +360,8 @@ pub fn knob(
     }
 }
 
-/// MixLink `sendKnob`: lit well, 300° ring, radial body, short pointer.
-fn paint_send_knob(cmds: &mut Vec<DrawCmd>, cx: f32, cy: f32, d: f32, value: f32, ring: Color) {
+/// MixLink `sendKnob` well: elevation shadows, lit dish, rim. No ring or pointer.
+pub fn send_knob_well(cmds: &mut Vec<DrawCmd>, cx: f32, cy: f32, d: f32) {
     let well_d = d + 4.0;
     hardware_elevation(cmds, cx, cy, well_d);
     cmds.push(DrawCmd::LitDisc {
@@ -373,13 +373,10 @@ fn paint_send_knob(cmds: &mut Vec<DrawCmd>, cx: f32, cy: f32, d: f32, value: f32
         bottom_trailing: gray(0.04, 1.0),
     });
     rim_stroke(cmds, cx, cy, well_d * 0.5, 0.7, [1.0, 1.0, 1.0, 0.16], [0.0, 0.0, 0.0, 0.55]);
+}
 
-    let track_r = (d - 1.0) * 0.5;
-    stroke_arc(cmds, cx, cy, track_r, 120.0, 300.0, [0.0, 0.0, 0.0, 0.85], 3.2);
-    // MixLink: 2pt `ringColor` stroke + `.shadow(color: ringColor.opacity(0.24), radius: 0.9)`.
-    gaussian_arc_shadow(cmds, cx, cy, track_r, 120.0, 300.0, ring, 0.24, 0.9, 2.0);
-    stroke_arc(cmds, cx, cy, track_r, 120.0, 300.0, ring, 2.0);
-
+/// MixLink send-knob body: contact shadow + offset radial fill.
+pub fn send_knob_body(cmds: &mut Vec<DrawCmd>, cx: f32, cy: f32, d: f32) {
     let body_d = (d - 6.0).max(8.0);
     disc(cmds, cx, cy, body_d + 1.0, [0.0, 0.0, 0.0, 0.70]);
     cmds.push(DrawCmd::RadialDisc {
@@ -391,6 +388,18 @@ fn paint_send_knob(cmds: &mut Vec<DrawCmd>, cx: f32, cy: f32, d: f32, value: f32
         mid: gray(0.075, 1.0),
         outer: gray(0.018, 1.0),
     });
+}
+
+/// MixLink `sendKnob`: lit well, 300° ring, radial body, short pointer.
+fn paint_send_knob(cmds: &mut Vec<DrawCmd>, cx: f32, cy: f32, d: f32, value: f32, ring: Color) {
+    send_knob_well(cmds, cx, cy, d);
+    let track_r = (d - 1.0) * 0.5;
+    stroke_arc(cmds, cx, cy, track_r, 120.0, 300.0, [0.0, 0.0, 0.0, 0.85], 3.2);
+    // MixLink: 2pt `ringColor` stroke + `.shadow(color: ringColor.opacity(0.24), radius: 0.9)`.
+    gaussian_arc_shadow(cmds, cx, cy, track_r, 120.0, 300.0, ring, 0.24, 0.9, 2.0);
+    stroke_arc(cmds, cx, cy, track_r, 120.0, 300.0, ring, 2.0);
+    send_knob_body(cmds, cx, cy, d);
+    let body_d = (d - 6.0).max(8.0);
     pointer(cmds, cx, cy, value, 13.0, body_d * 0.18, 2.0, theme::POINTER);
 }
 

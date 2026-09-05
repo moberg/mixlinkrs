@@ -120,6 +120,14 @@ pub enum DrawCmd {
         color: Color,
         thickness: f32,
     },
+    /// Crisp circular stroke (reel rings). Tessellated as an annulus.
+    StrokeCircle {
+        cx: f32,
+        cy: f32,
+        r: f32,
+        thickness: f32,
+        color: Color,
+    },
     /// Textured quad. `uv` is the source rect in 0..1 texture space (aspect-fill crop).
     Image {
         rect: Rect,
@@ -213,6 +221,9 @@ pub fn tessellate(scene: &[DrawCmd], viewport_size: (f32, f32)) -> Vec<Vertex> {
                 let p3 = px_to_ndc(ax - nx, ay - ny);
                 push_tri(&mut out, p0, p1, p2, *color);
                 push_tri(&mut out, p0, p2, p3, *color);
+            }
+            DrawCmd::StrokeCircle { cx, cy, r, thickness, color } => {
+                push_stroke_circle(&mut out, *cx, *cy, *r, *thickness, *color, px_to_ndc);
             }
             DrawCmd::WaveformBins { x0, y_center, height, bar_w, color, bins } => {
                 push_waveform_strip(
@@ -417,6 +428,39 @@ fn push_radial_disc(
             out.push(Vertex { pos: p11, color: srgb_to_gpu(c11) });
             out.push(Vertex { pos: p01, color: srgb_to_gpu(c01) });
         }
+    }
+}
+
+fn push_stroke_circle(
+    out: &mut Vec<Vertex>,
+    cx: f32,
+    cy: f32,
+    r: f32,
+    thickness: f32,
+    color: Color,
+    map: impl Fn(f32, f32) -> [f32; 2],
+) {
+    let r = r.max(0.5);
+    let half = (thickness * 0.5).max(0.4);
+    let r0 = (r - half).max(0.2);
+    let r1 = r + half;
+    let segs = ((r * 1.35).ceil() as i32).clamp(64, 96);
+    let gpu = srgb_to_gpu(color);
+    for i in 0..segs {
+        let a0 = std::f32::consts::TAU * (i as f32 / segs as f32);
+        let a1 = std::f32::consts::TAU * ((i + 1) as f32 / segs as f32);
+        let (s0, c0) = a0.sin_cos();
+        let (s1, c1) = a1.sin_cos();
+        let p00 = map(cx + c0 * r0, cy + s0 * r0);
+        let p01 = map(cx + c1 * r0, cy + s1 * r0);
+        let p10 = map(cx + c0 * r1, cy + s0 * r1);
+        let p11 = map(cx + c1 * r1, cy + s1 * r1);
+        out.push(Vertex { pos: p00, color: gpu });
+        out.push(Vertex { pos: p10, color: gpu });
+        out.push(Vertex { pos: p11, color: gpu });
+        out.push(Vertex { pos: p00, color: gpu });
+        out.push(Vertex { pos: p11, color: gpu });
+        out.push(Vertex { pos: p01, color: gpu });
     }
 }
 

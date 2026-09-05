@@ -136,10 +136,6 @@ impl AppState {
         if let Some(hit) = chrome::hit_chrome(self.chrome.page, w, h, x, y) {
             match hit {
                 ChromeHit::Play => self.toggle_play(),
-                ChromeHit::Rec => {
-                    self.toggle_record();
-                    self.sync_xl_leds(true);
-                }
                 ChromeHit::Grid => {
                     self.timeline.grid_enabled = !self.timeline.grid_enabled;
                     self.persist_project_meta();

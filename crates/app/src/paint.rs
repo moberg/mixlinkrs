@@ -31,7 +31,6 @@ impl AppState {
                 crate::arrange::format_tempo(self.timeline.tempo)
             },
             playing: self.audio.playing,
-            recording: self.audio.recording,
             position: MixTime::format_position(
                 playhead - self.timeline.arrangement_origin,
                 self.timeline.tempo,

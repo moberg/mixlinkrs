@@ -19,7 +19,6 @@ pub struct ChromeState<'a> {
     pub page: Page,
     pub tempo_text: String,
     pub playing: bool,
-    pub recording: bool,
     pub position: String,
     pub grid_on: bool,
     pub grid_title: String,
@@ -155,9 +154,6 @@ fn paint_header(cmds: &mut Vec<DrawCmd>, state: &ChromeState<'_>, w: f32) {
             false,
             theme::BLUE,
         );
-    } else {
-        let rec = record_rec_rect();
-        widgets::hardware_pad(cmds, rec, "Rec", state.recording, theme::METER_RED);
     }
     let (selector, folder_btn, new_btn) = project_cluster_rects(state.page, w);
     if *state.focus == TextFocus::ProjectName {
@@ -178,9 +174,6 @@ const MIX_PLAY_X: f32 = HEADER_TRAFFIC_INSET + 142.0;
 const MIX_GRID_X: f32 = MIX_PLAY_X + 78.0 + 86.0;
 const MIX_STEP_X: f32 = MIX_GRID_X + 60.0;
 const MIX_STEP_GAP: f32 = 62.0;
-const REC_MODE_X: f32 = HEADER_TRAFFIC_INSET + 142.0;
-const REC_PAD_W: f32 = 64.0;
-
 /// MixLink grid-resolution well next to the Grid pad.
 pub fn grid_step_rect() -> Rect {
     Rect { x: MIX_STEP_X, y: 6.0, w: 56.0, h: 24.0 }
@@ -193,10 +186,6 @@ pub fn tempo_well_rect() -> Rect {
 
 fn tempo_value_rect() -> Rect {
     Rect { x: HEADER_TRAFFIC_INSET + 48.0, y: 6.0, w: 56.0, h: 24.0 }
-}
-
-fn record_rec_rect() -> Rect {
-    Rect { x: REC_MODE_X, y: 6.0, w: REC_PAD_W, h: 24.0 }
 }
 
 fn page_tab_rects(w: f32) -> (Rect, Rect) {
@@ -224,8 +213,8 @@ fn mix_controls_right() -> f32 {
 }
 
 fn record_mode_right() -> f32 {
-    let rec = record_rec_rect();
-    rec.x + rec.w
+    let well = tempo_well_rect();
+    well.x + well.w
 }
 
 /// Dropdown + folder + New, left of RECORD with a grouping gap before the page tabs.
@@ -345,11 +334,6 @@ pub fn hit_chrome(page: Page, w: f32, _h: f32, x: f32, y: f32) -> Option<ChromeH
             if x >= bx && x < bx + 80.0 {
                 return Some(ChromeHit::Export);
             }
-        } else {
-            let rec = record_rec_rect();
-            if widgets::contains(rec, x, y) {
-                return Some(ChromeHit::Rec);
-            }
         }
         return Some(ChromeHit::TitleDrag);
     }
@@ -367,7 +351,6 @@ pub enum ChromeHit {
     Knobs,
     Inserts,
     Export,
-    Rec,
     ProjectSelector,
     ProjectMenu,
     RevealProject,
@@ -428,23 +411,16 @@ mod tests {
     }
 
     #[test]
-    fn record_rec_pad_hits_in_the_header() {
+    fn record_page_has_no_header_rec_pad() {
         let w = 1400.0;
         let h = 900.0;
-        let rec = record_rec_rect();
-        assert!(matches!(hit_chrome(Page::Record, w, h, rec.x + 4.0, 12.0), Some(ChromeHit::Rec)));
+        let well = tempo_well_rect();
+        let after_tempo = well.x + well.w + 8.0;
         assert!(matches!(
-            hit_chrome(Page::Record, w, h, rec.x + rec.w - 4.0, 12.0),
-            Some(ChromeHit::Rec)
-        ));
-        // Former MUTE/SOLO slots sit after REC and must not fire leftover hits.
-        let leftover_x = rec.x + rec.w + 8.0;
-        assert!(matches!(
-            hit_chrome(Page::Record, w, h, leftover_x, 12.0),
+            hit_chrome(Page::Record, w, h, after_tempo, 12.0),
             Some(ChromeHit::TitleDrag)
         ));
-        assert!(!matches!(hit_chrome(Page::Mix, w, h, rec.x + 4.0, 12.0), Some(ChromeHit::Rec)));
-        assert!(hit_chrome(Page::Record, w, h, rec.x + 4.0, h - 12.0).is_none());
+        assert!(hit_chrome(Page::Record, w, h, after_tempo, h - 12.0).is_none());
     }
 
     #[test]
@@ -502,9 +478,7 @@ mod tests {
     fn header_controls_clear_traffic_lights() {
         let well = tempo_well_rect();
         assert!(well.x >= HEADER_TRAFFIC_INSET);
-        let rec = record_rec_rect();
-        assert!(rec.x > well.x + well.w);
-        assert!(rec.x >= HEADER_TRAFFIC_INSET + 60.0);
+        assert!(well.x + well.w > HEADER_TRAFFIC_INSET);
         assert!(matches!(
             hit_chrome(Page::Record, 1400.0, 900.0, HEADER_TRAFFIC_INSET * 0.5, 12.0),
             Some(ChromeHit::TitleDrag)

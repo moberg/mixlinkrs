@@ -3,14 +3,16 @@
 use render::{DrawCmd, Rect};
 
 use crate::theme::{self, Color, Layout};
+use crate::widgets;
 
-const RING: Color = [1.0, 1.0, 1.0, 0.16];
-const RING_LIVE: Color = [1.0, 1.0, 1.0, 0.34];
-const SPOKE: Color = [1.0, 1.0, 1.0, 0.14];
-const SPOKE_LIVE: Color = [1.0, 1.0, 1.0, 0.28];
-const HUB: Color = [0.22, 0.22, 0.23, 1.0];
-const TAPE: Color = [1.0, 1.0, 1.0, 0.10];
-const TAPE_LIVE: Color = [1.0, 1.0, 1.0, 0.22];
+/// Muted line-art gray — matches the wireframe reel, not a lit white.
+const LINE: Color = [1.0, 1.0, 1.0, 0.28];
+const LINE_LIVE: Color = [1.0, 1.0, 1.0, 0.42];
+const STROKE: f32 = 1.5;
+/// Hub diameter as a fraction of the reel.
+const HUB: f32 = 0.22;
+const REC_DISC: Color = [0.86, 0.20, 0.17, 1.0];
+const REC_DISC_LIVE: Color = [0.92, 0.22, 0.18, 1.0];
 
 #[derive(Clone, Debug)]
 pub struct DeckView {
@@ -55,94 +57,63 @@ pub fn paint(
     cmds.push(DrawCmd::Layer);
     cmds.push(DrawCmd::Clip { rect: bay });
 
-    let pad = 28.0;
-    let readout_w = 200.0;
-    let btn_d = (bay.h * 0.22).clamp(52.0, 64.0);
-    let reel_budget = (bay.w - readout_w - btn_d - 96.0).max(160.0);
-    let reel_d = (bay.h - 56.0).min(reel_budget * 0.44).clamp(96.0, 168.0);
-    let gap = (reel_d * 0.46).clamp(40.0, 72.0);
-    let machine_w = reel_d * 2.0 + gap + 28.0 + btn_d + 20.0 + readout_w;
-    let origin_x = bay.x + ((bay.w - machine_w) * 0.5).max(pad);
-    let cy = bay.y + bay.h * 0.50;
-
-    let left = (origin_x + reel_d * 0.5, cy);
-    let right = (left.0 + reel_d + gap, cy);
+    let inset = 22.0;
+    let lower_h = 92.0;
+    let col_w = ((bay.w - inset * 2.0) * 0.5).max(110.0);
+    let left_cx = bay.x + inset + col_w * 0.5;
+    let right_cx = bay.x + bay.w - inset - col_w * 0.5;
+    let reel_d = (bay.h - inset - lower_h - 8.0).min(col_w * 0.78).clamp(88.0, 188.0);
+    let reel_cy = bay.y + inset + reel_d * 0.5;
+    let left = (left_cx, reel_cy);
+    let right = (right_cx, reel_cy);
+    let rest = -std::f32::consts::FRAC_PI_2;
     let spin = if view.recording { view.elapsed * 1.35 } else { 0.0 };
 
     paint_tape_path(cmds, left, right, reel_d * 0.5, view);
-    paint_head(cmds, (left.0 + right.0) * 0.5, cy + reel_d * 0.18, view.recording);
-    paint_reel(cmds, left.0, left.1, reel_d, -spin * 0.85, view.recording);
-    paint_reel(cmds, right.0, right.1, reel_d, spin, view.recording);
+    paint_reel(cmds, left.0, left.1, reel_d, rest + spin, view.recording);
+    paint_reel(cmds, right.0, right.1, reel_d, rest + spin, view.recording);
 
+    let lower_top = reel_cy + reel_d * 0.5 + 12.0;
+    let lower_mid = (lower_top + bay.y + bay.h - 16.0) * 0.5;
+    let btn_w = (col_w * 0.72).clamp(108.0, 168.0);
+    let btn_h = (lower_h * 0.62).clamp(52.0, 68.0);
     let btn = Rect {
-        x: right.0 + reel_d * 0.5 + 28.0,
-        y: cy - btn_d * 0.5,
-        w: btn_d,
-        h: btn_d,
+        x: left_cx - btn_w * 0.5,
+        y: lower_mid - btn_h * 0.5,
+        w: btn_w,
+        h: btn_h,
     };
-    paint_rec_button(cmds, btn, view.recording, view.ready);
-    paint_readout(
-        cmds,
-        btn.x + btn.w + 22.0,
-        cy,
-        (btn.x + btn.w + 22.0 + readout_w).min(bay.x + bay.w - 20.0),
-        view,
-    );
+    paint_rec_button(cmds, btn, view.recording);
+    paint_readout(cmds, right_cx, lower_mid, (col_w * 0.92).max(160.0), view);
 
     Some((btn, crate::mixer::MixerExtraHit::Record))
 }
 
-fn paint_reel(cmds: &mut Vec<DrawCmd>, cx: f32, cy: f32, d: f32, angle: f32, live: bool) {
-    let ring = if live { RING_LIVE } else { RING };
-    let spoke = if live { SPOKE_LIVE } else { SPOKE };
-
-    cmds.push(DrawCmd::RadialDisc {
-        cx,
-        cy,
-        d,
-        center: (0.5, 0.5),
-        inner: [0.14, 0.14, 0.145, 0.35],
-        mid: [0.12, 0.12, 0.125, 0.22],
-        outer: [0.10, 0.10, 0.105, 0.08],
-    });
-    cmds.push(DrawCmd::LitDisc {
-        cx,
-        cy,
-        d,
-        top_leading: ring,
-        middle: [0.0, 0.0, 0.0, 0.0],
-        bottom_trailing: ring,
-    });
-    cmds.push(DrawCmd::LitDisc {
-        cx,
-        cy,
-        d: d * 0.58,
-        top_leading: [1.0, 1.0, 1.0, if live { 0.10 } else { 0.05 }],
-        middle: [0.0, 0.0, 0.0, 0.0],
-        bottom_trailing: [1.0, 1.0, 1.0, if live { 0.08 } else { 0.04 }],
-    });
-
-    let r_in = d * 0.08;
-    let r_out = d * 0.46;
-    for i in 0..4 {
-        let a = angle + i as f32 * std::f32::consts::FRAC_PI_2;
+fn paint_reel(cmds: &mut Vec<DrawCmd>, cx: f32, cy: f32, d: f32, angle: f32, _live: bool) {
+    widgets::send_knob_well(cmds, cx, cy, d);
+    widgets::send_knob_body(cmds, cx, cy, d);
+    let body_d = (d - 6.0).max(8.0);
+    let spoke_in = body_d * 0.12;
+    let spoke_out = body_d * 0.42;
+    for i in 0..3 {
+        let a = angle + i as f32 * std::f32::consts::TAU / 3.0;
         let (s, c) = a.sin_cos();
         cmds.push(DrawCmd::Line {
-            a: (cx + c * r_in, cy + s * r_in),
-            b: (cx + c * r_out, cy + s * r_out),
-            color: spoke,
-            thickness: 1.25,
+            a: (cx + c * spoke_in, cy + s * spoke_in),
+            b: (cx + c * spoke_out, cy + s * spoke_out),
+            color: theme::POINTER,
+            thickness: 2.0,
         });
     }
-
+    let hub = body_d * 0.14;
     cmds.push(DrawCmd::RadialDisc {
         cx,
         cy,
-        d: d * 0.12,
-        center: (0.5, 0.5),
-        inner: if live { [0.38, 0.38, 0.40, 1.0] } else { HUB },
-        mid: HUB,
-        outer: [0.10, 0.10, 0.11, 1.0],
+        d: hub,
+        center: (0.32, 0.28),
+        inner: [0.28, 0.28, 0.28, 1.0],
+        mid: [0.10, 0.10, 0.10, 1.0],
+        outer: [0.04, 0.04, 0.04, 1.0],
     });
 }
 
@@ -153,95 +124,98 @@ fn paint_tape_path(
     r: f32,
     view: &DeckView,
 ) {
-    let wobble = if view.recording { (view.elapsed * 9.0).sin() * 0.8 } else { 0.0 };
-    let a = (left.0 + r * 0.78, left.1 + r * 0.22);
-    let mid = ((left.0 + right.0) * 0.5, left.1 + r * 0.30 + wobble);
-    let b = (right.0 - r * 0.78, right.1 + r * 0.22);
-    let color = if view.recording { TAPE_LIVE } else { TAPE };
-    cmds.push(DrawCmd::Line { a, b: mid, color, thickness: 1.25 });
-    cmds.push(DrawCmd::Line { a: mid, b, color, thickness: 1.25 });
-}
-
-fn paint_head(cmds: &mut Vec<DrawCmd>, cx: f32, cy: f32, live: bool) {
+    let line = if view.recording { LINE_LIVE } else { LINE };
+    let hub_r = r * HUB;
+    let wobble = if view.recording { (view.elapsed * 8.0).sin() * 0.6 } else { 0.0 };
+    let a = (left.0 + hub_r * 0.2, left.1 + hub_r);
+    let b = (right.0 - hub_r * 0.2, right.1 + hub_r);
+    let sag = ((b.0 - a.0) * 0.10).clamp(10.0, 26.0);
+    let ctrl = ((a.0 + b.0) * 0.5, a.1 + sag + wobble);
+    stroke_quad(cmds, a, ctrl, b, 12, line);
+    // Quadratic midpoint sits on the curve, not at the control point.
+    let mid = (
+        0.25 * a.0 + 0.5 * ctrl.0 + 0.25 * b.0,
+        0.25 * a.1 + 0.5 * ctrl.1 + 0.25 * b.1,
+    );
     cmds.push(DrawCmd::RoundedRect {
-        rect: Rect { x: cx - 9.0, y: cy - 5.0, w: 18.0, h: 3.0 },
-        color: if live { [1.0, 1.0, 1.0, 0.28] } else { [1.0, 1.0, 1.0, 0.12] },
-        radius: 1.5,
+        rect: Rect { x: mid.0 - 11.0, y: mid.1 - 3.0, w: 22.0, h: 6.0 },
+        color: line,
+        radius: 1.8,
     });
 }
 
-fn paint_rec_button(cmds: &mut Vec<DrawCmd>, rect: Rect, recording: bool, ready: bool) {
+fn stroke_quad(
+    cmds: &mut Vec<DrawCmd>,
+    a: (f32, f32),
+    c: (f32, f32),
+    b: (f32, f32),
+    n: u32,
+    color: Color,
+) {
+    let mut prev = a;
+    for i in 1..=n {
+        let t = i as f32 / n as f32;
+        let u = 1.0 - t;
+        let p = (
+            u * u * a.0 + 2.0 * u * t * c.0 + t * t * b.0,
+            u * u * a.1 + 2.0 * u * t * c.1 + t * t * b.1,
+        );
+        cmds.push(DrawCmd::Line { a: prev, b: p, color, thickness: STROKE });
+        prev = p;
+    }
+}
+
+fn paint_rec_button(cmds: &mut Vec<DrawCmd>, rect: Rect, recording: bool) {
+    let r = 5.0;
+    cmds.push(DrawCmd::RoundedRect {
+        rect: Rect { x: rect.x - 1.0, y: rect.y + 1.0, w: rect.w + 2.0, h: rect.h + 1.0 },
+        color: [0.0, 0.0, 0.0, 0.38],
+        radius: r + 0.5,
+    });
+    cmds.push(DrawCmd::RoundedRect {
+        rect,
+        color: [0.07, 0.07, 0.075, 1.0],
+        radius: r,
+    });
+    cmds.push(DrawCmd::RoundedRect {
+        rect: Rect { x: rect.x + 2.0, y: rect.y + 1.0, w: rect.w - 4.0, h: 1.0 },
+        color: [1.0, 1.0, 1.0, 0.05],
+        radius: 0.5,
+    });
     let cx = rect.x + rect.w * 0.5;
     let cy = rect.y + rect.h * 0.5;
-    let d = rect.w.min(rect.h);
-    let accent = if recording {
-        theme::METER_RED
-    } else if ready {
-        [0.72, 0.20, 0.18, 1.0]
-    } else {
-        [0.28, 0.28, 0.30, 1.0]
-    };
-
-    cmds.push(DrawCmd::LitDisc {
-        cx,
-        cy,
-        d: d + 2.0,
-        top_leading: [1.0, 1.0, 1.0, 0.08],
-        middle: [0.0, 0.0, 0.0, 0.0],
-        bottom_trailing: [1.0, 1.0, 1.0, 0.05],
-    });
+    let accent = if recording { REC_DISC_LIVE } else { REC_DISC };
+    let glyph = (rect.h * 0.42).clamp(22.0, 32.0);
     if recording {
-        cmds.push(DrawCmd::LitDisc {
-            cx,
-            cy,
-            d: d + 16.0,
-            top_leading: [accent[0], accent[1], accent[2], 0.0],
-            middle: [accent[0], accent[1], accent[2], 0.16],
-            bottom_trailing: [accent[0], accent[1], accent[2], 0.0],
-        });
-    }
-    cmds.push(DrawCmd::RadialDisc {
-        cx,
-        cy,
-        d,
-        center: (0.5, 0.5),
-        inner: [0.16, 0.16, 0.17, 1.0],
-        mid: [0.13, 0.13, 0.14, 1.0],
-        outer: [0.10, 0.10, 0.11, 1.0],
-    });
-
-    let glyph = d * 0.36;
-    if recording {
+        let s = glyph * 0.78;
         cmds.push(DrawCmd::RoundedRect {
-            rect: Rect { x: cx - glyph * 0.38, y: cy - glyph * 0.38, w: glyph * 0.76, h: glyph * 0.76 },
+            rect: Rect { x: cx - s * 0.5, y: cy - s * 0.5, w: s, h: s },
             color: accent,
-            radius: 3.0,
+            radius: 2.5,
         });
     } else {
-        cmds.push(DrawCmd::RadialDisc {
-            cx,
-            cy,
-            d: glyph,
-            center: (0.5, 0.5),
-            inner: accent,
-            mid: accent,
-            outer: [accent[0] * 0.7, accent[1] * 0.7, accent[2] * 0.7, 1.0],
+        cmds.push(DrawCmd::RoundedRect {
+            rect: Rect { x: cx - glyph * 0.5, y: cy - glyph * 0.5, w: glyph, h: glyph },
+            color: accent,
+            radius: glyph * 0.5,
         });
     }
 }
 
-fn paint_readout(cmds: &mut Vec<DrawCmd>, x: f32, cy: f32, right: f32, view: &DeckView) {
-    let w = (right - x).max(80.0);
+fn paint_readout(cmds: &mut Vec<DrawCmd>, cx: f32, cy: f32, col_w: f32, view: &DeckView) {
+    let w = col_w;
+    let x = cx - w * 0.5;
     let time = format_elapsed(if view.recording { view.elapsed } else { 0.0 });
-    theme::text(cmds, Rect { x, y: cy - 44.0, w, h: 18.0 }, &view.take_title, 15.0, theme::TEXT, false);
-    theme::text_mono(
+    let time_color = if view.recording { REC_DISC_LIVE } else { theme::PRIMARY_TEXT };
+    theme::text_center(
         cmds,
-        Rect { x, y: cy - 20.0, w, h: 32.0 },
-        time,
-        28.0,
-        if view.recording { theme::METER_RED } else { theme::PRIMARY_TEXT },
+        Rect { x, y: cy - 38.0, w, h: 16.0 },
+        &view.take_title,
+        12.0,
+        theme::SECONDARY_TEXT,
         false,
     );
+    theme::text_center_mono(cmds, Rect { x, y: cy - 18.0, w, h: 34.0 }, time, 32.0, time_color, false);
     let khz = view.sample_rate as f32 / 1000.0;
     let rate = if khz.fract() == 0.0 {
         format!("{khz:.0} kHz")
@@ -249,21 +223,18 @@ fn paint_readout(cmds: &mut Vec<DrawCmd>, x: f32, cy: f32, right: f32, view: &De
         format!("{khz:.1} kHz")
     };
     let meta = if view.tracks == 1 {
-        format!("1 track  ·  {rate}")
+        format!("1 track armed  •  {rate}")
     } else {
-        format!("{} tracks  ·  {rate}", view.tracks)
+        format!("{} tracks armed  •  {rate}", view.tracks)
     };
-    theme::text(cmds, Rect { x, y: cy + 16.0, w, h: 14.0 }, meta, 11.0, theme::SECONDARY_TEXT, false);
-    let (status, color) = if view.recording {
-        ("Recording", theme::METER_RED)
-    } else if !view.ready {
-        ("Set a projects folder", theme::TEXT_DIM)
-    } else if view.tracks == 0 {
-        ("No tracks armed", theme::TEXT_DIM)
-    } else {
-        ("Ready", theme::SECONDARY_TEXT)
-    };
-    theme::text(cmds, Rect { x, y: cy + 32.0, w, h: 14.0 }, status, 11.0, color, false);
+    theme::text_center(
+        cmds,
+        Rect { x, y: cy + 20.0, w, h: 14.0 },
+        meta,
+        10.0,
+        theme::TEXT_DIM,
+        false,
+    );
 }
 
 pub fn recorder_bay(layout: &crate::mixer::MixerLayout, send_count: usize) -> Rect {
@@ -299,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn paints_a_record_button_in_a_roomy_bay() {
+    fn record_sits_under_the_left_reel() {
         let layout = MixerLayout::new(0.0, 0.0, 1800.0, 900.0, 3);
         let bay = recorder_bay(&layout, 3);
         let mut cmds = Vec::new();
@@ -312,7 +283,23 @@ mod tests {
             btn.x + btn.w * 0.5,
             btn.y + btn.h * 0.5
         ));
-        assert!(cmds.iter().any(|c| matches!(c, DrawCmd::RadialDisc { .. })));
+        assert!(
+            btn.x + btn.w * 0.5 < bay.x + bay.w * 0.5,
+            "record button should sit in the left column"
+        );
+        assert!(
+            btn.y > bay.y + bay.h * 0.35,
+            "record button should sit under the reels"
+        );
+        assert!(btn.w > btn.h, "record control is a horizontal pad");
+        assert!(
+            cmds.iter().any(|c| matches!(c, DrawCmd::LitDisc { .. })),
+            "reels reuse the send-knob well"
+        );
+        assert!(
+            cmds.iter().any(|c| matches!(c, DrawCmd::RadialDisc { .. })),
+            "reels reuse the send-knob body"
+        );
         let texts: Vec<&str> = cmds
             .iter()
             .filter_map(|c| match c {
@@ -320,6 +307,16 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(!texts.iter().any(|t| t.contains("TAPE") || t.contains("IPS")));
+        assert!(texts.iter().any(|t| t.contains("tracks armed")));
+        assert!(texts.contains(&"00:00.0"));
+        assert!(!texts.iter().any(|t| {
+            t.contains("READY")
+                || t.contains("Ready")
+                || t.contains("TAPE")
+                || t.contains("IPS")
+                || t.contains("RECORDER")
+                || *t == "REC"
+                || *t == "STOP"
+        }));
     }
 }
