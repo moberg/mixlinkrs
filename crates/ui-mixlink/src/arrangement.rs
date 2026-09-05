@@ -92,7 +92,6 @@ pub fn paint(view: &ArrangementView<'_>) -> Vec<DrawCmd> {
             false,
         );
     }
-    paint_start_line(&mut cmds, view);
     paint_playhead(&mut cmds, view);
     paint_readout(&mut cmds, view);
 
@@ -149,7 +148,7 @@ pub fn paint(view: &ArrangementView<'_>) -> Vec<DrawCmd> {
 
     cmds.push(DrawCmd::Layer);
     cmds.push(DrawCmd::Clip { rect: bounds });
-    paint_start_badge(&mut cmds, view);
+    paint_start_marker(&mut cmds, view);
     paint_time_ruler(&mut cmds, view);
     cmds.push(DrawCmd::Layer);
     cmds
@@ -373,6 +372,20 @@ fn bar_tick_steps(pixels_per_bar: f32) -> BarTickScale {
     BarTickScale { label: 32.0, mid: 16.0, minor: 8.0 }
 }
 
+/// Finest painted arrangement line — Live adaptive-grid select, not `MixGrid`.
+pub fn zoom_grid_step(pixels_per_bar: f32) -> f64 {
+    let ppb = f64::from(pixels_per_bar.max(1.0));
+    if 0.0625 * ppb >= 16.0 {
+        0.0625
+    } else if 0.25 * ppb >= 18.0 {
+        0.25
+    } else if ppb >= 16.0 {
+        1.0
+    } else {
+        bar_tick_steps(pixels_per_bar).label
+    }
+}
+
 fn shade_step(scale: BarTickScale) -> f64 {
     if scale.label <= 0.0625 + 1e-9 {
         0.25
@@ -444,12 +457,14 @@ fn paint_bar_ruler(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
         }
         let on_start = (x - origin_x).abs() < 8.0;
         if i % labels_every == 0 {
-            cmds.push(DrawCmd::Line {
-                a: (x, l.y + 1.0),
-                b: (x, l.y + 6.0),
-                color: [1.0, 1.0, 1.0, 0.28],
-                thickness: 1.0,
-            });
+            if !on_start {
+                cmds.push(DrawCmd::Line {
+                    a: (x, l.y + 1.0),
+                    b: (x, l.y + 6.0),
+                    color: [1.0, 1.0, 1.0, 0.28],
+                    thickness: 1.0,
+                });
+            }
             if !on_start && bar.abs() > 1e-6 && x < edge - 10.0 {
                 let label = format_bar_label(bar);
                 let wide = label.contains('.');
@@ -816,26 +831,25 @@ fn on_bar_step(bar: f64, step: f64) -> bool {
     (q - q.round()).abs() < 1e-6
 }
 
-fn paint_start_line(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
+/// MixLink `StartMarkerView`: 58×14 rounded flag at `origin − 8`, line at `+8`.
+fn paint_start_marker(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
     let x = x_of(view, view.origin);
     let l = view.layout;
     let h = (l.h - TIME_RULER_H).max(RULER_H);
-    // MixLink: badge frame is `x - 8`, line is `+8` inside that frame → origin x.
     cmds.push(DrawCmd::Line {
         a: (x, l.y),
         b: (x, l.y + h),
         color: theme::METER_GREEN,
         thickness: 1.4,
     });
-}
-
-fn paint_start_badge(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
-    let x = x_of(view, view.origin);
-    let l = view.layout;
-    theme::fill(cmds, Rect { x: x - 8.0, y: l.y + 1.0, w: 50.0, h: 14.0 }, theme::METER_GREEN);
+    cmds.push(DrawCmd::RoundedRect {
+        rect: Rect { x: x - START_HIT_INSET, y: l.y + 1.0, w: START_HIT_W, h: 14.0 },
+        color: theme::METER_GREEN,
+        radius: 2.0,
+    });
     theme::text_mono(
         cmds,
-        Rect { x: x - 4.0, y: l.y + 1.0, w: 44.0, h: 14.0 },
+        Rect { x: x - 5.0, y: l.y + 1.0, w: 50.0, h: 14.0 },
         "▶ START",
         8.0,
         [0.0, 0.0, 0.0, 0.85],
@@ -1228,6 +1242,53 @@ mod tests {
     }
 
     #[test]
+    fn start_badge_hangs_into_the_lane_header() {
+        let track = MixTrack::empty(MixLane::Strip(0), Some("Ch 1".into()));
+        let layout = ArrangementLayout {
+            x: 148.0,
+            y: 40.0,
+            w: 800.0,
+            h: 400.0,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            pixels_per_bar: 48.0,
+        };
+        let cmds = paint(&ArrangementView {
+            layout,
+            mix: None,
+            tracks: std::slice::from_ref(&track),
+            selected_lane: None,
+            selection: &ArrSelection::default(),
+            playhead: 0,
+            origin: 0,
+            tempo: 120.0,
+            sample_rate: 48_000.0,
+            grid: MixGrid::Bar1,
+            grid_enabled: false,
+            viewing_take: false,
+            home_take: None,
+            drag_preview: None,
+            readout: None,
+            waveforms: None,
+            show_selection: true,
+            hide_clip_ids: &[],
+        });
+        let badge = cmds.iter().find_map(|c| match c {
+            DrawCmd::RoundedRect { rect, color, radius }
+                if *color == theme::METER_GREEN && *radius > 1.0 =>
+            {
+                Some(*rect)
+            }
+            _ => None,
+        });
+        let badge = badge.expect("START flag");
+        let origin_x = x_of_frame(&layout, 0, 120.0, 48_000.0);
+        assert!((badge.x - (origin_x - START_HIT_INSET)).abs() < 0.1);
+        assert!((badge.w - START_HIT_W).abs() < 0.1);
+        assert!(badge.x < layout.x + HEADER_W, "flag should overlap the lane headers");
+    }
+
+    #[test]
     fn frame_x_round_trips_at_wide_and_narrow_zoom() {
         let layout_at = |ppb: f32| ArrangementLayout {
             x: 148.0,
@@ -1390,6 +1451,14 @@ mod tests {
         assert_eq!(bar_tick_steps(180.0).label, 0.25);
         assert_eq!(bar_tick_steps(48.0).label, 1.0);
         assert!(bar_tick_steps(18.0).label >= 2.0);
+    }
+
+    #[test]
+    fn zoom_grid_matches_painted_lines() {
+        assert_eq!(zoom_grid_step(256.0), 0.0625);
+        assert_eq!(zoom_grid_step(80.0), 0.25);
+        assert_eq!(zoom_grid_step(48.0), 1.0);
+        assert!(zoom_grid_step(10.0) >= 2.0);
     }
 
     #[test]

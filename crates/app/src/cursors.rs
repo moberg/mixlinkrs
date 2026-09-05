@@ -1,4 +1,4 @@
-//! Ableton-style `[` / `]` trim cursors.
+//! Arrangement cursors: Ableton-style `[` / `]` trim and a timeline loupe.
 
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{CursorIcon, CustomCursor, Window};
@@ -9,19 +9,22 @@ pub enum ArrCursor {
     Default,
     TrimLeft,
     TrimRight,
+    Zoom,
 }
 
 #[derive(Clone)]
 pub struct TrimCursors {
     left: CustomCursor,
     right: CustomCursor,
+    zoom: CustomCursor,
 }
 
 impl TrimCursors {
     pub fn create(event_loop: &ActiveEventLoop) -> Option<Self> {
         let left = event_loop.create_custom_cursor(bracket_source(true)?);
         let right = event_loop.create_custom_cursor(bracket_source(false)?);
-        Some(Self { left, right })
+        let zoom = event_loop.create_custom_cursor(glass_source()?);
+        Some(Self { left, right, zoom })
     }
 
     pub fn apply(&self, window: &Window, kind: ArrCursor) {
@@ -29,6 +32,7 @@ impl TrimCursors {
             ArrCursor::Default => window.set_cursor(CursorIcon::Default),
             ArrCursor::TrimLeft => window.set_cursor(self.left.clone()),
             ArrCursor::TrimRight => window.set_cursor(self.right.clone()),
+            ArrCursor::Zoom => window.set_cursor(self.zoom.clone()),
         }
     }
 }
@@ -38,11 +42,17 @@ pub fn apply_fallback(window: &Window, kind: ArrCursor) {
         ArrCursor::Default => CursorIcon::Default,
         ArrCursor::TrimLeft => CursorIcon::WResize,
         ArrCursor::TrimRight => CursorIcon::EResize,
+        ArrCursor::Zoom => CursorIcon::ZoomIn,
     });
 }
 
 fn bracket_source(left: bool) -> Option<winit::window::CustomCursorSource> {
     let (rgba, hx, hy) = bracket_rgba(left);
+    CustomCursor::from_rgba(rgba, SIZE as u16, SIZE as u16, hx, hy).ok()
+}
+
+fn glass_source() -> Option<winit::window::CustomCursorSource> {
+    let (rgba, hx, hy) = glass_rgba();
     CustomCursor::from_rgba(rgba, SIZE as u16, SIZE as u16, hx, hy).ok()
 }
 
@@ -66,7 +76,38 @@ fn bracket_rgba(left: bool) -> (Vec<u8>, u16, u16) {
         stroke(7, 3, 12, 3);
         stroke(7, 14, 12, 14);
     }
+    let hx = if left { 5 } else { 12 };
+    ink_to_rgba(&ink, hx, 9)
+}
 
+fn glass_rgba() -> (Vec<u8>, u16, u16) {
+    let mut ink = vec![false; SIZE * SIZE];
+    let mut plot = |x: i32, y: i32| {
+        if (0..SIZE as i32).contains(&x) && (0..SIZE as i32).contains(&y) {
+            ink[y as usize * SIZE + x as usize] = true;
+        }
+    };
+    let cx = 7i32;
+    let cy = 6i32;
+    for y in 0..SIZE as i32 {
+        for x in 0..SIZE as i32 {
+            let dx = x - cx;
+            let dy = y - cy;
+            let d2 = dx * dx + dy * dy;
+            if d2 >= 16 && d2 <= 30 {
+                plot(x, y);
+            }
+        }
+    }
+    for i in 0..=4 {
+        plot(11 + i, 10 + i);
+        plot(12 + i, 10 + i);
+        plot(11 + i, 11 + i);
+    }
+    ink_to_rgba(&ink, 7, 6)
+}
+
+fn ink_to_rgba(ink: &[bool], hx: u16, hy: u16) -> (Vec<u8>, u16, u16) {
     let mut rgba = vec![0u8; SIZE * SIZE * 4];
     for y in 0..SIZE {
         for x in 0..SIZE {
@@ -106,6 +147,5 @@ fn bracket_rgba(left: bool) -> (Vec<u8>, u16, u16) {
             }
         }
     }
-    let hx = if left { 5 } else { 12 };
-    (rgba, hx, 9)
+    (rgba, hx, hy)
 }

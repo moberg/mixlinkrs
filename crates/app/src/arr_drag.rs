@@ -28,20 +28,21 @@ impl AppState {
     }
 
     pub(crate) fn arrangement_cursor(&self) -> crate::cursors::ArrCursor {
-        if let Some(Drag::ClipEdge { left, .. }) = &self.chrome.drag {
-            return if *left {
-                crate::cursors::ArrCursor::TrimLeft
-            } else {
-                crate::cursors::ArrCursor::TrimRight
-            };
+        match &self.chrome.drag {
+            Some(Drag::ClipEdge { left: true, .. }) => return crate::cursors::ArrCursor::TrimLeft,
+            Some(Drag::ClipEdge { left: false, .. }) => return crate::cursors::ArrCursor::TrimRight,
+            Some(Drag::Zoom { .. }) => return crate::cursors::ArrCursor::Zoom,
+            Some(_) => return crate::cursors::ArrCursor::Default,
+            None => {}
         }
-        if self.chrome.overlay.is_some() || self.chrome.drag.is_some() || !self.is_editing_mix() {
+        if self.chrome.overlay.is_some() || !self.is_editing_mix() {
             return crate::cursors::ArrCursor::Default;
         }
         let (x, y) = self.chrome.cursor;
         match self.hit_body(x, y) {
             Some(Hit::ClipEdge { left: true, .. }) => crate::cursors::ArrCursor::TrimLeft,
             Some(Hit::ClipEdge { left: false, .. }) => crate::cursors::ArrCursor::TrimRight,
+            Some(Hit::Ruler { .. } | Hit::TimeRuler) => crate::cursors::ArrCursor::Zoom,
             _ => crate::cursors::ArrCursor::Default,
         }
     }
@@ -135,7 +136,7 @@ impl AppState {
     }
 
     pub(crate) fn begin_time_select(&mut self, x: f32, y: f32, all_lanes: bool) {
-        let frame = self.snap_playhead_frame(hit::frame_at_x(
+        let frame = self.snap_select_frame(hit::frame_at_x(
             &self.arr_layout(),
             x,
             self.timeline.tempo,

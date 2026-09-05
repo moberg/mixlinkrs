@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use analog::MixAssign;
-use project::{ArrSelection, MixLane, MixTime};
+use project::{ArrSelection, MixTime};
 use ui_mixlink::chrome::{self, ChromeHit, Page, HEADER_H};
 use ui_mixlink::hit::{self, Hit, Pad};
 use ui_mixlink::mixer::{MixerExtraHit, MixerLayout, StripKind};
@@ -428,28 +428,10 @@ impl AppState {
                     self.surface.set_pan(kind, next);
                 }
             }
-            Some(Drag::Zoom { start_ppb, start_scroll, anchor_bar, start_x, start_y, live }) => {
+            Some(Drag::Zoom { start_ppb, start_scroll, anchor_bar, start_x, start_y, .. }) => {
                 let dx = x - start_x;
                 let dy = y - start_y;
                 if dx.hypot(dy) < 3.0 {
-                    return;
-                }
-                if !live && dx.abs() > dy.abs() * 1.4 {
-                    let start = self.snap_playhead_frame(hit::frame_at_x(
-                        &self.arr_layout(),
-                        start_x,
-                        self.timeline.tempo,
-                        self.audio.sample_rate(),
-                    ));
-                    self.chrome.drag = Some(Drag::Select {
-                        start_lane: self.timeline.selected_lane.unwrap_or(MixLane::Strip(0)),
-                        start,
-                        all_lanes: true,
-                        start_x,
-                        start_y,
-                        live: true,
-                    });
-                    self.apply_drag(x, y);
                     return;
                 }
                 let factor = 1.012f32.powf(dy);
@@ -520,16 +502,12 @@ impl AppState {
                     });
                 }
                 let sr = self.audio.sample_rate();
-                let mut end = hit::frame_at_x(&self.arr_layout(), x, self.timeline.tempo, sr);
-                if self.timeline.grid_enabled && !self.chrome.modifiers.super_key() {
-                    end = MixTime::snap(
-                        end,
-                        self.timeline.grid.raw(),
-                        self.timeline.tempo,
-                        sr,
-                        self.timeline.arrangement_origin,
-                    );
-                }
+                let end = self.snap_select_frame(hit::frame_at_x(
+                    &self.arr_layout(),
+                    x,
+                    self.timeline.tempo,
+                    sr,
+                ));
                 let tracks = self.arrangement_tracks();
                 let lanes = if all_lanes {
                     crate::arrange::all_lanes(&tracks)

@@ -195,6 +195,18 @@ impl AppState {
         )
     }
 
+    pub(crate) fn snap_select_frame(&self, frame: i64) -> i64 {
+        crate::arrange::snap_select(
+            frame,
+            self.timeline.grid_enabled,
+            self.chrome.modifiers.alt_key(),
+            self.timeline.pixels_per_bar,
+            self.timeline.tempo,
+            self.audio.sample_rate(),
+            self.timeline.arrangement_origin,
+        )
+    }
+
     pub(crate) fn locate_to(&mut self, frame: i64) {
         self.timeline.locate_to(&mut self.audio, frame);
     }

@@ -48,6 +48,29 @@ pub fn snap_locate(
     MixTime::snap(frame, step_bars, tempo, rate, origin).max(0)
 }
 
+/// Time select follows the visible zoom grid. Option (`free`) skips snap.
+pub fn snap_select(
+    frame: i64,
+    grid_on: bool,
+    free: bool,
+    pixels_per_bar: f32,
+    tempo: f64,
+    rate: f64,
+    origin: i64,
+) -> i64 {
+    if !grid_on || free {
+        return frame.max(0);
+    }
+    MixTime::snap(
+        frame,
+        ui_mixlink::arrangement::zoom_grid_step(pixels_per_bar),
+        tempo,
+        rate,
+        origin,
+    )
+    .max(0)
+}
+
 pub fn lanes_between(tracks: &[MixTrack], a: MixLane, b: MixLane) -> Vec<MixLane> {
     let ia = tracks.iter().position(|t| t.lane == a);
     let ib = tracks.iter().position(|t| t.lane == b);
@@ -170,6 +193,16 @@ mod tests {
         assert_eq!(snap_locate(13_000, true, false, 0.25, 120.0, 48_000.0, 0), 24_000);
         assert_eq!(snap_locate(13_000, true, true, 0.25, 120.0, 48_000.0, 0), 13_000);
         assert_eq!(snap_locate(13_000, false, false, 0.25, 120.0, 48_000.0, 0), 13_000);
+    }
+
+    #[test]
+    fn select_snaps_to_zoom_not_the_grid_menu() {
+        // Close zoom paints 16ths (6_000 frames). A 1-bar GRID must not win.
+        assert_eq!(snap_select(7_000, true, false, 256.0, 120.0, 48_000.0, 0), 6_000);
+        assert_eq!(snap_select(7_000, true, true, 256.0, 120.0, 48_000.0, 0), 7_000);
+        assert_eq!(snap_select(7_000, false, false, 256.0, 120.0, 48_000.0, 0), 7_000);
+        // Default zoom only paints bar lines (96_000 frames).
+        assert_eq!(snap_select(50_000, true, false, 48.0, 120.0, 48_000.0, 0), 96_000);
     }
 
     #[test]
