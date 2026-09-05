@@ -162,7 +162,7 @@ fn paint_track(
                 cmds,
                 Rect { x: x + 6.0, y, w: w - 8.0, h: Layout::SEND_NAME_BAR },
                 "KNOBS",
-                9.0,
+                11.0,
                 theme::SECONDARY_TEXT,
                 false,
             );
@@ -188,7 +188,7 @@ fn paint_track(
             cmds,
             Rect { x: x + 6.0, y, w: w - 8.0, h: Layout::SEND_NAME_BAR },
             "PAN",
-            9.0,
+            11.0,
             theme::SECONDARY_TEXT,
             false,
         );

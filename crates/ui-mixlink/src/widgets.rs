@@ -91,11 +91,12 @@ pub fn chrome_menu_pad(cmds: &mut Vec<DrawCmd>, rect: Rect, title: &str, on: boo
 
 pub fn icon_pad(cmds: &mut Vec<DrawCmd>, rect: Rect, glyph: &str, enabled: bool) {
     pad_face(cmds, rect, false, theme::PRIMARY_TEXT);
+    let size = (rect.h * 0.72).clamp(7.0, 9.5);
     theme::text_center(
         cmds,
         rect,
         glyph,
-        9.5,
+        size,
         if enabled { [1.0, 1.0, 1.0, 0.78] } else { theme::SECONDARY_TEXT },
         true,
     );

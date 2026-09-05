@@ -28,7 +28,7 @@ impl MixerLayout {
 
     /// Leading inset plus the three 1pt group dividers.
     fn gutter() -> f32 {
-        Layout::MIXER_LEADING + 4.0 + 3.0
+        Layout::MIXER_LEADING + 3.0
     }
 
     pub fn content_width(&self, send_count: usize) -> f32 {
@@ -82,9 +82,12 @@ pub fn paint(view: &MixerView<'_>) -> (Vec<DrawCmd>, Vec<(Rect, MixerExtraHit)>)
         Layout::upper_faceplate_height(&sends),
     );
 
-    let mut x = l.x + Layout::MIXER_LEADING + 4.0 - l.scroll_x;
-    paint_name_bar_rails(&mut cmds, x, l.y, l.ch_w, &sends);
-    group_header(&mut cmds, x, l.y, l.ch_w * 8.0, "Channels", None, &mut extras);
+    let mut x = mixer_origin(&l);
+    paint_name_bar_rails(&mut cmds, x, l.y, l.ch_w, l.main_w, &sends);
+    let fx_x = x + l.ch_w * 8.0 + 1.0;
+    let bus_x = fx_x + l.ch_w * sends.len() as f32 + 1.0;
+    let main_x = bus_x + l.ch_w * 2.0 + 1.0;
+    let pan_bar_y = pan_name_bar_y(&l, sends.len());
     for i in 0..8 {
         paint_strip(
             &mut cmds,
@@ -97,17 +100,8 @@ pub fn paint(view: &MixerView<'_>) -> (Vec<DrawCmd>, Vec<(Rect, MixerExtraHit)>)
         );
     }
     x += l.ch_w * 8.0;
-    theme::fill(&mut cmds, Rect { x, y: l.y, w: 1.0, h: l.h }, [0.05, 0.05, 0.05, 1.0]);
+    group_divider(&mut cmds, x, l.y, l.h, pan_bar_y);
     x += 1.0;
-    group_header(
-        &mut cmds,
-        x,
-        l.y,
-        l.ch_w * sends.len() as f32,
-        "Effect returns",
-        Some((view.engine.config.effect_return_count, analog::MAX_SEND_COUNT)),
-        &mut extras,
-    );
     for (i, lane) in sends.iter().enumerate() {
         paint_strip(
             &mut cmds,
@@ -120,9 +114,8 @@ pub fn paint(view: &MixerView<'_>) -> (Vec<DrawCmd>, Vec<(Rect, MixerExtraHit)>)
         );
     }
     x += l.ch_w * sends.len() as f32;
-    theme::fill(&mut cmds, Rect { x, y: l.y, w: 1.0, h: l.h }, [0.05, 0.05, 0.05, 1.0]);
+    group_divider(&mut cmds, x, l.y, l.h, pan_bar_y);
     x += 1.0;
-    group_header(&mut cmds, x, l.y, l.ch_w * 2.0, "Bus returns", None, &mut extras);
     paint_strip(
         &mut cmds,
         view,
@@ -142,10 +135,20 @@ pub fn paint(view: &MixerView<'_>) -> (Vec<DrawCmd>, Vec<(Rect, MixerExtraHit)>)
         &mut extras,
     );
     x += l.ch_w * 2.0;
-    theme::fill(&mut cmds, Rect { x, y: l.y, w: 1.0, h: l.h }, [0.05, 0.05, 0.05, 1.0]);
+    group_divider(&mut cmds, x, l.y, l.h, pan_bar_y);
     x += 1.0;
-    group_header(&mut cmds, x, l.y, l.main_w, "Main", None, &mut extras);
     paint_strip(&mut cmds, view, StripKind::Main, x, l.main_w, &sends, &mut extras);
+    paint_section_title(
+        &mut cmds,
+        fx_x,
+        pan_bar_y,
+        l.ch_w * sends.len() as f32,
+        "Effect returns",
+        Some((view.engine.config.effect_return_count, analog::MAX_SEND_COUNT)),
+        &mut extras,
+    );
+    paint_section_title(&mut cmds, bus_x, pan_bar_y, l.ch_w * 2.0, "Bus returns", None, &mut extras);
+    paint_section_title(&mut cmds, main_x, pan_bar_y, l.main_w, "Main", None, &mut extras);
     extras.retain(|(r, _)| {
         r.x < clip.x + clip.w && r.x + r.w > clip.x && r.y < clip.y + clip.h && r.y + r.h > clip.y
     });
@@ -161,7 +164,23 @@ pub fn paint(view: &MixerView<'_>) -> (Vec<DrawCmd>, Vec<(Rect, MixerExtraHit)>)
     (cmds, extras)
 }
 
-fn group_header(
+/// Group split (inputs | FX | bus | Main). Starts at the PAN title row so the
+/// empty send-stack above returns/Main stays one sheet.
+fn group_divider(cmds: &mut Vec<DrawCmd>, x: f32, mixer_y: f32, mixer_h: f32, from_y: f32) {
+    let y = from_y.max(mixer_y);
+    let h = (mixer_y + mixer_h - y).max(0.0);
+    if h > 0.0 {
+        theme::fill(cmds, Rect { x, y, w: 1.0, h }, [0.05, 0.05, 0.05, 1.0]);
+    }
+}
+
+/// Compact steppers on the PAN name bar — not `icon_pad` (well + shadow overflow).
+const SECTION_STEPPER: f32 = 10.0;
+const SECTION_STEPPER_GAP: f32 = 2.0;
+const SECTION_TITLE_STEPPER_GAP: f32 = 3.0;
+
+/// Section labels on the PAN name bar (Effect returns / Bus returns / Main).
+fn paint_section_title(
     cmds: &mut Vec<DrawCmd>,
     x: f32,
     y: f32,
@@ -170,35 +189,57 @@ fn group_header(
     plus_minus: Option<(i32, i32)>,
     extras: &mut Vec<(Rect, MixerExtraHit)>,
 ) {
+    let title_x = x + 6.0;
+    let title_w = section_label_advance(title).min((w - 8.0).max(8.0));
     theme::text(
         cmds,
-        Rect { x: x + 8.0, y: y + 18.0, w: w - 12.0, h: 22.0 },
+        Rect { x: title_x, y, w: title_w, h: Layout::SEND_NAME_BAR },
         title,
-        11.5,
+        SEND_TITLE_SIZE,
         theme::SECONDARY_TEXT,
-        true,
+        false,
     );
     if let Some((count, max)) = plus_minus {
-        let bx = x + w - 52.0;
+        let by = y + (Layout::SEND_NAME_BAR - SECTION_STEPPER) * 0.5;
+        let mut bx = title_x + title_w + SECTION_TITLE_STEPPER_GAP;
         if count > 2 {
-            widgets::icon_pad(cmds, Rect { x: bx, y: y + 18.0, w: 20.0, h: 20.0 }, "−", true);
-            extras
-                .push((Rect { x: bx, y: y + 18.0, w: 20.0, h: 20.0 }, MixerExtraHit::RemoveReturn));
+            let r = Rect { x: bx, y: by, w: SECTION_STEPPER, h: SECTION_STEPPER };
+            paint_section_stepper(cmds, r, "−");
+            extras.push((r, MixerExtraHit::RemoveReturn));
+            bx += SECTION_STEPPER + SECTION_STEPPER_GAP;
         }
         if count < max {
-            widgets::icon_pad(
-                cmds,
-                Rect { x: bx + 24.0, y: y + 18.0, w: 20.0, h: 20.0 },
-                "+",
-                true,
-            );
-            extras.push((
-                Rect { x: bx + 24.0, y: y + 18.0, w: 20.0, h: 20.0 },
-                MixerExtraHit::AddReturn,
-            ));
+            let r = Rect { x: bx, y: by, w: SECTION_STEPPER, h: SECTION_STEPPER };
+            paint_section_stepper(cmds, r, "+");
+            extras.push((r, MixerExtraHit::AddReturn));
         }
     }
-    theme::seam_h(cmds, x, y + Layout::GROUP_HEADER - 2.0, w, false);
+}
+
+fn paint_section_stepper(cmds: &mut Vec<DrawCmd>, rect: Rect, glyph: &str) {
+    theme::fill(cmds, rect, [0.11, 0.11, 0.12, 1.0]);
+    theme::fill(cmds, Rect { x: rect.x, y: rect.y, w: rect.w, h: 1.0 }, [1.0, 1.0, 1.0, 0.10]);
+    theme::fill(
+        cmds,
+        Rect { x: rect.x, y: rect.y + rect.h - 1.0, w: rect.w, h: 1.0 },
+        [0.0, 0.0, 0.0, 0.45],
+    );
+    theme::text_center(cmds, rect, glyph, 8.0, [1.0, 1.0, 1.0, 0.72], true);
+}
+
+/// Tight 9pt run so the steppers sit against the glyphs, not a wide estimate.
+fn section_label_advance(s: &str) -> f32 {
+    s.chars()
+        .map(|ch| {
+            SEND_TITLE_SIZE
+                * match ch {
+                    ' ' => 0.28,
+                    'i' | 'l' | 'I' | 'j' | 't' | 'f' | 'r' | '.' | '·' => 0.38,
+                    'm' | 'M' | 'w' | 'W' => 0.90,
+                    _ => 0.56,
+                }
+        })
+        .sum()
 }
 
 fn paint_strip(
@@ -211,7 +252,7 @@ fn paint_strip(
     extras: &mut Vec<(Rect, MixerExtraHit)>,
 ) {
     let l = view.layout;
-    let y0 = l.y + Layout::GROUP_HEADER;
+    let y0 = l.y;
 
     let (fader, pan, name, id, has_sends, dim, enabled) = match kind {
         StripKind::Input(i) => {
@@ -253,20 +294,6 @@ fn paint_strip(
     // A per-strip black fill would hide the continuous grain.
 
     let mut y = y0;
-    if !matches!(kind, StripKind::Main) {
-        widgets::enable_toggle(
-            cmds,
-            Rect {
-                x: x + w * 0.5 - Layout::ENABLE_W * 0.5,
-                y: y + (Layout::ENABLE_ROW - Layout::ENABLE_H) * 0.5,
-                w: Layout::ENABLE_W,
-                h: Layout::ENABLE_H,
-            },
-            enabled,
-        );
-    }
-    y += Layout::ENABLE_ROW;
-
     let first_input = matches!(kind, StripKind::Input(0));
     if has_sends {
         if let StripKind::Input(i) = kind {
@@ -309,6 +336,7 @@ fn paint_strip(
     y += Layout::SEND_NAME_BAR;
     theme::faceplate_cell(cmds, Rect { x, y, w, h: Layout::PAN_ROW }, false, true);
     if !matches!(kind, StripKind::Main) {
+        paint_enable_toggle(cmds, pan_enable_rect(x, y, w), enabled);
         let knob = pan_knob_rect(x, y, w);
         widgets::knob(cmds, knob.x, knob.y, Layout::PAN_KNOB, pan, widgets::KnobKind::Pan, None);
     }
@@ -381,41 +409,58 @@ fn paint_strip(
         StripKind::Main => {}
     }
 
-    // MixLink `ChannelSeam`: enable row always; body skips the send stack on
-    // non-last effect/bus returns so the upper faceplate stays one sheet.
-    theme::channel_seam(cmds, x + w - 1.0, y0, Layout::ENABLE_ROW, false);
+    // Returns / Main have no send knobs — keep that empty faceplate seamless
+    // down to the PAN title row. Inputs keep seams through the send stack.
     let send_area: f32 = sends.iter().copied().map(Layout::send_lane_h).sum();
-    let skip_upper = match kind {
-        StripKind::Return(lane) if lane.is_send() => Some(lane) != sends.last().copied(),
-        StripKind::Return(ReturnLane::Bus1) => true,
-        _ => false,
-    };
-    let body_y = y0 + Layout::ENABLE_ROW + if skip_upper { send_area } else { 0.0 };
+    let skip_upper = !matches!(kind, StripKind::Input(_));
+    let body_y = y0 + if skip_upper { send_area } else { 0.0 };
     let body_h = (l.y + l.h - body_y).max(0.0);
     if body_h > 0.0 {
+        if matches!(kind, StripKind::Input(0)) {
+            theme::channel_seam(cmds, x, y0, (l.y + l.h - y0).max(0.0), false);
+        }
         theme::channel_seam(cmds, x + w - 1.0, body_y, body_h, false);
     }
 }
 
+fn mixer_origin(layout: &MixerLayout) -> f32 {
+    layout.x + Layout::MIXER_LEADING - layout.scroll_x
+}
+
 /// MixLink `SendLaneNameBar` plates as one rail per row (not a fill per strip).
-/// Send plates cover the leading gutter + input group (`MixerLeadingNameGutter`).
+fn paint_enable_toggle(cmds: &mut Vec<DrawCmd>, rect: Rect, enabled: bool) {
+    widgets::enable_toggle(cmds, rect, enabled);
+}
+
+const PAN_ENABLE_INSET: f32 = 4.0;
+
+/// On/off toggle in the top-right of the pan faceplate (below the name bar).
+pub fn pan_enable_rect(strip_x: f32, pan_row_y: f32, strip_w: f32) -> Rect {
+    Rect {
+        x: strip_x + strip_w - PAN_ENABLE_INSET - Layout::ENABLE_W,
+        y: pan_row_y + PAN_ENABLE_INSET,
+        w: Layout::ENABLE_W,
+        h: Layout::ENABLE_H,
+    }
+}
+
 fn paint_name_bar_rails(
     cmds: &mut Vec<DrawCmd>,
     origin: f32,
     mixer_y: f32,
     ch_w: f32,
+    main_w: f32,
     sends: &[ReturnLane],
 ) {
-    let gutter = Layout::MIXER_LEADING + 4.0;
-    let rail_x = origin - gutter;
-    let inputs_w = gutter + ch_w * 8.0;
-    let mut y = mixer_y + Layout::GROUP_HEADER + Layout::ENABLE_ROW;
+    let rail_x = origin;
+    let inputs_w = ch_w * 8.0;
+    let mut y = mixer_y;
     for lane in sends {
         name_bar_plate(cmds, rail_x, y, inputs_w);
         y += Layout::send_lane_h(*lane);
     }
-    // MixLink `showsPlate: showsPan` — every strip except Main.
-    let pan_w = inputs_w + 1.0 + ch_w * sends.len() as f32 + 1.0 + ch_w * 2.0;
+    // PAN / Effect returns / Bus returns / Main share one rail.
+    let pan_w = inputs_w + 1.0 + ch_w * sends.len() as f32 + 1.0 + ch_w * 2.0 + 1.0 + main_w;
     name_bar_plate(cmds, rail_x, y, pan_w);
 }
 
@@ -449,7 +494,7 @@ fn name_bar(
             cmds,
             Rect { x: x + 6.0, y, w: w - 8.0, h: Layout::SEND_NAME_BAR },
             label,
-            9.0,
+            SEND_TITLE_SIZE,
             theme::SECONDARY_TEXT,
             false,
         );
@@ -470,8 +515,7 @@ fn paint_control_with_pan(
     if lane != ReturnLane::SendC {
         return;
     }
-    let name = view.engine.return_display_name(lane);
-    let Some(hit) = control_with_pan_rect(&view.layout, sends.len(), &name) else {
+    let Some(hit) = control_with_pan_rect(&view.layout, sends.len()) else {
         return;
     };
     widgets::checkbox(
@@ -681,7 +725,7 @@ pub fn knob_hit_rect(disc: Rect) -> Rect {
 
 pub fn strip_frame(layout: &MixerLayout, send_count: usize, kind: StripKind) -> (f32, f32) {
     let n_send = send_count.max(2).min(6);
-    let mut sx = layout.x + Layout::MIXER_LEADING + 4.0 - layout.scroll_x;
+    let mut sx = mixer_origin(layout);
     match kind {
         StripKind::Input(i) => (sx + i as f32 * layout.ch_w, layout.ch_w),
         StripKind::Return(lane) if lane.is_send() => {
@@ -710,14 +754,22 @@ pub fn strip_frame(layout: &MixerLayout, send_count: usize, kind: StripKind) -> 
     }
 }
 
-pub fn fader_bay_frame(layout: &MixerLayout, send_count: usize) -> (f32, f32) {
+pub fn send_stack_h(send_count: usize) -> f32 {
     let n = send_count.max(2).min(6);
-    let y = layout.y
-        + Layout::GROUP_HEADER
-        + Layout::ENABLE_ROW
-        + ALL_SEND_LANES.iter().take(n).copied().map(Layout::send_lane_h).sum::<f32>()
-        + Layout::SEND_NAME_BAR
-        + Layout::PAN_ROW;
+    ALL_SEND_LANES.iter().take(n).copied().map(Layout::send_lane_h).sum()
+}
+
+/// Y of the PAN / Effect returns / Bus returns / Main name bar.
+pub fn pan_name_bar_y(layout: &MixerLayout, send_count: usize) -> f32 {
+    layout.y + send_stack_h(send_count)
+}
+
+pub fn pan_row_y(layout: &MixerLayout, send_count: usize) -> f32 {
+    pan_name_bar_y(layout, send_count) + Layout::SEND_NAME_BAR
+}
+
+pub fn fader_bay_frame(layout: &MixerLayout, send_count: usize) -> (f32, f32) {
+    let y = pan_name_bar_y(layout, send_count) + Layout::SEND_NAME_BAR + Layout::PAN_ROW;
     let h = (layout.y + layout.h - y - Layout::NAME_ROW - Layout::BUTTON_STACK).max(80.0);
     (y, h)
 }
@@ -734,7 +786,7 @@ pub fn fader_rail(
 }
 
 pub fn strip_at(layout: &MixerLayout, send_count: usize, x: f32, _y: f32) -> Option<StripKind> {
-    let mut sx = layout.x + Layout::MIXER_LEADING + 4.0 - layout.scroll_x;
+    let mut sx = mixer_origin(layout);
     if x < sx {
         return None;
     }
@@ -768,15 +820,11 @@ const CONTROL_WITH_PAN_LABEL: &str = "Control with Pan";
 const CONTROL_WITH_PAN_BOX: f32 = 14.0;
 /// Checkbox (14) + gap to label (6) + `widgets::checkbox` label width (110).
 const CONTROL_WITH_PAN_HIT_W: f32 = 130.0;
-const SEND_TITLE_SIZE: f32 = 9.0;
+const SEND_TITLE_SIZE: f32 = 11.0;
 
-/// Hit rect on the Send C name bar, immediately to the right of `SEND C · {name}`.
+/// Hit rect on the Send C name bar, right-aligned to input channel 8.
 /// Only when there are ≥3 effect returns (MixLink: Control with Pan is Send C only).
-pub fn control_with_pan_rect(
-    layout: &MixerLayout,
-    send_count: usize,
-    return_name: &str,
-) -> Option<Rect> {
+pub fn control_with_pan_rect(layout: &MixerLayout, send_count: usize) -> Option<Rect> {
     if send_count < 3 {
         return None;
     }
@@ -784,33 +832,14 @@ pub fn control_with_pan_rect(
     let Some(i) = ALL_SEND_LANES.iter().take(n).position(|l| *l == ReturnLane::SendC) else {
         return None;
     };
-    let (sx, sw) = strip_frame(layout, send_count, StripKind::Input(0));
-    let y = layout.y
-        + Layout::GROUP_HEADER
-        + Layout::ENABLE_ROW
-        + ALL_SEND_LANES.iter().take(i).copied().map(Layout::send_lane_h).sum::<f32>();
-    let title = send_lane_title(ReturnLane::SendC, return_name);
-    let title_w = send_title_advance(&title).min((sw - 8.0).max(0.0));
+    let (x8, w8) = strip_frame(layout, send_count, StripKind::Input(7));
+    let y = layout.y + ALL_SEND_LANES.iter().take(i).copied().map(Layout::send_lane_h).sum::<f32>();
     Some(Rect {
-        x: sx + 6.0 + title_w + 10.0,
+        x: x8 + w8 - 6.0 - CONTROL_WITH_PAN_HIT_W,
         y,
         w: CONTROL_WITH_PAN_HIT_W,
         h: Layout::SEND_NAME_BAR,
     })
-}
-
-fn send_title_advance(s: &str) -> f32 {
-    s.chars()
-        .map(|ch| {
-            SEND_TITLE_SIZE
-                * match ch {
-                    ' ' | '.' | '·' | ',' | ':' | ';' | 'i' | 'l' | 'I' | 'j' | 't' | 'f'
-                    | '\'' => 0.36,
-                    'm' | 'M' | 'w' | 'W' => 1.00,
-                    _ => 0.70,
-                }
-        })
-        .sum()
 }
 
 #[cfg(test)]
@@ -833,6 +862,16 @@ mod tests {
         // MixLink: padding(.top, 8) + disc centered in size+8 → 12.
         assert_eq!(pan_knob_rect(0.0, 0.0, 100.0).y, 12.0);
         assert_eq!(pan_knob_rect(0.0, 0.0, 100.0).x, (100.0 - Layout::PAN_KNOB) * 0.5);
+    }
+
+    #[test]
+    fn input_channels_share_one_width() {
+        let layout = MixerLayout::new(0.0, 0.0, 1600.0, 900.0, 2);
+        let (x0, w0) = strip_frame(&layout, 2, StripKind::Input(0));
+        let (x1, w1) = strip_frame(&layout, 2, StripKind::Input(1));
+        assert_eq!(w0, w1);
+        assert!((x1 - (x0 + w0)).abs() < 0.01);
+        assert!((x0 - (layout.x + Layout::MIXER_LEADING)).abs() < 0.01);
     }
 
     #[test]
@@ -859,25 +898,101 @@ mod tests {
     #[test]
     fn control_with_pan_sits_on_send_c_name_bar() {
         let layout = MixerLayout::new(0.0, 0.0, 1600.0, 900.0, 3);
-        let r = control_with_pan_rect(&layout, 3, "No effect").expect("Send C title-bar hit");
+        let r = control_with_pan_rect(&layout, 3).expect("Send C title-bar hit");
         let bar_y = layout.y
-            + Layout::GROUP_HEADER
-            + Layout::ENABLE_ROW
             + Layout::send_lane_h(ReturnLane::SendA)
             + Layout::send_lane_h(ReturnLane::SendB);
         assert!((r.y - bar_y).abs() < 0.01);
         assert!((r.h - Layout::SEND_NAME_BAR).abs() < 0.01);
-        let (sx, _) = strip_frame(&layout, 3, StripKind::Input(0));
-        assert!(r.x >= sx + 6.0, "checkbox should sit after the title, got x={}", r.x);
+        let (x8, w8) = strip_frame(&layout, 3, StripKind::Input(7));
+        assert!(
+            (r.x + r.w - (x8 + w8 - 6.0)).abs() < 0.5,
+            "should right-align to channel 8, got right={} want {}",
+            r.x + r.w,
+            x8 + w8 - 6.0
+        );
         let (cx, _) = strip_frame(&layout, 3, StripKind::Return(ReturnLane::SendC));
         assert!(r.x + r.w < cx, "must not land on the Send C return strip");
-        // First-channel title slot — checkbox is to the right of that text.
-        assert!(r.x >= sx + 20.0);
+        let (sx, sw) = strip_frame(&layout, 3, StripKind::Input(0));
+        assert!(r.x > sx + sw, "must not sit next to the SEND C title on channel 1");
     }
 
     #[test]
     fn control_with_pan_hidden_without_send_c() {
         let layout = MixerLayout::new(0.0, 0.0, 1600.0, 900.0, 2);
-        assert!(control_with_pan_rect(&layout, 2, "No effect").is_none());
+        assert!(control_with_pan_rect(&layout, 2).is_none());
+    }
+
+    #[test]
+    fn pan_name_bar_sits_below_send_stack() {
+        let layout = MixerLayout::new(0.0, 40.0, 1600.0, 900.0, 3);
+        let y = pan_name_bar_y(&layout, 3);
+        let expected = 40.0
+            + Layout::send_lane_h(ReturnLane::SendA)
+            + Layout::send_lane_h(ReturnLane::SendB)
+            + Layout::send_lane_h(ReturnLane::SendC);
+        assert!((y - expected).abs() < 0.01);
+        assert!((pan_row_y(&layout, 3) - (y + Layout::SEND_NAME_BAR)).abs() < 0.01);
+        let (bay_y, _) = fader_bay_frame(&layout, 3);
+        assert!((bay_y - (y + Layout::SEND_NAME_BAR + Layout::PAN_ROW)).abs() < 0.01);
+    }
+
+    fn test_engine() -> AnalogEngine {
+        let config = analog::SessionConfig::new();
+        let mut mixer = analog::MixerState::new();
+        mixer.monitored_output = config.main_output;
+        let mut surface = analog::SurfaceState::new();
+        surface.load_returns(&config);
+        AnalogEngine::new(mixer, surface, config, osc::OscSession::new())
+    }
+
+    #[test]
+    fn section_titles_live_on_pan_name_bar_not_group_header() {
+        let engine = test_engine();
+        let send_count = engine.config.visible_send_lanes().len();
+        let layout = MixerLayout::new(0.0, 0.0, 1800.0, 900.0, send_count);
+        let peaks = [0.0f32; 17];
+        let (cmds, extras) = paint(&MixerView { engine: &engine, peaks: &peaks, layout });
+        let texts: Vec<&str> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                DrawCmd::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(!texts.contains(&"Channels"), "{texts:?}");
+        let bar_y = pan_name_bar_y(&layout, send_count);
+        for title in ["PAN", "Effect returns", "Bus returns", "Main"] {
+            let on_bar = cmds.iter().any(|c| match c {
+                DrawCmd::Text(t) if t.text == title => (t.rect.y - bar_y).abs() < 0.5,
+                _ => false,
+            });
+            assert!(on_bar, "{title} should sit on the PAN name bar (y={bar_y}); texts={texts:?}");
+        }
+        let plus = extras.iter().find(|(_, h)| matches!(h, MixerExtraHit::AddReturn));
+        let Some((plus, _)) = plus else { panic!("effect-return + should sit on the PAN name bar") };
+        assert_eq!(plus.h, SECTION_STEPPER);
+        let title = cmds.iter().find_map(|c| match c {
+            DrawCmd::Text(t) if t.text == "Effect returns" => Some(t),
+            _ => None,
+        });
+        let Some(title) = title else { panic!("Effect returns title") };
+        assert!(
+            (plus.x - (title.rect.x + title.rect.w + SECTION_TITLE_STEPPER_GAP)).abs() < 1.0,
+            "plus x={} should hug the title (title x={} w={})",
+            plus.x,
+            title.rect.x,
+            title.rect.w
+        );
+        let (bus_x, _) = strip_frame(&layout, send_count, StripKind::Return(ReturnLane::Bus1));
+        assert!(plus.x + plus.w < bus_x, "plus must not sit on the Bus returns group");
+        let (fx_x, _) = strip_frame(&layout, send_count, StripKind::Return(ReturnLane::SendA));
+        let empty_seams = cmds.iter().any(|c| match c {
+            DrawCmd::Rect { rect, .. } => {
+                rect.w <= 1.5 && rect.x >= fx_x && rect.y + 0.5 < bar_y && rect.h > 8.0
+            }
+            _ => false,
+        });
+        assert!(!empty_seams, "no group dividers in the empty send-stack above the title row");
     }
 }

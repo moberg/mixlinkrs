@@ -41,15 +41,18 @@ pub enum Pad {
 
 pub fn hit_mixer(layout: &MixerLayout, send_count: usize, x: f32, y: f32) -> Option<Hit> {
     let kind = mixer::strip_at(layout, send_count, x, y)?;
-    if y < layout.y + Layout::GROUP_HEADER {
+    if y < layout.y {
         return None;
     }
-    let y0 = layout.y + Layout::GROUP_HEADER;
-    if y < y0 + Layout::ENABLE_ROW {
-        return Some(Hit::Enable { kind });
-    }
+    let y0 = layout.y;
     let (sx, sw) = mixer::strip_frame(layout, send_count, kind);
-    let mut yy = y0 + Layout::ENABLE_ROW;
+    if !matches!(kind, StripKind::Main) {
+        let enable = mixer::pan_enable_rect(sx, mixer::pan_row_y(layout, send_count), sw);
+        if widgets::contains(enable, x, y) {
+            return Some(Hit::Enable { kind });
+        }
+    }
+    let mut yy = y0;
     let n = send_count.max(2).min(6);
     for i in 0..n {
         let lane = analog::ALL_SEND_LANES[i];
@@ -184,10 +187,58 @@ mod tests {
         }
     }
 
+    fn enable_center(layout: &MixerLayout, send_count: usize, kind: StripKind) -> (f32, f32) {
+        let (sx, sw) = mixer::strip_frame(layout, send_count, kind);
+        let r = mixer::pan_enable_rect(sx, mixer::pan_row_y(layout, send_count), sw);
+        (r.x + r.w * 0.5, r.y + r.h * 0.5)
+    }
+
+    #[test]
+    fn input_enable_hits_pan_cell_top_right() {
+        let layout = MixerLayout::new(0.0, 0.0, 1600.0, 900.0, 2);
+        let (sx, sw) = mixer::strip_frame(&layout, 2, StripKind::Input(0));
+        let (ex, ey) = enable_center(&layout, 2, StripKind::Input(0));
+        match hit_mixer(&layout, 2, ex, ey) {
+            Some(Hit::Enable { kind: StripKind::Input(0) }) => {}
+            other => panic!("input enable in pan cell, got {other:?}"),
+        }
+        assert!(ex > sx + sw * 0.5, "toggle should sit on the right of the pan cell");
+        assert!(ey > mixer::pan_name_bar_y(&layout, 2) + Layout::SEND_NAME_BAR);
+        match hit_mixer(&layout, 2, sx + sw * 0.5, layout.y + 4.0) {
+            Some(Hit::Enable { .. }) => panic!("enable must not sit at the mixer top"),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn return_enable_hits_pan_cell_top_right() {
+        let layout = MixerLayout::new(0.0, 0.0, 1600.0, 900.0, 2);
+        for kind in [
+            StripKind::Return(ReturnLane::SendA),
+            StripKind::Return(ReturnLane::Bus1),
+            StripKind::Return(ReturnLane::Bus2),
+        ] {
+            let (ex, ey) = enable_center(&layout, 2, kind);
+            match hit_mixer(&layout, 2, ex, ey) {
+                Some(Hit::Enable { kind: got }) => assert!(matches!(
+                    (kind, got),
+                    (StripKind::Return(a), StripKind::Return(b)) if a == b
+                )),
+                other => panic!("{kind:?} return enable, got {other:?}"),
+            }
+        }
+        let (sx, sw) = mixer::strip_frame(&layout, 2, StripKind::Main);
+        let r = mixer::pan_enable_rect(sx, mixer::pan_row_y(&layout, 2), sw);
+        match hit_mixer(&layout, 2, r.x + r.w * 0.5, r.y + r.h * 0.5) {
+            Some(Hit::Enable { .. }) => panic!("Main has no enable toggle"),
+            _ => {}
+        }
+    }
+
     #[test]
     fn send_c_title_bar_checkbox_is_not_a_knob_or_name() {
         let layout = MixerLayout::new(0.0, 0.0, 1600.0, 900.0, 3);
-        let r = mixer::control_with_pan_rect(&layout, 3, "No effect")
+        let r = mixer::control_with_pan_rect(&layout, 3)
             .expect("Control with Pan on Send C title bar");
         match hit_mixer(&layout, 3, r.x + 8.0, r.y + r.h * 0.5) {
             None => {}

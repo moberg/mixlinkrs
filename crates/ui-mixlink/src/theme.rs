@@ -610,7 +610,6 @@ impl Layout {
     pub const MIXER_LEADING: f32 = 10.0;
     pub const LEGEND_OVERLAY: f32 = 112.0;
     pub const SIDEBAR_WIDTH: f32 = 248.0;
-    pub const GROUP_HEADER: f32 = 58.0;
     pub const ENABLE_ROW: f32 = 20.0;
     pub const ENABLE_W: f32 = 16.0;
     pub const ENABLE_H: f32 = 10.0;
@@ -618,7 +617,7 @@ impl Layout {
     pub const PAN_KNOB: f32 = 40.0;
     pub const SEND_ROW_A: f32 = 90.0;
     pub const SEND_ROW: f32 = 92.0;
-    pub const SEND_NAME_BAR: f32 = 18.0;
+    pub const SEND_NAME_BAR: f32 = 22.0;
     pub const PAN_ROW: f32 = 80.0;
     pub const FADER_TROUGH: f32 = 14.0;
     pub const FADER_SLOT: f32 = 7.5;
@@ -671,9 +670,7 @@ impl Layout {
     }
 
     pub fn upper_faceplate_height(sends: &[analog::ReturnLane]) -> f32 {
-        Self::GROUP_HEADER
-            + Self::ENABLE_ROW
-            + sends.iter().map(|lane| Self::send_lane_h(*lane)).sum::<f32>()
+        sends.iter().map(|lane| Self::send_lane_h(*lane)).sum::<f32>()
             + Self::PAN_ROW
             + Self::SEND_NAME_BAR
     }
