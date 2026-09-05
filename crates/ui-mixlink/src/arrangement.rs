@@ -99,15 +99,11 @@ pub fn paint(view: &ArrangementView<'_>) -> Vec<DrawCmd> {
             continue;
         }
         theme::fill(&mut cmds, header, theme::lane_kind_header(kind, selected));
-        theme::fill(
-            &mut cmds,
-            Rect { x: l.x, y: header.y, w: 3.0, h: header.h },
-            kind_color,
-        );
+        theme::fill(&mut cmds, Rect { x: l.x, y: header.y, w: 3.0, h: header.h }, kind_color);
         theme::text_clip(
             &mut cmds,
             Rect { x: l.x + 8.0, y, w: HEADER_W - 10.0, h: TRACK_H },
-            track.lane.labeled_name(&track.name),
+            project::strip_adat_channel(&track.name),
             11.0,
             kind_color,
             selected,
@@ -337,12 +333,7 @@ fn paint_clip_loading(cmds: &mut Vec<DrawCmd>, rect: Rect) {
         let wave = ((phase + i as f32 * 0.12) * std::f32::consts::TAU).sin() * 0.5 + 0.5;
         let h = 4.0 + max_h * (0.22 + 0.78 * wave);
         cmds.push(DrawCmd::RoundedRect {
-            rect: Rect {
-                x: x0 + i as f32 * (bar_w + gap),
-                y: mid_y - h * 0.5,
-                w: bar_w,
-                h,
-            },
+            rect: Rect { x: x0 + i as f32 * (bar_w + gap), y: mid_y - h * 0.5, w: bar_w, h },
             color: [1.0, 1.0, 1.0, 0.18 + 0.32 * wave],
             radius: 1.2,
         });

@@ -13,7 +13,8 @@ pub mod undo;
 
 pub use analog::ReturnLane;
 pub use document::{
-    parse_take_wav, sanitize_take_name, take_clip_id, take_wav_name, MixArrangement,
+    parse_take_wav, sanitize_take_name, strip_adat_channel, take_clip_id, take_wav_name,
+    MixArrangement,
     MixAutomationLane, MixAutomationPoint, MixAutomationTarget, MixClip, MixDocument, MixGrid,
     MixInsert, MixKnobMap, MixLane, MixPasteboard, MixTime, MixTrack, TakeFile, TakeInfo,
     FADER_LIN_0DB, KNOB_COUNT,

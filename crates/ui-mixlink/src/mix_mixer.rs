@@ -238,7 +238,7 @@ fn paint_track(
     widgets::strip_name_label(
         cmds,
         Rect { x, y, w, h: Layout::NAME_ROW },
-        &track.lane.labeled_name(&track.name),
+        &project::strip_adat_channel(&track.name),
         widgets::StripNameStyle {
             diamond: false,
             dim: track.is_unused_template_strip(),

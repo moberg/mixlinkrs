@@ -23,6 +23,8 @@ pub struct MixerState {
     pub last_osc_log: String,
     /// source ChannelID → dest output index → 0...1
     pub sends: HashMap<ChannelID, HashMap<i32, f32>>,
+    /// source ChannelID → dest output index → TotalMix balpan (−1...+1)
+    pub send_pans: HashMap<ChannelID, HashMap<i32, f32>>,
 }
 
 impl Default for MixerState {
@@ -50,6 +52,7 @@ impl MixerState {
             connected: false,
             last_osc_log: String::new(),
             sends: HashMap::new(),
+            send_pans: HashMap::new(),
         }
     }
 
@@ -86,6 +89,15 @@ impl MixerState {
     pub fn set_send(&mut self, source: ChannelID, dest: i32, level: f32) {
         let row = self.sends.entry(source).or_default();
         row.insert(dest, level.clamp(0.0, 1.0));
+    }
+
+    pub fn send_pan_if_present(&self, source: ChannelID, dest: i32) -> Option<f32> {
+        self.send_pans.get(&source).and_then(|row| row.get(&dest)).copied()
+    }
+
+    pub fn set_send_pan(&mut self, source: ChannelID, dest: i32, balpan: f32) {
+        let row = self.send_pans.entry(source).or_default();
+        row.insert(dest, balpan.clamp(-1.0, 1.0));
     }
 
     pub fn all_channels(&self, bus: MixerBus) -> Vec<MixerChannel> {
@@ -267,9 +279,9 @@ pub fn apply_inbound(mixer: &mut MixerState, address: &str, value: &OscValue) ->
                     }));
                 }
                 "balpan" => {
-                    mixer.update_channel(id, |c| {
-                        c.pan = osc::balpan_to_pan_unit(value.float_value())
-                    });
+                    let pan = value.float_value();
+                    mixer.set_send_pan(id, dest, pan);
+                    mixer.update_channel(id, |c| c.pan = osc::balpan_to_pan_unit(pan));
                     return Some(MixEvent::Mix(MixNode {
                         source_bus: src_bus,
                         source: src,

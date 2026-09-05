@@ -90,9 +90,8 @@ pub fn enable_toggle(cmds: &mut Vec<DrawCmd>, rect: Rect, on: bool) {
     let well = Rect { x: rect.x - 1.35, y: rect.y - 0.75, w: rect.w + 2.7, h: rect.h + 2.7 };
     if on {
         // MixLink HardwarePadStyle: `.shadow(color: accent.opacity(0.55), radius: 6)`.
-        // wgpu additive rings read hotter than SwiftUI's Gaussian, so this is
-        // ~0.58 of that opacity with a slightly tighter radius.
-        gaussian_tint_shadow(cmds, well, accent, 0.32, 5.0, r + 0.6);
+        // Keep a tight chassis haze — the old 0.32 / 5pt bloom washed the strip.
+        gaussian_tint_shadow(cmds, well, accent, 0.12, 2.2, r + 0.6);
     }
     pad_face_ex(cmds, rect, on, accent, false);
 
@@ -102,9 +101,9 @@ pub fn enable_toggle(cmds: &mut Vec<DrawCmd>, rect: Rect, on: bool) {
     if on {
         let led = Rect { x: cx - led_d * 0.5, y: cy - led_d * 0.5, w: led_d, h: led_d };
         // HardwarePadStyle on the label: `.shadow(color: accent.opacity(0.9), radius: 2.4)`
-        gaussian_tint_shadow(cmds, led, accent, 0.9, 2.4, led_d * 0.5);
+        gaussian_tint_shadow(cmds, led, accent, 0.40, 1.3, led_d * 0.5);
         // ChannelOnToggle: `.shadow(color: meterGreen.opacity(0.7), radius: 1.6)`
-        gaussian_tint_shadow(cmds, led, accent, 0.7, 1.6, led_d * 0.5);
+        gaussian_tint_shadow(cmds, led, accent, 0.32, 0.9, led_d * 0.5);
         // Lit face uses `Color.white.opacity(0.28)` over the accent — same mix on the LED core
         // so the 5.5pt disc reads as a hotter yellowish-green hotspot, not a flat chip.
         cmds.push(DrawCmd::RadialDisc {

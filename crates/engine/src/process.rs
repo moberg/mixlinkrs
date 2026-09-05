@@ -4,12 +4,10 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use atomic_float::AtomicF32;
 use dsp_core::MAX_INTERNAL_BLOCK;
-use engine_api::{
-    EngineEvent, UiCommand, MASTER_PLUGIN_SLOT, MASTER_TAP, MIX_PLAY_MAX_LANES, TAP_COUNT,
-};
+use engine_api::{EngineEvent, UiCommand, MASTER_PLUGIN_SLOT, MIX_PLAY_MAX_LANES, TAP_COUNT};
 use rt_utils::spsc::{spsc_bounded, Consumer, Producer};
 
-use crate::schedule::{RtControls, Schedule};
+use crate::schedule::{MixGain, RtControls, Schedule};
 use crate::taps::display_level;
 
 const MAX_FRAMES: usize = 4096;
@@ -30,8 +28,6 @@ pub struct Engine {
     scratch_in_r: Vec<f32>,
     scratch_out_l: Vec<f32>,
     scratch_out_r: Vec<f32>,
-    master_l: Vec<f32>,
-    master_r: Vec<f32>,
     rings_l: [Vec<f32>; TAP_COUNT],
     rings_r: [Vec<f32>; TAP_COUNT],
     ring_cap: usize,
@@ -43,6 +39,8 @@ pub struct Engine {
     lane_write: [usize; MIX_PLAY_MAX_LANES],
     lane_read: [usize; MIX_PLAY_MAX_LANES],
     lane_cap: usize,
+    master_l: Vec<f32>,
+    master_r: Vec<f32>,
     /// First IOProc on a thread may touch TLS (ArcSwap, no-alloc depth).
     rt_tls_warmed: bool,
 }
@@ -88,8 +86,6 @@ impl Engine {
             scratch_in_r: vec![0.0; MAX_FRAMES],
             scratch_out_l: vec![0.0; MAX_FRAMES],
             scratch_out_r: vec![0.0; MAX_FRAMES],
-            master_l: vec![0.0; MAX_FRAMES],
-            master_r: vec![0.0; MAX_FRAMES],
             rings_l: std::array::from_fn(|_| vec![0.0; ring_cap]),
             rings_r: std::array::from_fn(|_| vec![0.0; ring_cap]),
             ring_cap,
@@ -101,6 +97,8 @@ impl Engine {
             lane_write: [0; MIX_PLAY_MAX_LANES],
             lane_read: [0; MIX_PLAY_MAX_LANES],
             lane_cap,
+            master_l: vec![0.0; MAX_FRAMES],
+            master_r: vec![0.0; MAX_FRAMES],
             rt_tls_warmed: false,
         };
         (
@@ -252,13 +250,10 @@ impl Engine {
         } else {
             // Phase-1 sanity: dry duplex of input pair 0/1 → output pair 0/1.
             copy_pair(&input, &output, 0, 1, frames);
-            accumulate_master(self, &input, 0, 1, frames);
         }
 
-        if any_plugin || mix_playing {
-            self.master_l[..frames].fill(0.0);
-            self.master_r[..frames].fill(0.0);
-        }
+        self.master_l[..frames].fill(0.0);
+        self.master_r[..frames].fill(0.0);
 
         if !mix_playing {
             for slot in 0..8 {
@@ -319,32 +314,47 @@ impl Engine {
             if tap.plugin_slot == MASTER_PLUGIN_SLOT {
                 continue;
             }
+            let mix = mix_gain(&schedule, tap_i);
+            let muted = record_muted(&schedule, tap_i) || mix.muted;
+            let (gain_l, gain_r) = if muted {
+                (0.0, 0.0)
+            } else {
+                stereo_pan_amps(mix.gain, mix.pan)
+            };
             let peak = if tap.channel_l >= 0 {
                 peak_from_input(&input, tap.channel_l, tap.channel_r, frames)
+                    * gain_l.max(gain_r)
             } else {
                 0.0
             };
             hold_peak(&self.peaks[tap_i], peak);
             if recording && self.ring_enabled[tap_i] {
-                if tap.channel_l >= 0 {
-                    write_ring_from_ptrs(self, tap_i, &input, tap.channel_l, tap.channel_r, frames);
+                if tap.channel_l >= 0 && (gain_l > 0.0 || gain_r > 0.0) {
+                    write_stem_and_sum_master(
+                        self,
+                        tap_i,
+                        &input,
+                        tap.channel_l,
+                        tap.channel_r,
+                        frames,
+                        gain_l,
+                        gain_r,
+                    );
                 } else {
                     write_silence_ring(self, tap_i, frames);
                 }
             }
         }
 
-        hold_peak(
-            &self.peaks[MASTER_TAP],
-            peak_of(&self.master_l[..frames], &self.master_r[..frames]),
-        );
-        if recording && self.ring_enabled[MASTER_TAP] {
+        let master_peak = peak_of(&self.master_l[..frames], &self.master_r[..frames]);
+        hold_peak(&self.peaks[engine_api::MASTER_TAP], master_peak);
+        if recording && self.ring_enabled[engine_api::MASTER_TAP] {
             write_ring_slices(
                 &mut self.rings_l,
                 &mut self.rings_r,
                 &mut self.ring_write,
                 self.ring_cap,
-                MASTER_TAP,
+                engine_api::MASTER_TAP,
                 &self.master_l[..frames],
                 &self.master_r[..frames],
             );
@@ -487,19 +497,6 @@ fn copy_pair(
     }
 }
 
-fn accumulate_master(
-    engine: &mut Engine,
-    input: &BufferList<'_>,
-    left: i32,
-    right: i32,
-    frames: usize,
-) {
-    for i in 0..frames {
-        engine.master_l[i] = input.locate_sample(left, i);
-        engine.master_r[i] = input.locate_sample(right, i);
-    }
-}
-
 fn write_output_pair(output: &BufferList<'_>, left: i32, frames: usize, l: &[f32], r: &[f32]) {
     for i in 0..frames {
         output.write_sample(left, i, l[i]);
@@ -543,20 +540,47 @@ fn hold_plugin_taps(
         if schedule.taps[tap_i].plugin_slot != slot {
             continue;
         }
-        let peak = peak_of(&engine.scratch_out_l[..frames], &engine.scratch_out_r[..frames]);
+        let mix = mix_gain(schedule, tap_i);
+        let muted = record_muted(schedule, tap_i) || mix.muted;
+        let (gain_l, gain_r) = if muted {
+            (0.0, 0.0)
+        } else {
+            stereo_pan_amps(mix.gain, mix.pan)
+        };
+        let peak = peak_of(&engine.scratch_out_l[..frames], &engine.scratch_out_r[..frames])
+            * gain_l.max(gain_r);
         hold_peak(&engine.peaks[tap_i], peak);
         if recording && engine.ring_enabled[tap_i] {
-            write_ring_slices(
-                &mut engine.rings_l,
-                &mut engine.rings_r,
-                &mut engine.ring_write,
-                engine.ring_cap,
-                tap_i,
-                &engine.scratch_out_l[..frames],
-                &engine.scratch_out_r[..frames],
-            );
+            if gain_l > 0.0 || gain_r > 0.0 {
+                for i in 0..frames {
+                    let l = engine.scratch_out_l[i] * gain_l;
+                    let r = engine.scratch_out_r[i] * gain_r;
+                    let w = engine.ring_write[tap_i];
+                    engine.rings_l[tap_i][w] = l;
+                    engine.rings_r[tap_i][w] = r;
+                    engine.ring_write[tap_i] = (w + 1) % engine.ring_cap;
+                    engine.master_l[i] += l;
+                    engine.master_r[i] += r;
+                }
+            } else {
+                write_silence_ring(engine, tap_i, frames);
+            }
         }
     }
+}
+
+fn record_muted(schedule: &Schedule, tap: usize) -> bool {
+    schedule.record_muted.get(tap).copied().unwrap_or(false)
+}
+
+fn mix_gain(schedule: &Schedule, tap: usize) -> MixGain {
+    schedule.mix_gains.get(tap).copied().unwrap_or_default()
+}
+
+/// Same law as Mix-page playback: center keeps both sides at `amp`.
+fn stereo_pan_amps(amp: f32, pan: f32) -> (f32, f32) {
+    let pan = pan.clamp(0.0, 1.0);
+    (amp * (2.0 * (1.0 - pan)).min(1.0), amp * (2.0 * pan).min(1.0))
 }
 
 fn write_silence_ring(engine: &mut Engine, tap: usize, frames: usize) {
@@ -585,19 +609,27 @@ fn write_ring_slices(
     }
 }
 
-fn write_ring_from_ptrs(
+fn write_stem_and_sum_master(
     engine: &mut Engine,
     tap: usize,
     input: &BufferList<'_>,
     channel_l: i32,
     channel_r: i32,
     frames: usize,
+    gain_l: f32,
+    gain_r: f32,
 ) {
+    // Mono taps use the same input on both sides; pan has already been
+    // folded into gain_l / gain_r so the stem is a stereo image.
     for i in 0..frames {
+        let l = input.locate_sample(channel_l, i) * gain_l;
+        let r = input.locate_sample(channel_r, i) * gain_r;
         let w = engine.ring_write[tap];
-        engine.rings_l[tap][w] = input.locate_sample(channel_l, i);
-        engine.rings_r[tap][w] = input.locate_sample(channel_r, i);
+        engine.rings_l[tap][w] = l;
+        engine.rings_r[tap][w] = r;
         engine.ring_write[tap] = (w + 1) % engine.ring_cap;
+        engine.master_l[i] += l;
+        engine.master_r[i] += r;
     }
 }
 
@@ -669,6 +701,7 @@ fn mix_playback(engine: &mut Engine, schedule: &Schedule, output: &BufferList<'_
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::taps::AudioTapBinding;
     use std::sync::atomic::Ordering;
 
     fn interleaved(frames: usize, l: f32, r: f32) -> (Vec<f32>, BufferList<'static>) {
@@ -806,6 +839,190 @@ mod tests {
         assert!((out[1] + 0.1).abs() < 1e-6);
         assert!(handles.lane_peaks[0].load(Ordering::Relaxed) > 0.7);
         assert!(handles.listen_peak.load(Ordering::Relaxed) > 0.15);
+    }
+
+    #[test]
+    fn record_pans_mono_into_stereo_stem() {
+        let (mut engine, mut handles) = Engine::new(48_000);
+        engine.enable_ring(0, true);
+        engine.enable_ring(engine_api::MASTER_TAP, true);
+        let mut schedule = Schedule::empty();
+        schedule.taps[0] = AudioTapBinding::hardware(0, 0);
+        schedule.taps[engine_api::MASTER_TAP] = AudioTapBinding::master_mix();
+        schedule.mix_gains[0].gain = 1.0;
+        schedule.mix_gains[0].pan = 0.0;
+        handles.schedule.store(std::sync::Arc::new(schedule));
+        let _ = handles.cmd_tx.try_push(UiCommand::SetRecording { on: true });
+        let (_keep, input) = interleaved(8, 0.8, -0.4);
+        let mut out = vec![0.0f32; 16];
+        let out_buf = AudioBuf { data: out.as_mut_ptr(), channels: 2, frames: 8 };
+        let output = BufferList { buffers: &[out_buf] };
+        engine.process(input, output, 8, 0);
+        let mut left = [0.0f32; 8];
+        let mut right = [0.0f32; 8];
+        let mut mix_l = [0.0f32; 8];
+        let mut mix_r = [0.0f32; 8];
+        assert_eq!(engine.copy_record_frames(0, &mut left, &mut right), 8);
+        assert_eq!(
+            engine.copy_record_frames(engine_api::MASTER_TAP, &mut mix_l, &mut mix_r),
+            8
+        );
+        assert!((left[0] - 0.8).abs() < 1e-6);
+        assert_eq!(right[0], 0.0);
+        assert!((mix_l[0] - 0.8).abs() < 1e-6);
+        assert_eq!(mix_r[0], 0.0);
+    }
+
+    #[test]
+    fn record_follows_live_pan_across_blocks() {
+        let (mut engine, mut handles) = Engine::new(48_000);
+        engine.enable_ring(0, true);
+        let mut schedule = Schedule::empty();
+        schedule.taps[0] = AudioTapBinding::hardware(0, 0);
+        schedule.mix_gains[0].gain = 1.0;
+        schedule.mix_gains[0].pan = 0.0;
+        handles.schedule.store(std::sync::Arc::new(schedule.clone()));
+        let _ = handles.cmd_tx.try_push(UiCommand::SetRecording { on: true });
+        let (_keep, input) = interleaved(8, 0.8, -0.4);
+        let mut out = vec![0.0f32; 16];
+        let out_buf = AudioBuf { data: out.as_mut_ptr(), channels: 2, frames: 8 };
+        let output = BufferList { buffers: &[out_buf] };
+        engine.process(input, output, 8, 0);
+        schedule.mix_gains[0].pan = 1.0;
+        handles.schedule.store(std::sync::Arc::new(schedule));
+        engine.process(input, output, 8, 0);
+        let mut left = [0.0f32; 16];
+        let mut right = [0.0f32; 16];
+        assert_eq!(engine.copy_record_frames(0, &mut left, &mut right), 16);
+        assert!((left[0] - 0.8).abs() < 1e-6);
+        assert_eq!(right[0], 0.0);
+        assert_eq!(left[8], 0.0);
+        assert!((right[8] - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn record_mono_strip_is_dual_mono_at_center() {
+        let (mut engine, mut handles) = Engine::new(48_000);
+        engine.enable_ring(0, true);
+        let mut schedule = Schedule::empty();
+        schedule.taps[0] = AudioTapBinding::hardware(0, 0);
+        schedule.mix_gains[0].gain = 1.0;
+        schedule.mix_gains[0].pan = 0.5;
+        handles.schedule.store(std::sync::Arc::new(schedule));
+        let _ = handles.cmd_tx.try_push(UiCommand::SetRecording { on: true });
+        let (_keep, input) = interleaved(8, 0.8, -0.4);
+        let mut out = vec![0.0f32; 16];
+        let out_buf = AudioBuf { data: out.as_mut_ptr(), channels: 2, frames: 8 };
+        let output = BufferList { buffers: &[out_buf] };
+        engine.process(input, output, 8, 0);
+        let mut left = [0.0f32; 8];
+        let mut right = [0.0f32; 8];
+        assert_eq!(engine.copy_record_frames(0, &mut left, &mut right), 8);
+        assert!((left[0] - 0.8).abs() < 1e-6);
+        assert!((right[0] - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn record_writes_interface_audio_without_software_gain() {
+        let (mut engine, mut handles) = Engine::new(48_000);
+        engine.enable_ring(0, true);
+        let mut schedule = Schedule::empty();
+        schedule.taps[0] = AudioTapBinding::hardware(0, 1);
+        handles.schedule.store(std::sync::Arc::new(schedule));
+        let _ = handles.cmd_tx.try_push(UiCommand::SetRecording { on: true });
+        let (_keep, input) = interleaved(8, 0.8, -0.4);
+        let mut out = vec![0.0f32; 16];
+        let out_buf = AudioBuf { data: out.as_mut_ptr(), channels: 2, frames: 8 };
+        let output = BufferList { buffers: &[out_buf] };
+        engine.process(input, output, 8, 0);
+        let mut left = [0.0f32; 8];
+        let mut right = [0.0f32; 8];
+        assert_eq!(engine.copy_record_frames(0, &mut left, &mut right), 8);
+        assert!((left[0] - 0.8).abs() < 1e-6);
+        assert!((right[0] + 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn mix_wav_levels_match_sum_of_stem_levels() {
+        let (mut engine, mut handles) = Engine::new(48_000);
+        engine.enable_ring(0, true);
+        engine.enable_ring(1, true);
+        engine.enable_ring(engine_api::MASTER_TAP, true);
+        let mut schedule = Schedule::empty();
+        schedule.taps[0] = AudioTapBinding::hardware(0, 1);
+        schedule.taps[1] = AudioTapBinding::hardware(0, 1);
+        schedule.taps[engine_api::MASTER_TAP] = AudioTapBinding::master_mix();
+        schedule.mix_gains[0].gain = 0.5;
+        schedule.mix_gains[1].gain = 0.25;
+        handles.schedule.store(std::sync::Arc::new(schedule));
+        let _ = handles.cmd_tx.try_push(UiCommand::SetRecording { on: true });
+        let (_keep, input) = interleaved(8, 0.8, -0.4);
+        let mut out = vec![0.0f32; 16];
+        let out_buf = AudioBuf { data: out.as_mut_ptr(), channels: 2, frames: 8 };
+        let output = BufferList { buffers: &[out_buf] };
+        engine.process(input, output, 8, 0);
+        let mut a_l = [0.0f32; 8];
+        let mut a_r = [0.0f32; 8];
+        let mut b_l = [0.0f32; 8];
+        let mut b_r = [0.0f32; 8];
+        let mut mix_l = [0.0f32; 8];
+        let mut mix_r = [0.0f32; 8];
+        assert_eq!(engine.copy_record_frames(0, &mut a_l, &mut a_r), 8);
+        assert_eq!(engine.copy_record_frames(1, &mut b_l, &mut b_r), 8);
+        assert_eq!(engine.copy_record_frames(engine_api::MASTER_TAP, &mut mix_l, &mut mix_r), 8);
+        assert!((a_l[0] - 0.4).abs() < 1e-6);
+        assert!((b_l[0] - 0.2).abs() < 1e-6);
+        assert!((mix_l[0] - (a_l[0] + b_l[0])).abs() < 1e-6);
+        assert!((mix_r[0] - (a_r[0] + b_r[0])).abs() < 1e-6);
+    }
+
+    #[test]
+    fn record_silence_when_totalmix_main_is_down() {
+        let (mut engine, mut handles) = Engine::new(48_000);
+        engine.enable_ring(0, true);
+        let mut schedule = Schedule::empty();
+        schedule.taps[0] = AudioTapBinding::hardware(0, 1);
+        schedule.mix_gains[0].gain = 0.0;
+        handles.schedule.store(std::sync::Arc::new(schedule));
+        let _ = handles.cmd_tx.try_push(UiCommand::SetRecording { on: true });
+        let (_keep, input) = interleaved(8, 0.8, -0.4);
+        let mut out = vec![0.0f32; 16];
+        let out_buf = AudioBuf { data: out.as_mut_ptr(), channels: 2, frames: 8 };
+        let output = BufferList { buffers: &[out_buf] };
+        engine.process(input, output, 8, 0);
+        let mut left = [0.0f32; 8];
+        let mut right = [0.0f32; 8];
+        assert_eq!(engine.copy_record_frames(0, &mut left, &mut right), 8);
+        assert_eq!(left[0], 0.0);
+        assert_eq!(right[0], 0.0);
+    }
+
+    #[test]
+    fn record_prints_mute_and_solo() {
+        let (mut engine, mut handles) = Engine::new(48_000);
+        engine.enable_ring(0, true);
+        engine.enable_ring(1, true);
+        let mut schedule = Schedule::empty();
+        schedule.taps[0] = AudioTapBinding::hardware(0, 1);
+        schedule.taps[1] = AudioTapBinding::hardware(0, 1);
+        schedule.record_muted[0] = true;
+        handles.schedule.store(std::sync::Arc::new(schedule));
+        let _ = handles.cmd_tx.try_push(UiCommand::SetRecording { on: true });
+        let (_keep, input) = interleaved(8, 0.8, -0.4);
+        let mut out = vec![0.0f32; 16];
+        let out_buf = AudioBuf { data: out.as_mut_ptr(), channels: 2, frames: 8 };
+        let output = BufferList { buffers: &[out_buf] };
+        engine.process(input, output, 8, 0);
+        let mut left0 = [0.0f32; 8];
+        let mut right0 = [0.0f32; 8];
+        let mut left1 = [0.0f32; 8];
+        let mut right1 = [0.0f32; 8];
+        assert_eq!(engine.copy_record_frames(0, &mut left0, &mut right0), 8);
+        assert_eq!(engine.copy_record_frames(1, &mut left1, &mut right1), 8);
+        assert_eq!(left0[0], 0.0);
+        assert_eq!(right0[0], 0.0);
+        assert!((left1[0] - 0.8).abs() < 1e-6);
+        assert!((right1[0] + 0.4).abs() < 1e-6);
     }
 
     #[test]

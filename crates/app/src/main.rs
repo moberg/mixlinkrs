@@ -9,7 +9,7 @@ use analog::{
     apply_xl, AnalogEngine, ChannelID, EffectRef, MixAssign, MixerBus, MixerState, ReturnLane,
     SessionConfig, SurfaceState, XlEffect, XlRuntime,
 };
-use engine::{AudioTapBinding, Engine, EngineHandles, LanePlayer, Schedule, StripFeed};
+use engine::{AudioTapBinding, Engine, EngineHandles, LanePlayer, MixGain, Schedule, StripFeed};
 use engine_api::{UiCommand, MASTER_TAP, MIX_PLAY_MAX_LANES, TAP_COUNT};
 use midi_xl::{
     describe, schedule_refresh, LedFrame, MidiSession, SessionEvent, TrackControlMode as XlMode,
@@ -754,6 +754,7 @@ fn toggle_record(state: &mut AppState) {
         .map(|s| s.sample_rate())
         .unwrap_or_else(|| unsafe { (*state.engine).sample_rate() });
     state.take_number = state.project.next_take(&folder);
+    publish_schedule(state);
     let Some(rec) =
         record::Recorder::start(state.engine, &state.analog, folder, state.take_number, sr)
     else {
@@ -1589,8 +1590,7 @@ fn export_mix(state: &mut AppState) {
             continue;
         }
         let amp = osc::fader_lin_to_amp(track.fader);
-        let gl = amp * (2.0 * (1.0 - track.pan)).min(1.0);
-        let gr = amp * (2.0 * track.pan).min(1.0);
+        let (gl, gr) = osc::stereo_pan_amps(amp, track.pan);
         for clip in &track.clips {
             let path = folder.join(&clip.source_file);
             let (cl, cr) =
@@ -2711,8 +2711,12 @@ fn select_take(state: &mut AppState, number: i32) {
         halt_mix_play(state);
     }
     state.viewing_take = Some(number);
-    state.take_view =
-        state.take_infos.iter().find(|t| t.number == number).map(TakeInfo::arrangement_tracks);
+    state.take_view = state.take_infos.iter().find(|t| t.number == number).map(|info| {
+        info.arrangement_tracks()
+            .into_iter()
+            .filter(|track| record::lane_on_record_list(&state.analog, track.lane))
+            .collect()
+    });
     sync_origin(state);
     persist_project_meta(state);
 }
@@ -2871,6 +2875,7 @@ fn reload_mix(state: &mut AppState) {
 fn publish_schedule(state: &AppState) {
     let mut schedule = Schedule::empty();
     for (i, strip) in state.analog.config.strips.iter().enumerate().take(8) {
+        // Mono strips tap one input twice; record DSP pans that into a stereo file.
         schedule.taps[i] = AudioTapBinding::hardware(
             strip.index,
             if strip.linked_stereo { strip.index + 1 } else { strip.index },
@@ -2886,6 +2891,7 @@ fn publish_schedule(state: &AppState) {
         }
     }
     schedule.taps[MASTER_TAP] = AudioTapBinding::master_mix();
+    publish_record_main_mix(state, &mut schedule);
 
     for slot in 0..8 {
         let id = slot as i32;
@@ -2929,17 +2935,62 @@ fn publish_schedule(state: &AppState) {
         let dest = if track.lane == MixLane::Main { main_dest } else { -1 };
         let amp = osc::fader_lin_to_amp(track.fader);
         let pan = if track.lane == MixLane::Main { 0.5 } else { track.pan };
+        let (gain_l, gain_r) = osc::stereo_pan_amps(amp, pan);
         schedule.lanes[i] = LanePlayer {
             active: state.playing,
             is_main: track.lane == MixLane::Main,
             dest,
             muted: track.mute,
             soloed: track.solo,
-            gain_l: amp * (2.0 * (1.0 - pan)).min(1.0),
-            gain_r: amp * (2.0 * pan).min(1.0),
+            gain_l,
+            gain_r,
             insert: usize::MAX,
         };
     }
     schedule.listen_amp = osc::fader_lin_to_amp(state.control_room_fader);
     state.engine_handles.schedule.store(Arc::new(schedule));
+}
+
+/// Print analog fader/mute and the live pan knob onto each stem.
+/// Mix-page faders stay playback-only.
+fn publish_record_main_mix(state: &AppState, schedule: &mut Schedule) {
+    let any_solo = state.analog.any_solo_active();
+    for i in 0..8 {
+        let muted = analog_performance_muted(
+            state.analog.strip_muted(i),
+            state.analog.strip_soloed(i),
+            any_solo,
+        );
+        let enabled = state.analog.config.is_strip_enabled(i);
+        schedule.record_muted[i] = muted;
+        schedule.mix_gains[i] = MixGain {
+            gain: osc::fader_lin_to_amp(state.analog.strip_main_mix_lin(i)),
+            pan: state.analog.strip_record_pan(i),
+            muted,
+            into_master: enabled && !muted,
+        };
+    }
+    for lane in ReturnLane::ALL {
+        let tap = 8 + lane as usize;
+        if tap >= MASTER_TAP {
+            continue;
+        }
+        let muted = analog_performance_muted(
+            state.analog.return_muted(lane),
+            state.analog.return_soloed(lane),
+            any_solo,
+        );
+        let enabled = state.analog.config.is_return_enabled(lane);
+        schedule.record_muted[tap] = muted;
+        schedule.mix_gains[tap] = MixGain {
+            gain: osc::fader_lin_to_amp(state.analog.return_main_mix_lin(lane)),
+            pan: state.analog.return_record_pan(lane),
+            muted,
+            into_master: enabled && !muted,
+        };
+    }
+}
+
+fn analog_performance_muted(muted: bool, soloed: bool, any_solo: bool) -> bool {
+    muted || (any_solo && !soloed)
 }

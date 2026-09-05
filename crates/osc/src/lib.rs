@@ -13,6 +13,6 @@ pub use addresses::{
 pub use codec::{decode, encode, encode_bundle, OscMessage, OscValue};
 pub use scale::{
     balpan_to_pan_unit, fader_db, fader_lin_from_db, fader_lin_to_amp, pan_unit_to_balpan,
-    post_fader_lin, send_lin_from_post, DB_FLOOR, DB_OFF, FADER_LIN_0DB, LIN_EPS,
+    post_fader_lin, send_lin_from_post, stereo_pan_amps, DB_FLOOR, DB_OFF, FADER_LIN_0DB, LIN_EPS,
 };
 pub use session::{OscError, OscSession};

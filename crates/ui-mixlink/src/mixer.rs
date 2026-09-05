@@ -354,11 +354,7 @@ fn paint_strip(
         cmds,
         Rect { x, y, w, h: Layout::NAME_ROW },
         &name,
-        widgets::StripNameStyle {
-            diamond: !matches!(kind, StripKind::Main),
-            dim,
-            color: None,
-        },
+        widgets::StripNameStyle { diamond: !matches!(kind, StripKind::Main), dim, color: None },
     );
     y += Layout::NAME_ROW;
 

@@ -47,45 +47,6 @@ impl MixLane {
         }
     }
 
-    /// Arrangement / mixer label matching take filenames: `ch 01 Rytm`,
-    /// `ret A BigSky`, `bus 01 No effect`.
-    pub fn labeled_name(self, name: &str) -> String {
-        let name = name.trim();
-        let skip_name = name.is_empty() || name == self.title();
-        match self {
-            Self::Strip(i) => {
-                if skip_name {
-                    format!("ch {:02}", i + 1)
-                } else {
-                    format!("ch {:02} {name}", i + 1)
-                }
-            }
-            Self::ReturnLane(lane) if lane.is_send() => {
-                let letter = lane.strip_title();
-                if skip_name {
-                    format!("ret {letter}")
-                } else {
-                    format!("ret {letter} {name}")
-                }
-            }
-            Self::ReturnLane(lane) => {
-                let n = if lane == ReturnLane::Bus1 { 1 } else { 2 };
-                if skip_name {
-                    format!("bus {n:02}")
-                } else {
-                    format!("bus {n:02} {name}")
-                }
-            }
-            Self::Main => {
-                if name.is_empty() {
-                    "mix".into()
-                } else {
-                    name.into()
-                }
-            }
-        }
-    }
-
     pub fn default_lanes(send_count: i32) -> Vec<Self> {
         let mut lanes: Vec<Self> = (0..8).map(Self::Strip).collect();
         let n = send_count.clamp(2, MAX_SEND_COUNT) as usize;
@@ -796,6 +757,41 @@ impl TakeInfo {
     }
 }
 
+/// Drop TotalMix `ADAT 1 2` / `ADAT 1/2 -` prefixes so the UI shows gear names.
+/// A trailing all-digit name like `303` is kept — only a stereo pair
+/// (`n` / `n+1`, ports 1–32) is treated as channel numbers.
+pub fn strip_adat_channel(name: &str) -> String {
+    let name = name.trim();
+    let Some(rest) = name.strip_prefix("ADAT").or_else(|| name.strip_prefix("Adat")) else {
+        return name.to_string();
+    };
+    let rest = rest.trim_start();
+    let Some((n1, rest)) = take_leading_int(rest) else {
+        return rest.trim().to_string();
+    };
+    let rest = rest.trim_start();
+    let rest = if let Some(after_slash) = rest.strip_prefix('/') {
+        match take_leading_int(after_slash.trim_start()) {
+            Some((_, r)) => r,
+            None => after_slash,
+        }
+    } else if let Some((n2, after)) = take_leading_int(rest) {
+        if n2 == n1 + 1 && (1..=32).contains(&n2) { after } else { rest }
+    } else {
+        rest
+    };
+    rest.trim_start_matches(|c: char| matches!(c, '-' | ' ' | '\t')).trim().to_string()
+}
+
+fn take_leading_int(s: &str) -> Option<(i32, &str)> {
+    let n = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    if n == 0 {
+        return None;
+    }
+    let value = s[..n].parse().ok()?;
+    Some((value, &s[n..]))
+}
+
 /// `/ : \ space` → `-`, collapse `--`, empty → `Track`.
 pub fn sanitize_take_name(name: &str) -> String {
     let trimmed = name.trim();
@@ -966,15 +962,14 @@ mod tests {
     }
 
     #[test]
-    fn labeled_name_includes_ch_ret_bus() {
-        assert_eq!(MixLane::Strip(0).labeled_name("Rytm"), "ch 01 Rytm");
-        assert_eq!(MixLane::ReturnLane(ReturnLane::SendA).labeled_name("BigSky"), "ret A BigSky");
-        assert_eq!(
-            MixLane::ReturnLane(ReturnLane::Bus1).labeled_name("No effect"),
-            "bus 01 No effect"
-        );
-        assert_eq!(MixLane::Strip(4).labeled_name("Ch 5"), "ch 05");
-        assert_eq!(MixLane::Main.labeled_name("Main"), "Main");
+    fn strip_adat_channel_keeps_gear_name() {
+        assert_eq!(strip_adat_channel("ADAT 1 2 Rytm"), "Rytm");
+        assert_eq!(strip_adat_channel("ADAT 3 Kick"), "Kick");
+        assert_eq!(strip_adat_channel("ADAT 13 14 P"), "P");
+        assert_eq!(strip_adat_channel("ADAT 1/2 - Rytm"), "Rytm");
+        assert_eq!(strip_adat_channel("ADAT 4 303"), "303");
+        assert_eq!(strip_adat_channel("BigSky"), "BigSky");
+        assert_eq!(strip_adat_channel("ADAT 7 8"), "");
     }
 
     #[test]

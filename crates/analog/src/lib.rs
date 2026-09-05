@@ -104,6 +104,23 @@ mod tests {
     }
 
     #[test]
+    fn strip_mute_and_solo_gate_record_mix() {
+        let mut engine = test_engine();
+        assert!(!engine.strip_muted(0));
+        assert!(!engine.strip_soloed(0));
+        assert!(!engine.any_solo_active());
+        engine.apply_mute(0, true);
+        assert!(engine.strip_muted(0));
+        engine.apply_mute(0, false);
+        engine.apply_solo(1, true);
+        assert!(engine.any_solo_active());
+        assert!(engine.strip_soloed(1));
+        assert!(!engine.strip_soloed(0));
+        engine.config.strips[2].enabled = false;
+        assert!(engine.strip_muted(2));
+    }
+
+    #[test]
     fn mute_clears_solo() {
         let mut engine = test_engine();
         let id = engine.config.strips[0].channel_id();
@@ -230,5 +247,53 @@ mod tests {
         assert!(json.contains("\"panKnobsControlSendC\":true"));
         let back: SessionConfig = serde_json::from_str(&json).unwrap();
         assert!(back.pan_knobs_control_send_c);
+    }
+
+    #[test]
+    fn totalmix_main_send_drives_ui_and_record_level() {
+        let mut engine = test_engine();
+        engine.config.main_output = 14;
+        engine.mixer.monitored_output = 14;
+        engine.config.strips[2].index = 12;
+        let src = ChannelID::new(MixerBus::Input, 12);
+        engine.mixer.set_send(src, 14, 0.0);
+        engine.sync_surface_from_total_mix();
+        assert_eq!(engine.strip_main_mix_lin(2), 0.0);
+        assert_eq!(engine.surface.strips[2].fader, 0.0);
+
+        engine.mixer.set_send(src, 14, FADER_LIN_0DB);
+        engine.mixer.set_send_pan(src, 14, 0.0);
+        engine.sync_surface_from_total_mix();
+        assert!((engine.strip_main_mix_lin(2) - FADER_LIN_0DB).abs() < 1e-5);
+        assert!((engine.surface.strips[2].fader - FADER_LIN_0DB).abs() < 1e-5);
+        assert!((engine.strip_main_mix_pan(2) - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn record_pan_follows_analog_knob_not_main_send() {
+        let mut engine = test_engine();
+        engine.config.main_output = 14;
+        engine.config.strips[2].index = 12;
+        let src = ChannelID::new(MixerBus::Input, 12);
+        engine.mixer.set_send_pan(src, 14, 1.0);
+        engine.surface.strips[2].pan = 0.25;
+        assert!((engine.strip_record_pan(2) - 0.25).abs() < 1e-5);
+        assert!((engine.strip_main_mix_pan(2) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn inbound_mix_updates_ui_without_writing_back() {
+        let mut engine = test_engine();
+        let dest = engine.config.main_output;
+        let src = engine.config.strips[0].channel_id();
+        let addr = format!("/mix/in/{}/{}/faderlin", src.index, dest);
+        match apply_inbound(&mut engine.mixer, &addr, &osc::OscValue::Float(0.8)) {
+            Some(MixEvent::Mix(node)) => engine.apply_inbound_mix(&node),
+            other => panic!("expected mix event, got {other:?}"),
+        }
+        engine.sync_surface_from_total_mix();
+        assert!((engine.surface.strips[0].fader - 0.8).abs() < 1e-5);
+        assert!((engine.strip_main_mix_lin(0) - 0.8).abs() < 1e-5);
+        assert!(engine.osc.sent_messages().is_empty());
     }
 }

@@ -67,3 +67,35 @@ pub fn pan_unit_to_balpan(unit: f32) -> f32 {
 pub fn balpan_to_pan_unit(pan: f32) -> f32 {
     (pan + 1.0) / 2.0
 }
+
+/// Equal-power-adjacent linear pan: center keeps both sides at `amp`.
+pub fn stereo_pan_amps(amp: f32, pan: f32) -> (f32, f32) {
+    let pan = pan.clamp(0.0, 1.0);
+    (amp * (2.0 * (1.0 - pan)).min(1.0), amp * (2.0 * pan).min(1.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stereo_pan_center_keeps_amp() {
+        let (l, r) = stereo_pan_amps(0.8, 0.5);
+        assert!((l - 0.8).abs() < 1e-6);
+        assert!((r - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn stereo_pan_hard_left_zeros_right() {
+        let (l, r) = stereo_pan_amps(1.0, 0.0);
+        assert!((l - 1.0).abs() < 1e-6);
+        assert_eq!(r, 0.0);
+    }
+
+    #[test]
+    fn stereo_pan_hard_right_zeros_left() {
+        let (l, r) = stereo_pan_amps(1.0, 1.0);
+        assert_eq!(l, 0.0);
+        assert!((r - 1.0).abs() < 1e-6);
+    }
+}

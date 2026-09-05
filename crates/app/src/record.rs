@@ -168,15 +168,43 @@ fn write_loop(
     true
 }
 
-fn tap_enabled(analog: &AnalogEngine, tap: usize) -> bool {
+pub fn lane_on_record_list(analog: &AnalogEngine, lane: MixLane) -> bool {
+    tap_on_record_list(analog, lane_tap(lane))
+}
+
+fn lane_tap(lane: MixLane) -> usize {
+    match lane {
+        MixLane::Strip(i) => (i as usize).min(7),
+        MixLane::ReturnLane(lane) => 8 + lane as usize,
+        MixLane::Main => MASTER_TAP,
+    }
+}
+
+/// MixLink `AudioTap.recordTracks`: enabled strips, visible send returns,
+/// both buses, master. Hidden extra sends stay off the take. Silence does
+/// not skip a tap — TotalMix may fade the channel up mid-take.
+fn tap_on_record_list(analog: &AnalogEngine, tap: usize) -> bool {
     if tap == MASTER_TAP {
         return true;
     }
     if tap < 8 {
-        return analog.config.strips.get(tap).is_some_and(|s| s.enabled);
+        return analog.config.is_strip_enabled(tap);
     }
-    let lane = ReturnLane::ALL.get(tap - 8).copied();
-    lane.is_some_and(|l| analog.config.is_return_enabled(l))
+    let Some(lane) = ReturnLane::ALL.get(tap - 8).copied() else {
+        return false;
+    };
+    if !analog.config.is_return_enabled(lane) {
+        return false;
+    }
+    if lane.is_send() {
+        analog.config.visible_send_lanes().contains(&lane)
+    } else {
+        true
+    }
+}
+
+fn tap_enabled(analog: &AnalogEngine, tap: usize) -> bool {
+    tap_on_record_list(analog, tap)
 }
 
 fn tap_lane(tap: usize) -> MixLane {
@@ -237,7 +265,7 @@ pub fn planned_filenames(analog: &AnalogEngine, take: i32) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use analog::{MixerState, OscSession, SessionConfig, SurfaceState};
+    use analog::{MixerState, OscSession, ReturnLane, SessionConfig, SurfaceState};
 
     fn test_analog() -> AnalogEngine {
         AnalogEngine::new(
@@ -254,6 +282,40 @@ mod tests {
         let names = planned_filenames(&analog, 3);
         assert!(names.iter().any(|n| n.starts_with("3-ch-01-") && n.ends_with(".wav")));
         assert!(names.iter().any(|n| n == "3-mix.wav"));
+    }
+
+    #[test]
+    fn planned_names_skip_hidden_send_returns() {
+        let analog = test_analog();
+        let names = planned_filenames(&analog, 3);
+        assert!(names.iter().any(|n| n.contains("-ret-A-") || n.contains("-ret-B-")));
+        assert!(names.iter().any(|n| n.starts_with("3-bus-")));
+        assert!(names.iter().all(|n| {
+            !n.contains("-ret-C-")
+                && !n.contains("-ret-D-")
+                && !n.contains("-ret-E-")
+                && !n.contains("-ret-F-")
+        }));
+    }
+
+    #[test]
+    fn lane_on_record_list_matches_compact_taps() {
+        let analog = test_analog();
+        assert!(lane_on_record_list(&analog, MixLane::Strip(0)));
+        assert!(lane_on_record_list(&analog, MixLane::ReturnLane(ReturnLane::SendA)));
+        assert!(lane_on_record_list(&analog, MixLane::ReturnLane(ReturnLane::Bus2)));
+        assert!(!lane_on_record_list(&analog, MixLane::ReturnLane(ReturnLane::SendC)));
+        assert!(!lane_on_record_list(&analog, MixLane::ReturnLane(ReturnLane::SendF)));
+    }
+
+    #[test]
+    fn visible_send_is_armed_even_without_effect() {
+        let mut analog = test_analog();
+        analog.config.effect_return_count = 3;
+        analog.config.ensure_return_lane(ReturnLane::SendC);
+        let names = planned_filenames(&analog, 3);
+        assert!(names.iter().any(|n| n.contains("-ret-C-")));
+        assert!(names.iter().all(|n| !n.contains("-ret-D-")));
     }
 
     #[test]

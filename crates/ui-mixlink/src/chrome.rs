@@ -146,12 +146,12 @@ fn paint_header(cmds: &mut Vec<DrawCmd>, state: &ChromeState<'_>, w: f32) {
 }
 
 fn page_tab_rects(w: f32) -> (Rect, Rect) {
-    let x = w - Layout::SIDEBAR_WIDTH;
-    let mix_w = 80.0;
-    (
-        Rect { x: x + 8.0, y: 6.0, w: 110.0, h: 24.0 },
-        Rect { x: w - 8.0 - mix_w, y: 6.0, w: mix_w, h: 24.0 },
-    )
+    const TAB_W: f32 = 80.0;
+    const GAP: f32 = 6.0;
+    const PAD: f32 = 8.0;
+    let mix = Rect { x: w - PAD - TAB_W, y: 6.0, w: TAB_W, h: 24.0 };
+    let record = Rect { x: mix.x - GAP - TAB_W, y: 6.0, w: TAB_W, h: 24.0 };
+    (record, mix)
 }
 
 fn paint_footer(cmds: &mut Vec<DrawCmd>, state: &ChromeState<'_>, w: f32, h: f32) {
@@ -286,6 +286,15 @@ pub enum ChromeHit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_tabs_are_equal_and_adjacent() {
+        let (record, mix) = page_tab_rects(1400.0);
+        assert_eq!(record.w, mix.w);
+        assert_eq!(record.h, mix.h);
+        assert!((mix.x - (record.x + record.w)).abs() < 8.0);
+        assert!((mix.x + mix.w - (1400.0 - 8.0)).abs() < 0.01);
+    }
 
     #[test]
     fn page_tabs_hit_on_both_pages() {

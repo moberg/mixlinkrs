@@ -4,6 +4,21 @@ use engine_api::{MIX_PLAY_MAX_LANES, STRIP_COUNT, TAP_COUNT};
 
 use crate::taps::AudioTapBinding;
 
+/// Per-tap print of the TotalMix Main mix (send to `main_output`).
+#[derive(Clone, Copy, Debug)]
+pub struct MixGain {
+    pub gain: f32,
+    pub pan: f32,
+    pub muted: bool,
+    pub into_master: bool,
+}
+
+impl Default for MixGain {
+    fn default() -> Self {
+        Self { gain: 1.0, pan: 0.5, muted: false, into_master: false }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct StripFeed {
     pub channel: i32,
@@ -60,6 +75,10 @@ impl Default for LanePlayer {
 pub struct Schedule {
     pub routes: [SendRoute; 8],
     pub taps: [AudioTapBinding; TAP_COUNT],
+    /// TotalMix mute/solo printed onto the take. Never Mix-page mixer state.
+    pub record_muted: [bool; TAP_COUNT],
+    /// Analog fader + live pan printed onto stereo stems and mix.wav.
+    pub mix_gains: [MixGain; TAP_COUNT],
     pub lanes: [LanePlayer; MIX_PLAY_MAX_LANES],
     pub any_solo: bool,
     /// Mix-page Control Room: listen gain after the Main bus. Export is pre-CR.
@@ -76,6 +95,8 @@ impl Schedule {
         Self {
             routes: Default::default(),
             taps,
+            record_muted: [false; TAP_COUNT],
+            mix_gains: [MixGain::default(); TAP_COUNT],
             lanes: [LanePlayer::default(); MIX_PLAY_MAX_LANES],
             any_solo: false,
             listen_amp: 1.0,
