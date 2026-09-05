@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use analog::{apply_xl, MixAssign, XlEffect};
-use midi_xl::{describe, schedule_refresh, LedFrame, SessionEvent, TrackControlMode as XlMode};
+use midi_xl::{describe, LedFrame, SessionEvent, TrackControlMode as XlMode};
 use project::MixLane;
 use ui_mixlink::chrome::Page;
 
@@ -11,15 +11,15 @@ use crate::state::AppState;
 
 impl AppState {
     pub(crate) fn poll_midi_and_leds(&mut self) {
-        let events = self.midi.drain();
+        let events = self.surface.midi.drain();
         let mut pad_off = false;
         for ev in events {
             pad_off |= matches!(ev, SessionEvent::PadOff);
             self.handle_midi(ev);
         }
-        let msg = self.midi.last_message();
+        let msg = self.surface.midi.last_message();
         if !msg.is_empty() {
-            self.last_midi = msg;
+            self.surface.last_midi = msg;
         }
         self.sync_xl_leds(pad_off);
     }
@@ -28,9 +28,7 @@ impl AppState {
 
     pub(crate) fn push_pad_leds(&mut self) {
         let frame = self.led_frame();
-        self.midi.send_leds(&frame);
-        self.last_led = Some(frame);
-        self.led_refresh_at = Some(Instant::now() + schedule_refresh());
+        self.surface.send_led_frame(frame);
     }
 
     /// MixLink `pushPadLEDs`: full write now, then one more after 80 ms so the XL’s
@@ -38,34 +36,33 @@ impl AppState {
 
     pub(crate) fn sync_xl_leds(&mut self, reassert: bool) {
         let frame = self.led_frame();
-        let refresh_due = self.led_refresh_at.is_some_and(|at| Instant::now() >= at);
-        if reassert || self.last_led != Some(frame) {
-            self.midi.send_leds(&frame);
-            self.last_led = Some(frame);
-            self.led_refresh_at = Some(Instant::now() + schedule_refresh());
+        let refresh_due = self.surface.led_refresh_at.is_some_and(|at| Instant::now() >= at);
+        if reassert || self.surface.last_led != Some(frame) {
+            self.surface.send_led_frame(frame);
             return;
         }
         if refresh_due {
-            self.led_refresh_at = None;
-            self.midi.send_leds(&frame);
-            self.last_led = Some(frame);
+            self.surface.led_refresh_at = None;
+            self.surface.send_led_frame(frame);
         }
     }
 
     pub(crate) fn led_frame(&self) -> LedFrame {
+        let analog = &self.surface.analog;
+        let cfg = &analog.config;
         let mut focus = [false; 8];
         let mut control = [midi_xl::LED_OFF; 8];
-        let mode = match self.analog.surface.track_control_mode {
+        let mode = match analog.surface.track_control_mode {
             analog::TrackControlMode::BusAssign => XlMode::BusAssign,
             analog::TrackControlMode::Mute => XlMode::Mute,
             analog::TrackControlMode::Solo => XlMode::Solo,
         };
-        if self.page == Page::Mix {
+        if self.chrome.page == Page::Mix {
             let tracks = self.mixer_tracks();
             for i in 0..8 {
                 let lane = MixLane::Strip(i as i32);
                 let track = tracks.iter().find(|t| t.lane == lane);
-                focus[i] = self.selected_lane == Some(lane);
+                focus[i] = self.timeline.selected_lane == Some(lane);
                 control[i] = midi_xl::control_led(
                     mode,
                     false,
@@ -75,11 +72,11 @@ impl AppState {
             }
         } else {
             for i in 0..8 {
-                let strip = &self.analog.surface.strips[i];
+                let strip = &analog.surface.strips[i];
                 focus[i] = strip.assign == MixAssign::Bus1;
-                let id = self.analog.config.strips[i].channel_id();
-                let muted = self.analog.mixer.channel(id).map(|c| c.mute).unwrap_or(false);
-                let soloed = self.analog.mixer.channel(id).map(|c| c.solo).unwrap_or(false);
+                let id = cfg.strips[i].channel_id();
+                let muted = analog.mixer.channel(id).map(|c| c.mute).unwrap_or(false);
+                let soloed = analog.mixer.channel(id).map(|c| c.solo).unwrap_or(false);
                 control[i] =
                     midi_xl::control_led(mode, strip.assign == MixAssign::Bus2, muted, soloed);
             }
@@ -88,13 +85,12 @@ impl AppState {
             focus_on_bus1: focus,
             control_vel: control,
             device: crate::display_sleep::is_asleep(),
-            mute: matches!(self.analog.surface.track_control_mode, analog::TrackControlMode::Mute),
-            solo: matches!(self.analog.surface.track_control_mode, analog::TrackControlMode::Solo),
-            arm: self.recording,
-            send_up: self.xl.send_select_up,
-            send_down: self.xl.send_select_down,
-            track_left: self.analog.config.pan_knobs_control_send_c
-                && self.analog.config.effect_return_count >= 3,
+            mute: matches!(analog.surface.track_control_mode, analog::TrackControlMode::Mute),
+            solo: matches!(analog.surface.track_control_mode, analog::TrackControlMode::Solo),
+            arm: self.audio.recording,
+            send_up: self.surface.xl.send_select_up,
+            send_down: self.surface.xl.send_select_down,
+            track_left: cfg.pan_knobs_control_send_c && cfg.effect_return_count >= 3,
         }
     }
 
@@ -109,7 +105,7 @@ impl AppState {
                 true
             }
             midi_xl::Control::Pan(i) => {
-                if self.analog.config.pan_knobs_control_send_c {
+                if self.surface.analog.config.pan_knobs_control_send_c {
                     return false;
                 }
                 if let Some(track) = self.mix_index_for_lane(MixLane::Strip(i as i32)) {
@@ -118,14 +114,14 @@ impl AppState {
                 true
             }
             midi_xl::Control::Focus(i) => {
-                self.selected_lane = Some(MixLane::Strip(i as i32));
+                self.timeline.selected_lane = Some(MixLane::Strip(i as i32));
                 true
             }
             midi_xl::Control::Control(i) => {
                 let Some(track) = self.mix_index_for_lane(MixLane::Strip(i as i32)) else {
                     return true;
                 };
-                match self.analog.surface.track_control_mode {
+                match self.surface.analog.surface.track_control_mode {
                     analog::TrackControlMode::Mute => {
                         if let Some(t) = self.mix_track_mut(track) {
                             t.mute = !t.mute;
@@ -149,9 +145,9 @@ impl AppState {
     pub(crate) fn handle_midi(&mut self, ev: SessionEvent) {
         match ev {
             SessionEvent::Control { control, value } => {
-                self.last_midi = describe(control);
-                let mode_before = self.analog.surface.track_control_mode;
-                if self.page == Page::Mix && self.handle_mix_xl(control, value) {
+                self.surface.last_midi = describe(control);
+                let mode_before = self.surface.analog.surface.track_control_mode;
+                if self.chrome.page == Page::Mix && self.handle_mix_xl(control, value) {
                     if matches!(control, midi_xl::Control::Focus(_) | midi_xl::Control::Control(_))
                     {
                         self.push_pad_leds();
@@ -159,12 +155,12 @@ impl AppState {
                     self.sync_rt();
                     return;
                 }
-                match apply_xl(&mut self.analog, &mut self.xl, control, value) {
+                match apply_xl(&mut self.surface.analog, &mut self.surface.xl, control, value) {
                     XlEffect::ToggleRecord => self.toggle_record(),
                     XlEffect::ToggleSleep => crate::display_sleep::toggle(),
                     XlEffect::NudgeMain { next } => {
-                        self.analog.osc.send_float(
-                            osc::output_fader_lin(self.analog.config.main_output),
+                        self.surface.analog.osc.send_float(
+                            osc::output_fader_lin(self.surface.analog.config.main_output),
                             next,
                         );
                     }
@@ -183,13 +179,13 @@ impl AppState {
                         | midi_xl::Control::SendSelectUp
                         | midi_xl::Control::SendSelectDown
                         | midi_xl::Control::TrackSelectLeft
-                ) || self.analog.surface.track_control_mode != mode_before
+                ) || self.surface.analog.surface.track_control_mode != mode_before
                 {
                     self.push_pad_leds();
                 }
             }
             SessionEvent::Unmapped { status, data1, data2 } => {
-                self.last_midi = format!("{status:02X} {data1:02X} {data2:02X} (unmapped)");
+                self.surface.last_midi = format!("{status:02X} {data1:02X} {data2:02X} (unmapped)");
             }
             SessionEvent::PadOff => {}
             SessionEvent::TemplateChanged(_) => {}

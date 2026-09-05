@@ -6,31 +6,34 @@ use engine_api::{UiCommand, MIX_PLAY_MAX_LANES};
 use project::{MixAutomationTarget, MixClip, MixLane, MixTime, ProjectStore};
 use ui_mixlink::chrome::Page;
 
-use crate::state::AppState;
+use analog::AnalogEngine;
+
+use crate::state::{AppState, Audio, Session, Timeline};
 
 impl AppState {
     pub(crate) fn toggle_record(&mut self) {
-        if self.recording {
-            self.recording = false;
-            let _ = self.engine_handles.cmd_tx.try_push(UiCommand::SetRecording { on: false });
-            if let Some(rec) = self.recorder.take() {
-                let _ = rec.stop(self.engine);
+        if self.audio.recording {
+            self.audio.recording = false;
+            let _ =
+                self.audio.engine_handles.cmd_tx.try_push(UiCommand::SetRecording { on: false });
+            if let Some(rec) = self.audio.recorder.take() {
+                let _ = rec.stop(self.audio.engine);
             }
-            if let Some(folder) = ProjectStore::current_url(&self.analog.config) {
-                self.project.increment_take(&folder);
-                self.take_number = self.project.next_take(&folder);
+            if let Some(folder) = ProjectStore::current_url(&self.surface.analog.config) {
+                self.session.project.increment_take(&folder);
+                self.session.take_number = self.session.project.next_take(&folder);
                 self.reload_mix();
             }
             return;
         }
-        if ProjectStore::resolve_root(&self.analog.config).is_none() {
+        if ProjectStore::resolve_root(&self.surface.analog.config).is_none() {
             log::warn!("record: set a projects folder first");
             return;
         }
-        if ProjectStore::current_url(&self.analog.config).is_none() {
-            match self.project.create_project(&mut self.analog.config) {
+        if ProjectStore::current_url(&self.surface.analog.config).is_none() {
+            match self.session.project.create_project(&mut self.surface.analog.config) {
                 Ok(_) => {
-                    self.analog.persist();
+                    self.surface.analog.persist();
                     self.reload_mix();
                 }
                 Err(e) => {
@@ -39,62 +42,68 @@ impl AppState {
                 }
             }
         }
-        let Some(folder) = ProjectStore::current_url(&self.analog.config) else {
+        let Some(folder) = ProjectStore::current_url(&self.surface.analog.config) else {
             return;
         };
-        if self._stream.is_none() {
+        if self.audio._stream.is_none() {
             log::warn!("record: audio is not running");
             return;
         }
         let sr = self
+            .audio
             ._stream
             .as_ref()
             .map(|s| s.sample_rate())
-            .unwrap_or_else(|| unsafe { (*self.engine).sample_rate() });
-        self.take_number = self.project.next_take(&folder);
+            .unwrap_or_else(|| unsafe { (*self.audio.engine).sample_rate() });
+        self.session.take_number = self.session.project.next_take(&folder);
         self.publish_schedule();
-        let Some(rec) =
-            crate::record::Recorder::start(self.engine, &self.analog, folder, self.take_number, sr)
-        else {
+        let Some(rec) = crate::record::Recorder::start(
+            self.audio.engine,
+            &self.surface.analog,
+            folder,
+            self.session.take_number,
+            sr,
+        ) else {
             log::warn!("record: could not start take");
             return;
         };
-        let _ = self.engine_handles.cmd_tx.try_push(UiCommand::ArmRings);
-        self.recorder = Some(rec);
-        self.recording = true;
-        let _ = self.engine_handles.cmd_tx.try_push(UiCommand::SetRecording { on: true });
+        let _ = self.audio.engine_handles.cmd_tx.try_push(UiCommand::ArmRings);
+        self.audio.recorder = Some(rec);
+        self.audio.recording = true;
+        let _ = self.audio.engine_handles.cmd_tx.try_push(UiCommand::SetRecording { on: true });
     }
 
     pub(crate) fn halt_mix_play(&mut self) {
-        if let Some(player) = self.mix_player.take() {
+        if let Some(player) = self.audio.mix_player.take() {
             player.stop();
         }
-        self.playing = false;
-        let _ = self.engine_handles.cmd_tx.try_push(UiCommand::TransportStop);
-        for peak in self.engine_handles.lane_peaks.iter() {
+        self.audio.playing = false;
+        let _ = self.audio.engine_handles.cmd_tx.try_push(UiCommand::TransportStop);
+        for peak in self.audio.engine_handles.lane_peaks.iter() {
             peak.store(0.0, Ordering::Relaxed);
         }
-        self.engine_handles.listen_peak.store(0.0, Ordering::Relaxed);
+        self.audio.engine_handles.listen_peak.store(0.0, Ordering::Relaxed);
     }
 
     pub(crate) fn finish_mix_play_if_done(&mut self) {
-        if self.playing && self.mix_player.as_ref().is_some_and(|p| !p.is_running()) {
+        if self.audio.playing && self.audio.mix_player.as_ref().is_some_and(|p| !p.is_running()) {
             self.halt_mix_play();
             self.publish_schedule();
         }
     }
 
     pub(crate) fn toggle_play(&mut self) {
-        if self.playing {
+        if self.audio.playing {
             self.halt_mix_play();
             let _ = self
+                .audio
                 .engine_handles
                 .cmd_tx
-                .try_push(UiCommand::TransportSeek { sample: self.locate_frame });
+                .try_push(UiCommand::TransportSeek { sample: self.timeline.locate_frame });
             self.publish_schedule();
             return;
         }
-        if self._stream.is_none() {
+        if self.audio._stream.is_none() {
             log::warn!("play: audio is not running");
             return;
         }
@@ -107,30 +116,35 @@ impl AppState {
             log::warn!("play: nothing to play");
             return;
         }
-        let playhead = self.engine_handles.sample_position.load(Ordering::Relaxed);
+        let playhead = self.audio.engine_handles.sample_position.load(Ordering::Relaxed);
         if playhead >= end {
-            self.locate_frame = self.arrangement_origin.max(0);
+            self.timeline.locate_frame = self.timeline.arrangement_origin.max(0);
         }
         let _ = self
+            .audio
             .engine_handles
             .cmd_tx
-            .try_push(UiCommand::TransportSeek { sample: self.locate_frame });
-        self.engine_handles.sample_position.store(self.locate_frame, Ordering::Relaxed);
-        let io_block = self._stream.as_ref().map(|s| s.buffer_frames() as usize).unwrap_or(128);
-        self.playing = true;
+            .try_push(UiCommand::TransportSeek { sample: self.timeline.locate_frame });
+        self.audio
+            .engine_handles
+            .sample_position
+            .store(self.timeline.locate_frame, Ordering::Relaxed);
+        let io_block =
+            self.audio._stream.as_ref().map(|s| s.buffer_frames() as usize).unwrap_or(128);
+        self.audio.playing = true;
         self.publish_schedule();
-        self.mix_player = Some(crate::mix_play::MixPlayer::start(
-            self.engine,
-            self.engine_handles.controls.clone(),
+        self.audio.mix_player = Some(crate::mix_play::MixPlayer::start(
+            self.audio.engine,
+            self.audio.engine_handles.controls.clone(),
             graph,
-            self.locate_frame,
+            self.timeline.locate_frame,
             io_block,
         ));
     }
 
     pub(crate) fn audition_from_origin(&mut self) {
-        self.locate_to(self.arrangement_origin.max(0));
-        if !self.playing {
+        self.locate_to(self.timeline.arrangement_origin.max(0));
+        if !self.audio.playing {
             self.toggle_play();
         }
     }
@@ -138,27 +152,21 @@ impl AppState {
     /// MixLinkRs: Tab swaps `Page::Record` ↔ `Page::Mix` (header RECORD/MIX). MixLink has no Tab binding.
 
     pub(crate) fn cycle_page(&mut self, _reverse: bool) {
-        if self.page == Page::Mix {
+        if self.chrome.page == Page::Mix {
             self.persist_mix();
         }
-        self.page = match self.page {
+        self.chrome.page = match self.chrome.page {
             Page::Record => Page::Mix,
             Page::Mix => Page::Record,
         };
     }
 
     pub(crate) fn is_editing_mix(&self) -> bool {
-        self.viewing_take.is_none() && self.mix.is_some()
-    }
-
-    pub(crate) fn sample_rate(&self) -> f64 {
-        self._stream.as_ref().map(|s| s.sample_rate() as f64).unwrap_or(48_000.0)
+        self.session.is_editing_mix()
     }
 
     pub(crate) fn nudge_locate(&mut self, dir: i32) {
-        let sr = self.sample_rate();
-        let step = MixTime::frame_from_bar(self.grid.raw(), self.tempo, sr).max(1);
-        self.locate_to((self.locate_frame + dir as i64 * step).max(0));
+        self.timeline.nudge_locate(&mut self.audio, dir);
     }
 
     pub(crate) fn select_lane(&mut self, delta: i32) {
@@ -166,44 +174,38 @@ impl AppState {
         if lanes.is_empty() {
             return;
         }
-        let cur =
-            self.selected_lane.and_then(|l| lanes.iter().position(|&x| x == l)).unwrap_or(0) as i32;
+        let cur = self
+            .timeline
+            .selected_lane
+            .and_then(|l| lanes.iter().position(|&x| x == l))
+            .unwrap_or(0) as i32;
         let next = (cur + delta).clamp(0, lanes.len() as i32 - 1) as usize;
-        self.selected_lane = Some(lanes[next]);
+        self.timeline.selected_lane = Some(lanes[next]);
     }
 
     pub(crate) fn snap_playhead_frame(&self, frame: i64) -> i64 {
         crate::arrange::snap_locate(
             frame,
-            self.grid_enabled,
-            self.modifiers.super_key(),
-            self.grid.raw(),
-            self.tempo,
-            self.sample_rate(),
-            self.arrangement_origin,
+            self.timeline.grid_enabled,
+            self.chrome.modifiers.super_key(),
+            self.timeline.grid.raw(),
+            self.timeline.tempo,
+            self.audio.sample_rate(),
+            self.timeline.arrangement_origin,
         )
     }
 
     pub(crate) fn locate_to(&mut self, frame: i64) {
-        self.locate_frame = frame.max(0);
-        // Paint reads this atomically; don't wait for the audio thread to apply the seek.
-        self.engine_handles.sample_position.store(self.locate_frame, Ordering::Relaxed);
-        let _ = self
-            .engine_handles
-            .cmd_tx
-            .try_push(UiCommand::TransportSeek { sample: self.locate_frame });
-        if let Some(player) = &self.mix_player {
-            player.request_seek(self.locate_frame);
-        }
+        self.timeline.locate_to(&mut self.audio, frame);
     }
 
     pub(crate) fn write_automation_if_armed(&mut self) {
-        if !self.playing || !self.automation_armed {
+        if !self.audio.playing || !self.timeline.automation_armed {
             return;
         }
-        let frame = self.engine_handles.sample_position.load(Ordering::Relaxed);
-        let lane = self.selected_lane;
-        if let Some(mut mix) = self.mix.take() {
+        let frame = self.audio.engine_handles.sample_position.load(Ordering::Relaxed);
+        let lane = self.timeline.selected_lane;
+        if let Some(mut mix) = self.session.mix.take() {
             if let Some(track) = lane.and_then(|l| mix.tracks.iter_mut().find(|t| t.lane == l)) {
                 track.write_automation(MixAutomationTarget::Volume, frame, track.fader);
                 track.write_automation(MixAutomationTarget::Pan, frame, track.pan);
@@ -211,14 +213,14 @@ impl AppState {
                     track.write_automation(MixAutomationTarget::Knob(i as i32), frame, v);
                 }
             }
-            self.mix = Some(mix);
+            self.session.mix = Some(mix);
         }
     }
 
     pub(crate) fn export_mix(&mut self) {
-        let Some(mix) = self.mix.clone() else { return };
-        let Some(folder) = ProjectStore::current_url(&self.analog.config) else { return };
-        let sr = self._stream.as_ref().map(|s| s.sample_rate()).unwrap_or(48_000);
+        let Some(mix) = self.session.mix.clone() else { return };
+        let Some(folder) = ProjectStore::current_url(&self.surface.analog.config) else { return };
+        let sr = self.audio._stream.as_ref().map(|s| s.sample_rate()).unwrap_or(48_000);
         let mut end = 0i64;
         for t in &mix.tracks {
             for c in &t.clips {
@@ -270,17 +272,31 @@ impl AppState {
     }
 
     pub(crate) fn publish_play_graph(&self) {
+        self.audio.publish_play_graph(&self.session, &self.surface.analog);
+    }
+
+    pub(crate) fn build_play_graph(&self) -> Option<crate::mix_play::MixPlayGraph> {
+        self.audio.build_play_graph(&self.session, &self.surface.analog)
+    }
+}
+
+impl Audio {
+    pub(crate) fn publish_play_graph(&self, session: &Session, analog: &AnalogEngine) {
         let Some(player) = &self.mix_player else {
             return;
         };
-        if let Some(graph) = self.build_play_graph() {
+        if let Some(graph) = self.build_play_graph(session, analog) {
             player.publish_graph(graph);
         }
     }
 
-    pub(crate) fn build_play_graph(&self) -> Option<crate::mix_play::MixPlayGraph> {
-        let folder = ProjectStore::current_url(&self.analog.config)?;
-        let tracks = self.mixer_tracks();
+    pub(crate) fn build_play_graph(
+        &self,
+        session: &Session,
+        analog: &AnalogEngine,
+    ) -> Option<crate::mix_play::MixPlayGraph> {
+        let folder = ProjectStore::current_url(&analog.config)?;
+        let tracks = session.mixer_tracks();
         let end = tracks
             .iter()
             .filter(|t| t.lane != MixLane::Main)
@@ -301,6 +317,26 @@ impl AppState {
             end_frame: end,
             sample_rate: self.sample_rate(),
         })
+    }
+}
+
+impl Timeline {
+    pub(crate) fn locate_to(&mut self, audio: &mut Audio, frame: i64) {
+        self.locate_frame = frame.max(0);
+        audio.engine_handles.sample_position.store(self.locate_frame, Ordering::Relaxed);
+        let _ = audio
+            .engine_handles
+            .cmd_tx
+            .try_push(UiCommand::TransportSeek { sample: self.locate_frame });
+        if let Some(player) = &audio.mix_player {
+            player.request_seek(self.locate_frame);
+        }
+    }
+
+    pub(crate) fn nudge_locate(&mut self, audio: &mut Audio, dir: i32) {
+        let sr = audio.sample_rate();
+        let step = MixTime::frame_from_bar(self.grid.raw(), self.tempo, sr).max(1);
+        self.locate_to(audio, (self.locate_frame + dir as i64 * step).max(0));
     }
 }
 

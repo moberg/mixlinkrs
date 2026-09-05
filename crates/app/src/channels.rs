@@ -8,9 +8,11 @@ use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
 use winit::window::Window;
 
-use crate::state::{AppState, ChannelsWindow};
+use analog::AnalogEngine;
 
-impl AppState {
+use crate::state::{AppState, ChannelsWindow, Chrome};
+
+impl Chrome {
     pub(crate) fn open_or_focus_channels(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(ch) = &self.channels {
             ch.window.set_minimized(false);
@@ -52,20 +54,14 @@ impl AppState {
         self.channels = None;
     }
 
-    pub(crate) fn paint_channels_window(&mut self) {
+    pub(crate) fn paint_channels_window(&mut self, analog: &AnalogEngine) {
         let (cmds, scroll) = {
             let Some(ch) = self.channels.as_ref() else { return };
             let (w, h) = ch.renderer.logical_size();
-            let max = overlay::channels_max_scroll(&self.analog, h);
+            let max = overlay::channels_max_scroll(analog, h);
             let scroll = ch.scroll.min(max);
-            let (cmds, _) = overlay::paint_channels(
-                &self.analog,
-                w,
-                h,
-                &self.text_focus,
-                self.caret_on,
-                scroll,
-            );
+            let (cmds, _) =
+                overlay::paint_channels(analog, w, h, &self.text_focus, self.caret_on, scroll);
             (cmds, scroll)
         };
         let Some(ch) = self.channels.as_mut() else { return };
@@ -75,14 +71,13 @@ impl AppState {
         }
     }
 
-    pub(crate) fn on_channels_press(&mut self) {
+    pub(crate) fn on_channels_press(&mut self, analog: &AnalogEngine) {
         let (x, y, w, h, scroll) = {
             let Some(ch) = self.channels.as_ref() else { return };
             let (w, h) = ch.renderer.logical_size();
             (ch.cursor.0, ch.cursor.1, w, h, ch.scroll)
         };
-        let (_, fields) =
-            overlay::paint_channels(&self.analog, w, h, &self.text_focus, false, scroll);
+        let (_, fields) = overlay::paint_channels(analog, w, h, &self.text_focus, false, scroll);
         if let Some((_, id)) = fields.into_iter().find(|(r, _)| overlay::contains(*r, x, y)) {
             self.text_focus = TextFocus::GearAlias(id);
         } else if matches!(self.text_focus, TextFocus::GearAlias(_)) {
@@ -90,25 +85,27 @@ impl AppState {
         }
     }
 
-    pub(crate) fn on_channels_wheel(&mut self, dy: f32) {
+    pub(crate) fn on_channels_wheel(&mut self, analog: &AnalogEngine, dy: f32) {
         let h = match self.channels.as_ref() {
             Some(ch) => ch.renderer.logical_size().1,
             None => return,
         };
-        let max = overlay::channels_max_scroll(&self.analog, h);
+        let max = overlay::channels_max_scroll(analog, h);
         if let Some(ch) = self.channels.as_mut() {
             ch.scroll = (ch.scroll - dy).clamp(0.0, max);
         }
     }
+}
 
+impl AppState {
     pub(crate) fn on_channels_key(&mut self, key: &Key) {
         if matches!(key, Key::Named(NamedKey::Escape)) {
-            if matches!(self.text_focus, TextFocus::GearAlias(_)) {
-                self.text_focus = TextFocus::None;
+            if matches!(self.chrome.text_focus, TextFocus::GearAlias(_)) {
+                self.chrome.text_focus = TextFocus::None;
             }
             return;
         }
-        if !matches!(self.text_focus, TextFocus::GearAlias(_)) {
+        if !matches!(self.chrome.text_focus, TextFocus::GearAlias(_)) {
             return;
         }
         match key {

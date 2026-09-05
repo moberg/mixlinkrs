@@ -6,9 +6,9 @@ use crate::state::AppState;
 
 impl AppState {
     pub(crate) fn load_plugin_slot(&mut self, id: i32) {
-        let Some(plugin) = self.analog.config.plugin(id).cloned() else { return };
-        let sr = self._stream.as_ref().map(|s| s.sample_rate() as f64).unwrap_or(48_000.0);
-        let block = self._stream.as_ref().map(|s| s.buffer_frames()).unwrap_or(128);
+        let Some(plugin) = self.surface.analog.config.plugin(id).cloned() else { return };
+        let sr = self.audio._stream.as_ref().map(|s| s.sample_rate() as f64).unwrap_or(48_000.0);
+        let block = self.audio._stream.as_ref().map(|s| s.buffer_frames()).unwrap_or(128);
         let inst = match plugin.bundle_path.as_deref() {
             Some(path) if !path.is_empty() => {
                 vst3_host::load(path, plugin.class_uid.as_deref(), sr, block)
@@ -18,42 +18,49 @@ impl AppState {
         vst3_host::exchange_and_retire(id as u32, inst);
         vst3_host::slot_set_bypass(id as u32, plugin.bypassed);
         if inst.is_null() {
-            self.plugin_refs.remove(&id);
+            self.audio.plugin_refs.remove(&id);
         } else {
-            vst3_host::set_tempo(inst, self.tempo);
-            self.plugin_refs.insert(id, inst);
+            vst3_host::set_tempo(inst, self.timeline.tempo);
+            self.audio.plugin_refs.insert(id, inst);
         }
     }
 
     pub(crate) fn load_configured_plugins(&mut self) {
-        let ids: Vec<i32> =
-            self.analog.config.plugins.iter().filter(|p| p.is_loaded()).map(|p| p.id).collect();
+        let ids: Vec<i32> = self
+            .surface
+            .analog
+            .config
+            .plugins
+            .iter()
+            .filter(|p| p.is_loaded())
+            .map(|p| p.id)
+            .collect();
         for id in ids {
             self.load_plugin_slot(id);
         }
     }
 
     pub(crate) fn load_insert(&mut self, id: uuid::Uuid) {
-        let Some(mix) = &self.mix else { return };
+        let Some(mix) = &self.session.mix else { return };
         let Some(insert) = mix.tracks.iter().flat_map(|t| t.inserts.iter()).find(|i| i.id == id)
         else {
             return;
         };
         let Some(path) = insert.bundle_path.clone() else { return };
-        let sr = self._stream.as_ref().map(|s| s.sample_rate() as f64).unwrap_or(48_000.0);
-        let block = self._stream.as_ref().map(|s| s.buffer_frames()).unwrap_or(128);
-        if let Some(prev) = self.insert_refs.remove(&id) {
+        let sr = self.audio._stream.as_ref().map(|s| s.sample_rate() as f64).unwrap_or(48_000.0);
+        let block = self.audio._stream.as_ref().map(|s| s.buffer_frames()).unwrap_or(128);
+        if let Some(prev) = self.audio.insert_refs.remove(&id) {
             vst3_host::retire_instance(prev);
         }
         let inst = vst3_host::load(&path, insert.class_uid.as_deref(), sr, block);
         if !inst.is_null() {
-            vst3_host::set_tempo(inst, self.tempo);
-            self.insert_refs.insert(id, inst);
+            vst3_host::set_tempo(inst, self.timeline.tempo);
+            self.audio.insert_refs.insert(id, inst);
         }
     }
 
     pub(crate) fn set_insert_bundle(&mut self, id: uuid::Uuid, path: &str, name: &str) {
-        if let Some(mut mix) = self.mix.take() {
+        if let Some(mut mix) = self.session.mix.take() {
             for t in &mut mix.tracks {
                 if let Some(ins) = t.inserts.iter_mut().find(|i| i.id == id) {
                     if path.is_empty() {
@@ -67,11 +74,11 @@ impl AppState {
                     }
                 }
             }
-            self.mix = Some(mix);
+            self.session.mix = Some(mix);
             self.persist_mix();
         }
         if path.is_empty() {
-            if let Some(prev) = self.insert_refs.remove(&id) {
+            if let Some(prev) = self.audio.insert_refs.remove(&id) {
                 vst3_host::retire_instance(prev);
             }
         } else {
@@ -80,12 +87,12 @@ impl AppState {
     }
 
     pub(crate) fn add_insert(&mut self) {
-        let lane = self.selected_lane.unwrap_or(MixLane::Main);
-        if let Some(mut mix) = self.mix.take() {
+        let lane = self.timeline.selected_lane.unwrap_or(MixLane::Main);
+        if let Some(mut mix) = self.session.mix.take() {
             if let Some(track) = mix.tracks.iter_mut().find(|t| t.lane == lane) {
                 track.inserts.push(MixInsert::new("Plugin"));
             }
-            self.mix = Some(mix);
+            self.session.mix = Some(mix);
             self.persist_mix();
         }
     }
