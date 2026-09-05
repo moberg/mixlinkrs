@@ -14,7 +14,6 @@ members = [
     "crates/project",
     "crates/asset",
     "crates/render",
-    "crates/ui-core",
     "crates/ui-mixlink",
     "crates/app",
 ]
@@ -40,7 +39,6 @@ vst3-host = { path = "crates/vst3-host" }
 project = { path = "crates/project" }
 asset = { path = "crates/asset" }
 render = { path = "crates/render" }
-ui-core = { path = "crates/ui-core" }
 ui-mixlink = { path = "crates/ui-mixlink" }
 
 rtrb = "0.3"

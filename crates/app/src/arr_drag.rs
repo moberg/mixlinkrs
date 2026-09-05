@@ -4,9 +4,9 @@ use project::{ArrSelection, MixClip, MixLane, MixTime, MixTrack};
 use render::Rect;
 use ui_mixlink::arrangement::ArrangementLayout;
 use ui_mixlink::hit::{self, Hit};
-use ui_mixlink::overlay::MenuAction;
 use ui_mixlink::widgets::MenuItem;
 
+use crate::menu_action::MenuAction;
 use crate::state::{AppState, Chrome, Drag, Timeline};
 
 impl AppState {

@@ -2,8 +2,9 @@
 
 use std::time::Instant;
 
-use analog::{AnalogEngine, XlRuntime};
+use analog::{AnalogEngine, ReturnLane, XlRuntime};
 use midi_xl::{schedule_refresh, LedFrame, MidiSession, SessionEvent};
+use ui_mixlink::mixer::StripKind;
 
 pub(crate) struct Surface {
     pub analog: AnalogEngine,
@@ -20,6 +21,59 @@ impl Surface {
         self.midi.send_leds(&frame);
         self.last_led = Some(frame);
         self.led_refresh_at = Some(Instant::now() + schedule_refresh());
+    }
+
+    pub(crate) fn current_knob(&self, kind: StripKind, lane: Option<ReturnLane>) -> f32 {
+        match (kind, lane) {
+            (StripKind::Input(i), Some(lane)) => self.analog.surface.strips[i].aux(lane),
+            (StripKind::Input(i), None) => self.analog.surface.strips[i].pan,
+            (StripKind::Return(r), None) => self
+                .analog
+                .surface
+                .returns
+                .iter()
+                .find(|x| x.id == r as i32)
+                .map(|x| x.pan)
+                .unwrap_or(0.5),
+            _ => 0.5,
+        }
+    }
+
+    pub(crate) fn current_fader(&self, kind: StripKind) -> f32 {
+        match kind {
+            StripKind::Input(i) => self.analog.surface.strips[i].fader,
+            StripKind::Return(lane) => self
+                .analog
+                .surface
+                .returns
+                .iter()
+                .find(|x| x.id == lane as i32)
+                .map(|x| x.fader)
+                .unwrap_or(0.0),
+            StripKind::Main => self.analog.mixer.main_fader,
+        }
+    }
+
+    pub(crate) fn set_fader(&mut self, kind: StripKind, v: f32) {
+        // Record analog only. Never writes MixDocument / take_view faders.
+        match kind {
+            StripKind::Input(i) => self.analog.apply_fader(i, v),
+            StripKind::Return(lane) => self.analog.apply_return_fader(lane as i32, v),
+            StripKind::Main => {
+                self.analog.mixer.main_fader = v;
+                self.analog
+                    .osc
+                    .send_float(osc::output_fader_lin(self.analog.config.main_output), v);
+            }
+        }
+    }
+
+    pub(crate) fn set_pan(&mut self, kind: StripKind, v: f32) {
+        match kind {
+            StripKind::Input(i) => self.analog.apply_pan(i, v),
+            StripKind::Return(lane) => self.analog.apply_return_pan(lane as i32, v),
+            StripKind::Main => {}
+        }
     }
 }
 

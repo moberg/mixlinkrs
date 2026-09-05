@@ -519,11 +519,8 @@ fn paint_lane(
             [theme::COPY_SELECT[0], theme::COPY_SELECT[1], theme::COPY_SELECT[2], 0.40],
             1.0,
         );
-        let top_lane = view
-            .tracks
-            .iter()
-            .find(|t| view.selection.lanes.contains(&t.lane))
-            .map(|t| t.lane);
+        let top_lane =
+            view.tracks.iter().find(|t| view.selection.lanes.contains(&t.lane)).map(|t| t.lane);
         if top_lane == Some(track.lane) {
             paint_copy_ticks(cmds, x0, x1, y);
         }
@@ -534,12 +531,7 @@ fn paint_copy_ticks(cmds: &mut Vec<DrawCmd>, x0: f32, x1: f32, y: f32) {
     let s = 5.0;
     let color = [1.0, 1.0, 1.0, 0.92];
     let tick = |cmds: &mut Vec<DrawCmd>, tip_x: f32, inward: f32| {
-        cmds.push(DrawCmd::Line {
-            a: (tip_x, y),
-            b: (tip_x + inward, y),
-            color,
-            thickness: 1.2,
-        });
+        cmds.push(DrawCmd::Line { a: (tip_x, y), b: (tip_x + inward, y), color, thickness: 1.2 });
         cmds.push(DrawCmd::Line {
             a: (tip_x, y),
             b: (tip_x + inward * 0.5, y + s),
@@ -1313,10 +1305,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(
-            labels.len() <= 4,
-            "close zoom should label seconds, not tenths: {labels:?}"
-        );
+        assert!(labels.len() <= 4, "close zoom should label seconds, not tenths: {labels:?}");
         assert!(labels.iter().any(|s| *s == "0:00"), "{labels:?}");
         assert!(labels.iter().all(|s| !s.contains('.')), "no tenth labels: {labels:?}");
         let ticks = cmds

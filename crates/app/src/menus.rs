@@ -2,21 +2,21 @@
 
 use std::time::Instant;
 
-use analog::{ChannelID, EffectRef, MixerBus};
+use analog::{EffectRef, MixerBus};
 use engine_api::UiCommand;
-use midi_xl::MidiSession;
 use project::{MixGrid, ProjectStore};
 use render::Rect;
 use ui_mixlink::chrome::{self};
 use ui_mixlink::mixer::{self, MixerLayout, StripKind};
-use ui_mixlink::overlay::{self, MenuAction, Overlay, TextFocus};
+use ui_mixlink::overlay::{self, Overlay, TextFocus};
 use ui_mixlink::sidebar::SidebarHit;
 use ui_mixlink::theme::Layout;
 use ui_mixlink::widgets::MenuItem;
 use winit::event_loop::ActiveEventLoop;
 
+use crate::menu_action::MenuAction;
 use crate::mix_doc::project_parts;
-use crate::state::{AppState, Chrome, MidiIo};
+use crate::state::{AppState, Chrome};
 
 impl AppState {
     pub(crate) fn handle_overlay_press(
@@ -28,17 +28,21 @@ impl AppState {
         h: f32,
     ) -> bool {
         match overlay {
-            Overlay::Menu { rect, items, action } => {
+            Overlay::Menu { rect, items } => {
                 if overlay::contains(*rect, x, y) {
                     if let Some(i) = overlay::menu_at(*rect, items, x, y) {
                         if let Some(item) = items.get(i).cloned() {
-                            self.apply_menu(action.clone(), &item);
+                            if let Some(action) = self.chrome.menu_action.take() {
+                                self.apply_menu(action, &item);
+                            }
                         }
                     }
                     self.chrome.overlay = None;
+                    self.chrome.menu_action = None;
                     return true;
                 }
                 self.chrome.overlay = None;
+                self.chrome.menu_action = None;
                 self.chrome.text_focus = TextFocus::None;
                 true
             }
@@ -46,6 +50,7 @@ impl AppState {
                 let hits = overlay::settings_hits(w, h);
                 if !overlay::contains(hits.panel, x, y) {
                     self.chrome.overlay = None;
+                    self.chrome.menu_action = None;
                     self.chrome.text_focus = TextFocus::None;
                     return true;
                 }
@@ -154,6 +159,7 @@ impl AppState {
             SidebarHit::Channels => self.chrome.open_or_focus_channels(event_loop),
             SidebarHit::Settings => {
                 self.chrome.overlay = Some(Overlay::Settings);
+                self.chrome.menu_action = None;
                 self.chrome.text_focus = TextFocus::None;
             }
             SidebarHit::AddInsert => self.add_insert(),
@@ -201,7 +207,8 @@ impl Chrome {
     pub(crate) fn place_menu(&mut self, anchor: Rect, items: Vec<MenuItem>, action: MenuAction) {
         let (w, h) = self.renderer.logical_size();
         let rect = overlay::layout_popup(anchor, &items, w, h);
-        self.overlay = Some(Overlay::Menu { rect, items, action });
+        self.overlay = Some(Overlay::Menu { rect, items });
+        self.menu_action = Some(action);
     }
 }
 
@@ -403,97 +410,6 @@ impl AppState {
         self.chrome.place_menu(anchor, items, MenuAction::AudioBuffer);
     }
 
-    pub(crate) fn apply_menu(&mut self, action: MenuAction, item: &MenuItem) {
-        match action {
-            MenuAction::StripSource { strip } => {
-                if let Ok(idx) = item.id.parse::<i32>() {
-                    self.surface
-                        .analog
-                        .set_strip_source(strip, ChannelID::new(MixerBus::Input, idx));
-                }
-            }
-            MenuAction::ReturnEffect { lane } => {
-                let ref_ = if item.id == "none" || item.id.is_empty() {
-                    None
-                } else if let Some(id) = item.id.strip_prefix("hw:").and_then(|s| s.parse().ok()) {
-                    Some(EffectRef::Hardware(id))
-                } else if let Some(id) = item.id.strip_prefix("pl:").and_then(|s| s.parse().ok()) {
-                    Some(EffectRef::Plugin(id))
-                } else {
-                    None
-                };
-                self.surface.analog.set_return_effect(lane, ref_);
-            }
-            MenuAction::HardwareOutput { id } => {
-                if let Ok(idx) = item.id.parse::<i32>() {
-                    self.surface.analog.set_hardware_effect_io(id, Some(idx), None);
-                }
-            }
-            MenuAction::HardwareInput { id } => {
-                if let Ok(idx) = item.id.parse::<i32>() {
-                    self.surface.analog.set_hardware_effect_io(id, None, Some(idx));
-                }
-            }
-            MenuAction::MixOut => {
-                if let Ok(idx) = item.id.parse::<i32>() {
-                    self.surface.analog.set_main_output(idx);
-                }
-            }
-            MenuAction::AudioDevice => {
-                self.surface.analog.set_audio_device(&item.id);
-                self.audio.restart_audio(&self.surface.analog.config);
-            }
-            MenuAction::AudioBuffer => {
-                if let Ok(n) = item.id.parse::<i32>() {
-                    self.surface.analog.set_audio_buffer_frames(n);
-                    self.audio.restart_audio(&self.surface.analog.config);
-                }
-            }
-            MenuAction::PluginBundle { id } => {
-                let path = if item.id.is_empty() { None } else { Some(item.id.clone()) };
-                let name = if item.label == "None" { None } else { Some(item.label.clone()) };
-                self.surface.analog.set_plugin_bundle(id, path, name);
-                self.load_plugin_slot(id);
-            }
-            MenuAction::PluginPlayback { id } => {
-                if let Ok(pair) = item.id.parse::<i32>() {
-                    self.surface.analog.set_plugin_playback(id, pair);
-                }
-            }
-            MenuAction::InsertBundle { insert } => {
-                self.set_insert_bundle(insert, &item.id, &item.label);
-            }
-            MenuAction::MixContext { id } => {
-                if item.id == "delete" {
-                    self.delete_mix_id(id);
-                } else if let Some(n) = item.id.strip_prefix("take:").and_then(|s| s.parse().ok()) {
-                    self.select_mix(id);
-                    self.start_from_take(n);
-                }
-            }
-            MenuAction::TakeContext { number } => match item.id.as_str() {
-                "start" => self.start_from_take(number),
-                "copy" => self.copy_take_to_clipboard(number),
-                _ => {}
-            },
-            MenuAction::Arrange => match item.id.as_str() {
-                "copy" => self.copy_selection(),
-                "paste" => self.paste_clips(),
-                "duplicate" => self.duplicate_clips(),
-                "delete" => self.delete_clips(),
-                "split" => self.split_clips(),
-                _ => {}
-            },
-            MenuAction::Grid => {
-                if let Ok(raw) = item.id.parse::<f64>() {
-                    self.timeline.grid = MixGrid::from_raw(raw);
-                    self.timeline.grid_enabled = true;
-                    self.persist_project_meta();
-                }
-            }
-        }
-    }
-
     pub(crate) fn edit_focus(&mut self, f: impl FnOnce(&mut String)) {
         match self.chrome.text_focus {
             TextFocus::Tempo => {
@@ -601,29 +517,6 @@ impl AppState {
         }
         for inst in self.audio.plugin_refs.values() {
             vst3_host::set_tempo(*inst, bpm);
-        }
-    }
-
-    pub(crate) fn apply_settings(&mut self) {
-        let host = self.surface.analog.config.osc_host.clone();
-        let send = self.surface.analog.config.osc_send_port;
-        let listen = self.surface.analog.config.osc_listen_port;
-        if let Err(e) = self.surface.analog.osc.start(&host, send, listen) {
-            log::warn!("OSC reconnect: {e}");
-        }
-        self.surface.analog.osc.send_dump_requests();
-        self.surface.analog.persist();
-        self.audio.restart_audio(&self.surface.analog.config);
-        #[cfg(target_os = "macos")]
-        {
-            match MidiSession::connect(&self.surface.analog.config.midi_device_contains) {
-                Ok(s) => {
-                    self.surface.midi = MidiIo::Hw(s);
-                    self.surface.xl.clear_on_connect();
-                    self.surface.last_led = None;
-                }
-                Err(e) => log::warn!("MIDI: {e}"),
-            }
         }
     }
 }

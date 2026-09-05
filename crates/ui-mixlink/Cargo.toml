@@ -6,10 +6,8 @@ license.workspace = true
 
 [dependencies]
 render.workspace = true
-ui-core.workspace = true
 analog.workspace = true
 project.workspace = true
-engine-api.workspace = true
 asset.workspace = true
 osc.workspace = true
 uuid.workspace = true

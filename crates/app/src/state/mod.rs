@@ -162,6 +162,7 @@ impl AppState {
                 drag: None,
                 last_click: None,
                 overlay: None,
+                menu_action: None,
                 channels: None,
                 modifiers: ModifiersState::empty(),
                 text_focus: TextFocus::None,

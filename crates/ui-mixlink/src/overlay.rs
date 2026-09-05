@@ -9,7 +9,7 @@ use crate::widgets::{self, MenuItem};
 
 #[derive(Clone, Debug)]
 pub enum Overlay {
-    Menu { rect: Rect, items: Vec<MenuItem>, action: MenuAction },
+    Menu { rect: Rect, items: Vec<MenuItem> },
     Settings,
 }
 
@@ -29,24 +29,6 @@ const CHANNELS_BOTTOM_PAD: f32 = 16.0;
 /// MixLink `MixLinkTheme.button` — column divider.
 const CHANNELS_DIVIDER: theme::Color = [0.22, 0.22, 0.24, 1.0];
 
-#[derive(Clone, Debug)]
-pub enum MenuAction {
-    StripSource { strip: usize },
-    ReturnEffect { lane: analog::ReturnLane },
-    HardwareOutput { id: i32 },
-    HardwareInput { id: i32 },
-    MixOut,
-    AudioDevice,
-    AudioBuffer,
-    PluginBundle { id: i32 },
-    PluginPlayback { id: i32 },
-    InsertBundle { insert: uuid::Uuid },
-    MixContext { id: uuid::Uuid },
-    TakeContext { number: i32 },
-    Arrange,
-    Grid,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TextFocus {
     None,
@@ -63,7 +45,7 @@ pub enum TextFocus {
 
 pub fn paint_menu(overlay: &Overlay, hover: Option<usize>) -> Vec<DrawCmd> {
     let mut cmds = Vec::new();
-    if let Overlay::Menu { rect, items, .. } = overlay {
+    if let Overlay::Menu { rect, items } = overlay {
         widgets::popup_menu(&mut cmds, *rect, items, hover);
     }
     cmds

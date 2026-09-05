@@ -13,6 +13,8 @@ use ui_mixlink::sidebar::SidebarHit;
 use winit::keyboard::ModifiersState;
 use winit::window::Window;
 
+use crate::menu_action::MenuAction;
+
 pub(crate) struct Chrome {
     pub window: Arc<Window>,
     pub renderer: render::Renderer,
@@ -21,6 +23,7 @@ pub(crate) struct Chrome {
     pub drag: Option<Drag>,
     pub last_click: Option<(Instant, f32, f32)>,
     pub overlay: Option<Overlay>,
+    pub menu_action: Option<MenuAction>,
     pub channels: Option<ChannelsWindow>,
     pub modifiers: ModifiersState,
     pub text_focus: TextFocus,

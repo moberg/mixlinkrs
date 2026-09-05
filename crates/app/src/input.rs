@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use analog::{MixAssign, ReturnLane};
+use analog::MixAssign;
 use project::{ArrSelection, MixLane, MixTime};
 use ui_mixlink::chrome::{self, ChromeHit, Page, HEADER_H};
 use ui_mixlink::hit::{self, Hit, Pad};
@@ -13,7 +13,6 @@ use ui_mixlink::theme::Layout;
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
 
-use crate::mix_doc::project_parts;
 use crate::state::{AppState, Chrome, Drag};
 
 impl Chrome {
@@ -229,7 +228,7 @@ impl AppState {
             match hit {
                 Hit::Fader { kind, rail_top, rail_bot } => {
                     if double {
-                        self.set_fader(kind, osc::FADER_LIN_0DB);
+                        self.surface.set_fader(kind, osc::FADER_LIN_0DB);
                     } else {
                         self.chrome.drag = Some(Drag::Fader { kind, rail_top, rail_bot });
                         self.apply_drag(x, y);
@@ -237,9 +236,9 @@ impl AppState {
                 }
                 Hit::Knob { kind, lane, .. } => {
                     if double && lane.is_none() {
-                        self.set_pan(kind, 0.5);
+                        self.surface.set_pan(kind, 0.5);
                     } else {
-                        let start = self.current_knob(kind, lane);
+                        let start = self.surface.current_knob(kind, lane);
                         self.chrome.drag = Some(Drag::Knob { kind, lane, start_y: y, start });
                     }
                 }
@@ -417,7 +416,7 @@ impl AppState {
             Some(Drag::Fader { kind, rail_top, rail_bot }) => {
                 let h = (rail_bot - rail_top).max(1.0);
                 let t = ((rail_bot - y) / h).clamp(0.0, 1.0);
-                self.set_fader(kind, t);
+                self.surface.set_fader(kind, t);
             }
             Some(Drag::Knob { kind, lane, start_y, start }) => {
                 let next = (start - (y - start_y) / Layout::KNOB_DRAG_PX).clamp(0.0, 1.0);
@@ -426,7 +425,7 @@ impl AppState {
                         self.surface.analog.apply_aux(i, lane, next);
                     }
                 } else {
-                    self.set_pan(kind, next);
+                    self.surface.set_pan(kind, next);
                 }
             }
             Some(Drag::Zoom { start_ppb, start_scroll, anchor_bar, start_x, start_y, live }) => {
@@ -588,85 +587,8 @@ impl AppState {
         self.sync_rt();
     }
 
-    pub(crate) fn current_knob(&self, kind: StripKind, lane: Option<ReturnLane>) -> f32 {
-        match (kind, lane) {
-            (StripKind::Input(i), Some(lane)) => self.surface.analog.surface.strips[i].aux(lane),
-            (StripKind::Input(i), None) => self.surface.analog.surface.strips[i].pan,
-            (StripKind::Return(r), None) => self
-                .surface
-                .analog
-                .surface
-                .returns
-                .iter()
-                .find(|x| x.id == r as i32)
-                .map(|x| x.pan)
-                .unwrap_or(0.5),
-            _ => 0.5,
-        }
-    }
-
-    pub(crate) fn current_fader(&self, kind: StripKind) -> f32 {
-        match kind {
-            StripKind::Input(i) => self.surface.analog.surface.strips[i].fader,
-            StripKind::Return(lane) => self
-                .surface
-                .analog
-                .surface
-                .returns
-                .iter()
-                .find(|x| x.id == lane as i32)
-                .map(|x| x.fader)
-                .unwrap_or(0.0),
-            StripKind::Main => self.surface.analog.mixer.main_fader,
-        }
-    }
-
-    pub(crate) fn set_fader(&mut self, kind: StripKind, v: f32) {
-        // Record analog only. Never writes MixDocument / take_view faders.
-        match kind {
-            StripKind::Input(i) => self.surface.analog.apply_fader(i, v),
-            StripKind::Return(lane) => self.surface.analog.apply_return_fader(lane as i32, v),
-            StripKind::Main => {
-                self.surface.analog.mixer.main_fader = v;
-                self.surface
-                    .analog
-                    .osc
-                    .send_float(osc::output_fader_lin(self.surface.analog.config.main_output), v);
-            }
-        }
-    }
-
-    pub(crate) fn set_pan(&mut self, kind: StripKind, v: f32) {
-        match kind {
-            StripKind::Input(i) => self.surface.analog.apply_pan(i, v),
-            StripKind::Return(lane) => self.surface.analog.apply_return_pan(lane as i32, v),
-            StripKind::Main => {}
-        }
-    }
-
     pub(crate) fn sidebar_scroll_max(&self, h: f32) -> f32 {
-        let (proj_date, proj_suffix) = project_parts(
-            self.surface.analog.config.current_project_relative.as_deref().unwrap_or(""),
-        );
-        sidebar::max_scroll(
-            &sidebar::SidebarView {
-                page: self.chrome.page,
-                engine: &self.surface.analog,
-                project_name: "",
-                project_date: &proj_date,
-                project_suffix: &proj_suffix,
-                sample_rate: 0,
-                buffer_frames: 0,
-                latency_ms: 0.0,
-                device_name: "",
-                mix: self.session.mix.as_ref(),
-                selected_lane: self.timeline.selected_lane,
-                scroll: 0.0,
-                focus: &self.chrome.text_focus,
-                caret: false,
-            },
-            h,
-        )
+        self.with_sidebar_view(|view| sidebar::max_scroll(view, h))
     }
 
     pub(crate) fn on_wheel(&mut self, dx: f32, dy: f32) {
@@ -696,17 +618,20 @@ impl AppState {
         if let Some(hit) = self.hit_body(x, y) {
             match hit {
                 Hit::Fader { kind, .. } => {
-                    self.set_fader(kind, (self.current_fader(kind) + dy * 0.002).clamp(0.0, 1.0));
+                    self.surface.set_fader(
+                        kind,
+                        (self.surface.current_fader(kind) + dy * 0.002).clamp(0.0, 1.0),
+                    );
                     return;
                 }
                 Hit::Knob { kind, lane, .. } => {
-                    let next = (self.current_knob(kind, lane) + dy * 0.002).clamp(0.0, 1.0);
+                    let next = (self.surface.current_knob(kind, lane) + dy * 0.002).clamp(0.0, 1.0);
                     if let Some(lane) = lane {
                         if let StripKind::Input(i) = kind {
                             self.surface.analog.apply_aux(i, lane, next);
                         }
                     } else {
-                        self.set_pan(kind, next);
+                        self.surface.set_pan(kind, next);
                     }
                     return;
                 }
@@ -752,6 +677,7 @@ impl AppState {
         if matches!(key, Key::Named(NamedKey::Escape)) {
             if self.chrome.overlay.is_some() || self.chrome.text_focus != TextFocus::None {
                 self.chrome.overlay = None;
+                self.chrome.menu_action = None;
                 self.chrome.text_focus = TextFocus::None;
                 self.chrome.edit_replace = false;
                 return true;

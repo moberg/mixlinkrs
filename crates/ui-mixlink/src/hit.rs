@@ -258,13 +258,11 @@ mod tests {
             Some(Hit::ClipEdge { id, left: false }) => assert_eq!(id, uuid::Uuid::from_u128(7)),
             other => panic!("right edge, got {other:?}"),
         }
-        match hit_arrangement(&layout, &tracks, false, 0, 120.0, 48_000.0, right - 8.0, title_y)
-        {
+        match hit_arrangement(&layout, &tracks, false, 0, 120.0, 48_000.0, right - 8.0, title_y) {
             Some(Hit::ClipEdge { id, left: false }) => assert_eq!(id, uuid::Uuid::from_u128(7)),
             other => panic!("title-bar ] mark should trim, got {other:?}"),
         }
-        match hit_arrangement(&layout, &tracks, false, 0, 120.0, 48_000.0, left + 8.0, title_y)
-        {
+        match hit_arrangement(&layout, &tracks, false, 0, 120.0, 48_000.0, left + 8.0, title_y) {
             Some(Hit::ClipEdge { id, left: true }) => assert_eq!(id, uuid::Uuid::from_u128(7)),
             other => panic!("title-bar [ mark should trim, got {other:?}"),
         }

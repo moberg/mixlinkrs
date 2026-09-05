@@ -17,6 +17,7 @@ mod channels;
 mod cursors;
 mod display_sleep;
 mod input;
+mod menu_action;
 mod menus;
 mod midi;
 mod mix_doc;

@@ -77,8 +77,11 @@ fn paint_header(cmds: &mut Vec<DrawCmd>, state: &ChromeState<'_>, w: f32) {
             radius: 3.0,
         });
     }
-    let tempo_shown =
-        if tempo_focus && state.caret { format!("{}|", state.tempo_text) } else { state.tempo_text.clone() };
+    let tempo_shown = if tempo_focus && state.caret {
+        format!("{}|", state.tempo_text)
+    } else {
+        state.tempo_text.clone()
+    };
     theme::text_mono(cmds, tempo_val, tempo_shown, 13.0, theme::TEXT, true);
     theme::text(
         cmds,

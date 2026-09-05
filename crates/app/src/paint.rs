@@ -77,18 +77,6 @@ impl AppState {
             engine::display_level(self.audio.engine_handles.peaks[i].load(Ordering::Relaxed))
         });
         let (bx, by, bw, bh) = self.chrome.body_rect();
-        let (proj_date, proj_suffix) = project_parts(
-            self.surface.analog.config.current_project_relative.as_deref().unwrap_or(""),
-        );
-        let device = self
-            .audio
-            ._stream
-            .as_ref()
-            .map(|_| self.surface.analog.config.audio_device_contains.clone())
-            .unwrap_or_else(|| self.surface.analog.config.audio_device_contains.clone());
-        let sample_rate = self.audio._stream.as_ref().map(|s| s.sample_rate()).unwrap_or(48_000);
-        let buffer_frames = self.audio._stream.as_ref().map(|s| s.buffer_frames()).unwrap_or(128);
-        let latency_ms = buffer_frames as f32 / sample_rate as f32 * 1000.0;
         match self.chrome.page {
             Page::Record => {
                 let send_count = self.surface.analog.config.effect_return_count as usize;
@@ -183,32 +171,7 @@ impl AppState {
         if self.chrome.sidebar_open() {
             let sidebar_max = self.sidebar_scroll_max(h);
             self.chrome.sidebar_scroll = self.chrome.sidebar_scroll.clamp(0.0, sidebar_max);
-            let (side_cmds, side_hits) = sidebar::paint(
-                &sidebar::SidebarView {
-                    page: self.chrome.page,
-                    engine: &self.surface.analog,
-                    project_name: self
-                        .surface
-                        .analog
-                        .config
-                        .current_project_relative
-                        .as_deref()
-                        .unwrap_or("Projects folder"),
-                    project_date: &proj_date,
-                    project_suffix: &proj_suffix,
-                    sample_rate,
-                    buffer_frames,
-                    latency_ms,
-                    device_name: &device,
-                    mix: self.session.mix.as_ref(),
-                    selected_lane: self.timeline.selected_lane,
-                    scroll: self.chrome.sidebar_scroll,
-                    focus: &self.chrome.text_focus,
-                    caret: self.chrome.caret_on,
-                },
-                w,
-                h,
-            );
+            let (side_cmds, side_hits) = self.with_sidebar_view(|view| sidebar::paint(view, w, h));
             scene.extend(side_cmds);
             self.chrome.sidebar_hits = side_hits;
         } else {
@@ -220,7 +183,7 @@ impl AppState {
             match overlay {
                 Overlay::Menu { .. } => {
                     let hover = match overlay {
-                        Overlay::Menu { rect, items, .. } => overlay::menu_at(
+                        Overlay::Menu { rect, items } => overlay::menu_at(
                             *rect,
                             items,
                             self.chrome.cursor.0,
@@ -243,6 +206,37 @@ impl AppState {
             }
         }
         let _ = self.chrome.renderer.render_scene(&scene);
+    }
+
+    pub(crate) fn with_sidebar_view<R>(&self, f: impl FnOnce(&sidebar::SidebarView<'_>) -> R) -> R {
+        let (proj_date, proj_suffix) = project_parts(
+            self.surface.analog.config.current_project_relative.as_deref().unwrap_or(""),
+        );
+        let sample_rate = self.audio._stream.as_ref().map(|s| s.sample_rate()).unwrap_or(48_000);
+        let buffer_frames = self.audio._stream.as_ref().map(|s| s.buffer_frames()).unwrap_or(128);
+        let latency_ms = buffer_frames as f32 / sample_rate as f32 * 1000.0;
+        f(&sidebar::SidebarView {
+            page: self.chrome.page,
+            engine: &self.surface.analog,
+            project_name: self
+                .surface
+                .analog
+                .config
+                .current_project_relative
+                .as_deref()
+                .unwrap_or("Projects folder"),
+            project_date: &proj_date,
+            project_suffix: &proj_suffix,
+            sample_rate,
+            buffer_frames,
+            latency_ms,
+            device_name: &self.surface.analog.config.audio_device_contains,
+            mix: self.session.mix.as_ref(),
+            selected_lane: self.timeline.selected_lane,
+            scroll: self.chrome.sidebar_scroll,
+            focus: &self.chrome.text_focus,
+            caret: self.chrome.caret_on,
+        })
     }
 
     pub(crate) fn mix_browser_view(&self) -> ui_mixlink::mix_browser::MixBrowserView<'_> {

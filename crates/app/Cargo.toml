@@ -19,7 +19,6 @@ analog.workspace = true
 midi-xl.workspace = true
 project.workspace = true
 asset.workspace = true
-ui-core.workspace = true
 ui-mixlink.workspace = true
 render.workspace = true
 vst3-host.workspace = true

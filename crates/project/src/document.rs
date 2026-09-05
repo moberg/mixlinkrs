@@ -562,7 +562,8 @@ impl MixDocument {
             return self.origin_take;
         }
         let mut counts = std::collections::HashMap::<i32, usize>::new();
-        for clip in self.tracks.iter().filter(|t| t.lane != MixLane::Main).flat_map(|t| t.clips.iter())
+        for clip in
+            self.tracks.iter().filter(|t| t.lane != MixLane::Main).flat_map(|t| t.clips.iter())
         {
             *counts.entry(clip.source_take).or_default() += 1;
         }
@@ -1516,7 +1517,15 @@ mod tests {
         assert_eq!(clip.display_name(), "Kick");
         assert_eq!(clip.title(Some(21)), "Kick");
         assert_eq!(clip.title(Some(7)), "21 Kick");
-        let ret = MixClip::new(21, MixLane::ReturnLane(ReturnLane::SendA), "21-ret-A-BigSky.wav", 0, 100, 0, 100);
+        let ret = MixClip::new(
+            21,
+            MixLane::ReturnLane(ReturnLane::SendA),
+            "21-ret-A-BigSky.wav",
+            0,
+            100,
+            0,
+            100,
+        );
         assert_eq!(ret.title(Some(21)), "BigSky");
     }
 

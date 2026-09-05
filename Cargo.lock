@@ -172,7 +172,6 @@ dependencies = [
  "render",
  "rt-utils",
  "serde_json",
- "ui-core",
  "ui-mixlink",
  "uuid",
  "vst3-host",
@@ -2722,20 +2721,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 
 [[package]]
-name = "ui-core"
-version = "0.1.0"
-
-[[package]]
 name = "ui-mixlink"
 version = "0.1.0"
 dependencies = [
  "analog",
  "asset",
- "engine-api",
  "osc",
  "project",
  "render",
- "ui-core",
  "uuid",
 ]
 
