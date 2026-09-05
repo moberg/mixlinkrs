@@ -38,8 +38,18 @@ pub fn paint(state: &ChromeState<'_>, w: f32, h: f32) -> Vec<DrawCmd> {
     let mut cmds = Vec::with_capacity(256);
     theme::fill(&mut cmds, Rect { x: 0.0, y: 0.0, w, h }, theme::WINDOW);
     paint_header(&mut cmds, state, w);
-    paint_footer(&mut cmds, state, w, h);
+    if state.page == Page::Record {
+        paint_footer(&mut cmds, state, w, h);
+    }
     cmds
+}
+
+/// OSC / XL status live on the Record mixer only.
+pub fn footer_height(page: Page) -> f32 {
+    match page {
+        Page::Record => Layout::FOOTER_H,
+        Page::Mix => 0.0,
+    }
 }
 
 fn paint_header(cmds: &mut Vec<DrawCmd>, state: &ChromeState<'_>, w: f32) {
@@ -139,6 +149,11 @@ fn paint_header(cmds: &mut Vec<DrawCmd>, state: &ChromeState<'_>, w: f32) {
             false,
             theme::BLUE,
         );
+    } else {
+        let (mute, solo, rec) = record_mode_rects();
+        widgets::hardware_pad(cmds, mute, "Mute", state.mute_mode, theme::AMBER);
+        widgets::hardware_pad(cmds, solo, "Solo", state.solo_mode, theme::AMBER);
+        widgets::hardware_pad(cmds, rec, "Rec", state.recording, theme::METER_RED);
     }
     let (record, mix) = page_tab_rects(w);
     widgets::hardware_pad(cmds, record, "Record", state.page == Page::Record, theme::PRIMARY_TEXT);
@@ -149,6 +164,9 @@ const MIX_PLAY_X: f32 = 150.0;
 const MIX_GRID_X: f32 = MIX_PLAY_X + 78.0 + 86.0;
 const MIX_STEP_X: f32 = MIX_GRID_X + 60.0;
 const MIX_STEP_GAP: f32 = 62.0;
+const REC_MODE_X: f32 = 150.0;
+const REC_PAD_W: f32 = 64.0;
+const REC_PAD_GAP: f32 = 6.0;
 
 /// MixLink grid-resolution well next to the Grid pad.
 pub fn grid_step_rect() -> Rect {
@@ -162,6 +180,13 @@ pub fn tempo_well_rect() -> Rect {
 
 fn tempo_value_rect() -> Rect {
     Rect { x: 56.0, y: 6.0, w: 56.0, h: 24.0 }
+}
+
+fn record_mode_rects() -> (Rect, Rect, Rect) {
+    let mute = Rect { x: REC_MODE_X, y: 6.0, w: REC_PAD_W, h: 24.0 };
+    let solo = Rect { x: mute.x + REC_PAD_W + REC_PAD_GAP, y: 6.0, w: REC_PAD_W, h: 24.0 };
+    let rec = Rect { x: solo.x + REC_PAD_W + REC_PAD_GAP, y: 6.0, w: REC_PAD_W, h: 24.0 };
+    (mute, solo, rec)
 }
 
 fn page_tab_rects(w: f32) -> (Rect, Rect) {
@@ -208,31 +233,9 @@ fn paint_footer(cmds: &mut Vec<DrawCmd>, state: &ChromeState<'_>, w: f32, h: f32
             false,
         );
     }
-    let cx = w * 0.5 - 140.0;
-    widgets::hardware_pad(
-        cmds,
-        Rect { x: cx, y: y + 8.0, w: 90.0, h: 26.0 },
-        "Mute",
-        state.mute_mode,
-        theme::AMBER,
-    );
-    widgets::hardware_pad(
-        cmds,
-        Rect { x: cx + 96.0, y: y + 8.0, w: 90.0, h: 26.0 },
-        "Solo",
-        state.solo_mode,
-        theme::AMBER,
-    );
-    widgets::hardware_pad(
-        cmds,
-        Rect { x: cx + 192.0, y: y + 8.0, w: 90.0, h: 26.0 },
-        "Rec",
-        state.recording,
-        theme::METER_RED,
-    );
 }
 
-pub fn hit_chrome(page: Page, w: f32, h: f32, x: f32, y: f32) -> Option<ChromeHit> {
+pub fn hit_chrome(page: Page, w: f32, _h: f32, x: f32, y: f32) -> Option<ChromeHit> {
     if y < HEADER_H {
         let tempo = tempo_well_rect();
         if x >= tempo.x && x < tempo.x + tempo.w {
@@ -274,20 +277,19 @@ pub fn hit_chrome(page: Page, w: f32, h: f32, x: f32, y: f32) -> Option<ChromeHi
             if x >= bx && x < bx + 80.0 {
                 return Some(ChromeHit::Export);
             }
+        } else {
+            let (mute, solo, rec) = record_mode_rects();
+            if widgets::contains(mute, x, y) {
+                return Some(ChromeHit::MuteMode);
+            }
+            if widgets::contains(solo, x, y) {
+                return Some(ChromeHit::SoloMode);
+            }
+            if widgets::contains(rec, x, y) {
+                return Some(ChromeHit::Rec);
+            }
         }
         return None;
-    }
-    if y >= h - Layout::FOOTER_H {
-        let cx = w * 0.5 - 140.0;
-        if x >= cx && x < cx + 90.0 {
-            return Some(ChromeHit::MuteMode);
-        }
-        if x >= cx + 96.0 && x < cx + 186.0 {
-            return Some(ChromeHit::SoloMode);
-        }
-        if x >= cx + 192.0 && x < cx + 282.0 {
-            return Some(ChromeHit::Rec);
-        }
     }
     None
 }
@@ -354,6 +356,27 @@ mod tests {
             hit_chrome(Page::Mix, 1400.0, 900.0, well.x + well.w - 4.0, 12.0),
             Some(ChromeHit::Tempo)
         ));
+    }
+
+    #[test]
+    fn record_mode_pads_hit_in_the_header() {
+        let w = 1400.0;
+        let h = 900.0;
+        let (mute, solo, rec) = record_mode_rects();
+        assert!(matches!(
+            hit_chrome(Page::Record, w, h, mute.x + 4.0, 12.0),
+            Some(ChromeHit::MuteMode)
+        ));
+        assert!(matches!(
+            hit_chrome(Page::Record, w, h, solo.x + 4.0, 12.0),
+            Some(ChromeHit::SoloMode)
+        ));
+        assert!(matches!(hit_chrome(Page::Record, w, h, rec.x + 4.0, 12.0), Some(ChromeHit::Rec)));
+        assert!(!matches!(
+            hit_chrome(Page::Mix, w, h, mute.x + 4.0, 12.0),
+            Some(ChromeHit::MuteMode | ChromeHit::SoloMode | ChromeHit::Rec)
+        ));
+        assert!(hit_chrome(Page::Record, w, h, mute.x + 4.0, h - 12.0).is_none());
     }
 
     #[test]

@@ -110,12 +110,7 @@ pub fn tempo_from_drag(start_bpm: f64, start_y: f32, y: f32, fine: bool) -> f64 
     let step = if fine { 0.1 } else { 1.0 };
     let steps = (-((y - start_y) as f64) / TEMPO_DRAG_PX).round();
     let next = clamp_tempo(start_bpm) + steps * step;
-    if fine {
-        (next * 10.0).round() / 10.0
-    } else {
-        next.round()
-    }
-    .clamp(TEMPO_MIN, TEMPO_MAX)
+    if fine { (next * 10.0).round() / 10.0 } else { next.round() }.clamp(TEMPO_MIN, TEMPO_MAX)
 }
 
 pub fn selection_for_clip(

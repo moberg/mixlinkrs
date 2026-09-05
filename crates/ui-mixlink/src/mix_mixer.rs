@@ -9,7 +9,7 @@ use crate::mixer::{self, FaderBay};
 use crate::theme::{self, Layout};
 use crate::widgets::{self, KnobKind};
 
-/// Footer control in the mix browser when the mixer is hidden (`z`).
+/// Footer control in the mix browser when the mixer is hidden.
 pub const HANDLE_H: f32 = 24.0;
 /// Record-like fader travel so names, ticks, and caps stay readable.
 const MIN_FADER_BAY: f32 = 200.0;
@@ -296,24 +296,17 @@ fn paint_bus_strip(
     theme::channel_seam(cmds, x + w - 1.0, view.y, view.h, false);
 }
 
-/// Compact reveal control for the mix browser footer (not a full-width bar).
+/// Footer pad spanning the mix browser; diamond points toward the mixer.
 pub fn paint_collapsed_handle(x: f32, y: f32, w: f32) -> Vec<DrawCmd> {
     let mut cmds = Vec::new();
     theme::seam_h(&mut cmds, x, y, w, true);
+    // Leave the browser's trailing seam (1 px) so the pad meets the divider.
     widgets::hardware_pad(
         &mut cmds,
-        Rect { x: x + 8.0, y: y + 2.0, w: 100.0, h: 20.0 },
-        "▲  Mixer",
+        Rect { x, y: y + 2.0, w: (w - 1.0).max(0.0), h: HANDLE_H - 4.0 },
+        "Mixer  ▶",
         false,
         theme::PRIMARY_TEXT,
-    );
-    theme::text(
-        &mut cmds,
-        Rect { x: x + 112.0, y: y + 3.0, w: 28.0, h: 18.0 },
-        "Z",
-        10.0,
-        theme::TEXT_DIM,
-        true,
     );
     cmds
 }

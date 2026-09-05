@@ -57,15 +57,15 @@ pub enum SidebarHit {
 
 const FOOT_H: f32 = 40.0;
 
-pub fn body_rect(window_w: f32, window_h: f32) -> Rect {
+pub fn body_rect(window_w: f32, window_h: f32, page: Page) -> Rect {
     let x = window_w - Layout::SIDEBAR_WIDTH;
     let y = crate::chrome::HEADER_H;
-    let sh = window_h - crate::chrome::HEADER_H - Layout::FOOTER_H;
+    let sh = window_h - crate::chrome::HEADER_H - crate::chrome::footer_height(page);
     Rect { x, y, w: Layout::SIDEBAR_WIDTH, h: (sh - FOOT_H).max(0.0) }
 }
 
 pub fn max_scroll(view: &SidebarView<'_>, window_h: f32) -> f32 {
-    let body_h = body_rect(0.0, window_h).h;
+    let body_h = body_rect(0.0, window_h, view.page).h;
     let content = match view.page {
         Page::Record => record_content_h(view),
         Page::Mix => mix_content_h(view),
@@ -78,7 +78,7 @@ pub fn paint(view: &SidebarView<'_>, w: f32, h: f32) -> (Vec<DrawCmd>, Vec<(Rect
     let mut hits = Vec::new();
     let x = w - Layout::SIDEBAR_WIDTH;
     let y = crate::chrome::HEADER_H;
-    let sh = h - crate::chrome::HEADER_H - Layout::FOOTER_H;
+    let sh = h - crate::chrome::HEADER_H - crate::chrome::footer_height(view.page);
     cmds.push(DrawCmd::Layer);
     theme::hardware_surface(
         &mut cmds,
@@ -87,7 +87,7 @@ pub fn paint(view: &SidebarView<'_>, w: f32, h: f32) -> (Vec<DrawCmd>, Vec<(Rect
     );
     theme::seam_v(&mut cmds, x, y, sh, true);
 
-    let clip = body_rect(w, h);
+    let clip = body_rect(w, h, view.page);
     let max_scroll = max_scroll(view, h);
     let scroll = view.scroll.clamp(0.0, max_scroll);
 
