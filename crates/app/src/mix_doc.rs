@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use analog::SessionConfig;
 use project::{
     copy_clip_ids, copy_time_range, ArrSelection, MixArrangement, MixDocument, MixLane,
-    MixListEntry, MixTrack, ProjectStore,
+    MixListEntry, MixTrack, ProjectStore, TakeInfo,
 };
 
 use crate::arr_drag::MixEdit;
@@ -118,6 +118,41 @@ impl AppState {
         }
     }
 
+    pub(crate) fn rename_mix(&mut self, id: uuid::Uuid, name: String) {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        let Some(mix) = self.session.mixes.iter_mut().find(|m| m.id == id) else {
+            return;
+        };
+        if mix.name == name {
+            return;
+        }
+        mix.name = name.clone();
+        if let Some(folder) = ProjectStore::current_url(&self.surface.analog.config) {
+            if let Err(e) = self.session.project.save_mix(mix, &folder) {
+                log::warn!("save mix: {e}");
+            }
+        }
+        if let Some(active) = self.session.mix.as_mut() {
+            if active.id == id {
+                active.name = name;
+            }
+        }
+        self.persist_project_meta();
+    }
+
+    pub(crate) fn rename_take(&mut self, number: i32, name: String) {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            self.session.take_names.remove(&number);
+        } else {
+            self.session.take_names.insert(number, name);
+        }
+        self.persist_project_meta();
+    }
+
     pub(crate) fn new_mix(&mut self) {
         let n = self.session.mixes.len() + 1;
         let mut mix =
@@ -140,21 +175,16 @@ impl AppState {
         else {
             return;
         };
-        if self.session.mix.is_none() {
-            if let Some(id) = self.session.mixes.first().map(|m| m.id) {
-                self.select_mix(id);
-            } else {
-                self.new_mix();
+        let origin = self.take_start_from_store(number);
+        let send_count = self.surface.analog.config.effect_return_count;
+        let id = self.session.start_from_take(&info, origin, send_count);
+        if let Some(folder) = ProjectStore::current_url(&self.surface.analog.config) {
+            if let Some(mix) = self.session.mixes.iter().find(|m| m.id == id) {
+                if let Err(e) = self.session.project.save_mix(mix, &folder) {
+                    log::warn!("save mix: {e}");
+                }
             }
         }
-        let origin = self.take_start_from_store(number);
-        let Some(mut mix) = self.session.mix.take() else { return };
-        self.session.undo.mutate("Start from take", false, &mut mix, |doc| {
-            doc.load_from_take(&info, origin);
-        });
-        let id = mix.id;
-        self.session.mix = Some(mix);
-        self.persist_mix();
         self.select_mix(id);
     }
 
@@ -185,6 +215,7 @@ impl AppState {
         }
         self.session.take_infos = crate::record::list_take_infos(&folder, self.audio.sample_rate());
         self.session.takes = self.session.take_infos.iter().map(|t| t.number).collect();
+        self.session.take_names.remove(&number);
         if self.session.viewing_take == Some(number) && !self.session.takes.contains(&number) {
             if let Some(id) = self
                 .session
@@ -380,6 +411,13 @@ impl AppState {
             .iter()
             .map(|m| MixListEntry { id: m.id, name: m.name.clone() })
             .collect();
+        meta.take_names = self
+            .session
+            .take_names
+            .iter()
+            .filter(|(_, name)| !name.is_empty())
+            .map(|(n, name)| (n.to_string(), name.clone()))
+            .collect();
         meta.arrangement = if let Some(n) = self.session.viewing_take {
             Some(MixArrangement::Take(n))
         } else {
@@ -405,6 +443,7 @@ impl AppState {
                 );
             }
             self.session.takes.clear();
+            self.session.take_names.clear();
             self.session.take_infos.clear();
             self.session.take_view = None;
             self.session.mixes.clear();
@@ -424,6 +463,11 @@ impl AppState {
         self.session.take_number = self.session.project.next_take(&folder);
         self.session.take_infos = crate::record::list_take_infos(&folder, sr);
         self.session.takes = self.session.take_infos.iter().map(|t| t.number).collect();
+        self.session.take_names = meta
+            .take_names
+            .iter()
+            .filter_map(|(k, v)| k.parse().ok().filter(|_| !v.is_empty()).map(|n| (n, v.clone())))
+            .collect();
 
         self.session.mixes.clear();
         for entry in &meta.mixes {
@@ -482,6 +526,22 @@ impl AppState {
 }
 
 impl Session {
+    /// Always allocate a new mix document from the take. Never reuse or overwrite
+    /// a mix that was already started from a take.
+    pub(crate) fn start_from_take(
+        &mut self,
+        info: &TakeInfo,
+        origin: i64,
+        send_count: i32,
+    ) -> uuid::Uuid {
+        let n = self.mixes.len() + 1;
+        let mut mix = MixDocument::empty(format!("Mix {n}"), send_count);
+        mix.load_from_take(info, origin);
+        let id = mix.id;
+        self.mixes.push(mix);
+        id
+    }
+
     #[must_use]
     pub(crate) fn mutate(
         &mut self,
@@ -806,18 +866,23 @@ impl Session {
     }
 }
 
-pub(crate) fn project_parts(rel: &str) -> (String, String) {
-    if let Some((date, rest)) = rel.split_once(" - ") {
-        (date.to_string(), rest.to_string())
-    } else {
-        (rel.to_string(), String::new())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use project::MixClip;
+    use project::{MixClip, TakeFile, TakeInfo};
+
+    fn take_info(number: i32, frames: i64) -> TakeInfo {
+        TakeInfo {
+            number,
+            files: vec![TakeFile {
+                lane: MixLane::Strip(0),
+                name: "Rytm".into(),
+                filename: format!("{number}-ch-01-Rytm.wav"),
+                frame_count: frames,
+                sample_rate: 48_000.0,
+            }],
+        }
+    }
 
     fn clip(start: i64, count: i64) -> MixClip {
         MixClip::new(1, MixLane::Strip(0), "take-1.wav", 0, count, start, count)
@@ -874,6 +939,55 @@ mod tests {
         let dest = session.mix.as_ref().unwrap().track(MixLane::Strip(1)).unwrap();
         assert_eq!(dest.clips.len(), 1);
         assert_eq!(dest.clips[0].mix_start_frame, 96_000);
+    }
+
+    #[test]
+    fn start_from_take_creates_a_new_mix_each_time() {
+        let take = take_info(7, 1000);
+        let mut existing = MixDocument::empty("Mix 1", 2);
+        existing.load_from_take(&take, 100);
+        let existing_id = existing.id;
+        let existing_clip = existing.track(MixLane::Strip(0)).unwrap().clips[0].clone();
+
+        let mut session = Session {
+            mix: Some(existing.clone()),
+            mixes: vec![existing],
+            viewing_take: Some(7),
+            ..Session::default()
+        };
+
+        let first = session.start_from_take(&take, 100, 2);
+        assert_ne!(first, existing_id);
+        assert_eq!(session.mixes.len(), 2);
+        assert_eq!(session.mix.as_ref().map(|m| m.id), Some(existing_id));
+        let created = session.mixes.iter().find(|m| m.id == first).unwrap();
+        assert_eq!(created.name, "Mix 2");
+        assert_eq!(created.origin_take, Some(7));
+        assert_eq!(created.start_frame, 0);
+        let clip = &created.track(MixLane::Strip(0)).unwrap().clips[0];
+        assert_eq!(clip.source_take, 7);
+        assert_eq!(clip.source_start_frame, 100);
+        assert_eq!(clip.source_frame_count, 900);
+
+        let original = session.mixes.iter().find(|m| m.id == existing_id).unwrap();
+        assert_eq!(original.origin_take, Some(7));
+        assert_eq!(original.track(MixLane::Strip(0)).unwrap().clips[0].id, existing_clip.id);
+        assert_eq!(
+            original.track(MixLane::Strip(0)).unwrap().clips[0].source_start_frame,
+            existing_clip.source_start_frame
+        );
+
+        let second = session.start_from_take(&take, 200, 2);
+        assert_ne!(second, first);
+        assert_ne!(second, existing_id);
+        assert_eq!(session.mixes.len(), 3);
+        let created = session.mixes.iter().find(|m| m.id == second).unwrap();
+        assert_eq!(created.name, "Mix 3");
+        assert_eq!(created.origin_take, Some(7));
+        let clip = &created.track(MixLane::Strip(0)).unwrap().clips[0];
+        assert_eq!(clip.source_start_frame, 200);
+        assert_eq!(clip.source_frame_count, 800);
+        assert_eq!(session.mixes.iter().filter(|m| m.origin_take == Some(7)).count(), 3);
     }
 
     #[test]

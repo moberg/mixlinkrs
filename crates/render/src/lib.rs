@@ -392,6 +392,7 @@ mod tests {
             h_align: Align::Start,
             v_align: Align::Center,
             bold: false,
+            italic: false,
             monospaced: false,
             clip: None,
         })

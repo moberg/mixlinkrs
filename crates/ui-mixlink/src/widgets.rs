@@ -70,6 +70,25 @@ pub fn hardware_pad(cmds: &mut Vec<DrawCmd>, rect: Rect, title: &str, on: bool, 
     theme::text_center(cmds, rect, title.to_uppercase(), 10.5, label, true);
 }
 
+/// Header project dropdown: RECORD/MIX pad, left-aligned name, trailing chevron.
+pub fn chrome_menu_pad(cmds: &mut Vec<DrawCmd>, rect: Rect, title: &str, on: bool) {
+    pad_face(cmds, rect, on, theme::PRIMARY_TEXT);
+    const PAD_X: f32 = 8.0;
+    const CHEVRON_W: f32 = 8.0;
+    const GAP: f32 = 4.0;
+    let label_color = [1.0, 1.0, 1.0, 0.72];
+    let chevron =
+        Rect { x: rect.x + rect.w - PAD_X - CHEVRON_W, y: rect.y, w: CHEVRON_W, h: rect.h };
+    let label = Rect {
+        x: rect.x + PAD_X,
+        y: rect.y,
+        w: (chevron.x - GAP - rect.x - PAD_X).max(1.0),
+        h: rect.h,
+    };
+    theme::text(cmds, label, title, 11.0, label_color, false);
+    chevron_up_chevron_down(cmds, chevron, label_color);
+}
+
 pub fn icon_pad(cmds: &mut Vec<DrawCmd>, rect: Rect, glyph: &str, enabled: bool) {
     pad_face(cmds, rect, false, theme::PRIMARY_TEXT);
     theme::text_center(
@@ -80,6 +99,23 @@ pub fn icon_pad(cmds: &mut Vec<DrawCmd>, rect: Rect, glyph: &str, enabled: bool)
         if enabled { [1.0, 1.0, 1.0, 0.78] } else { theme::SECONDARY_TEXT },
         true,
     );
+}
+
+/// Dark header pad with a simple folder glyph (no SF Symbol / emoji in the atlas).
+pub fn folder_icon_pad(cmds: &mut Vec<DrawCmd>, rect: Rect, enabled: bool) {
+    pad_face(cmds, rect, false, theme::PRIMARY_TEXT);
+    let color = if enabled { [1.0, 1.0, 1.0, 0.78] } else { theme::SECONDARY_TEXT };
+    folder_glyph(cmds, rect, color);
+}
+
+/// Tab + body, ~11pt weight to sit next to the 9.5pt plus.
+fn folder_glyph(cmds: &mut Vec<DrawCmd>, pad: Rect, color: Color) {
+    let cx = pad.x + pad.w * 0.5;
+    let cy = pad.y + pad.h * 0.5 + 0.4;
+    let body = Rect { x: cx - 6.0, y: cy - 3.2, w: 12.0, h: 7.4 };
+    let tab = Rect { x: body.x, y: body.y - 2.0, w: 4.8, h: 2.6 };
+    cmds.push(DrawCmd::RoundedRect { rect: tab, color, radius: 1.0 });
+    cmds.push(DrawCmd::RoundedRect { rect: body, color, radius: 1.4 });
 }
 
 /// MixLink `ChannelOnToggle`: hardware pad + green LED + SwiftUI shadows.
@@ -706,22 +742,38 @@ pub fn scrollbar(cmds: &mut Vec<DrawCmd>, track: Rect, scroll: f32, max_scroll: 
     });
 }
 
+/// MixLink Settings checkbox: dark square, red border + check when on, “On”/“Off”.
 pub fn checkbox(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, on: bool, label: &str) {
-    hardware_pad(
+    let box_r = Rect { x, y, w: 14.0, h: 14.0 };
+    theme::fill(cmds, box_r, theme::DEEP_SLOT);
+    theme::stroke_rect(
         cmds,
-        Rect { x, y, w: 14.0, h: 14.0 },
-        if on { "✓" } else { "" },
-        on,
-        theme::METER_RED,
+        box_r,
+        if on { theme::METER_RED } else { [0.22, 0.22, 0.24, 1.0] },
+        1.0,
     );
+    if on {
+        theme::text_center(cmds, box_r, "✓", 11.0, [1.0, 1.0, 1.0, 0.95], true);
+    }
     theme::text(
         cmds,
-        Rect { x: x + 18.0, y: y - 1.0, w: 110.0, h: 16.0 },
+        Rect { x: x + 20.0, y: y - 1.0, w: 110.0, h: 16.0 },
         label,
-        9.0,
-        theme::TEXT_DIM,
+        11.0,
+        theme::TEXT,
         false,
     );
+}
+
+/// Charcoal brushed window + inset recessed card (MixLink Settings / Channels).
+pub fn document_window(cmds: &mut Vec<DrawCmd>, w: f32, h: f32, panel: Rect) {
+    theme::hardware_surface(cmds, Rect { x: 0.0, y: 0.0, w, h }, theme::SurfaceStyle::Sidebar);
+    hardware_module(cmds, panel);
+}
+
+/// Beveled Close pad, bottom-right of a document window.
+pub fn window_close(cmds: &mut Vec<DrawCmd>, rect: Rect) {
+    hardware_pad(cmds, rect, "Close", false, theme::PRIMARY_TEXT);
 }
 
 /// MixLink closed sidebar picker (`ChannelPicker` / `MenuLabel` as it paints on
@@ -738,7 +790,7 @@ pub struct ChannelPickerStyle {
 }
 
 impl ChannelPickerStyle {
-    /// Heat Output/Input, Mix Out, Audio Device, Projects folder — white, a
+    /// Heat Output/Input, Mix Out, Audio Device — white, a
     /// point larger than the 11pt `textDim` field label.
     pub fn value() -> Self {
         Self { size: 12.0, color: theme::PRIMARY_TEXT, trailing: false }
@@ -826,6 +878,45 @@ pub struct StripNameStyle {
     pub color: Option<theme::Color>,
 }
 
+/// MixLink `StripNameLabel` metrics: 11.5 medium, diamond 6.5, `HStack(spacing: 4)`,
+/// horizontal pad 2, then `.frame(maxWidth: .infinity)` so the cluster is centered.
+const STRIP_NAME_FONT: f32 = 11.5;
+const STRIP_NAME_LINE_H: f32 = 17.0;
+const STRIP_NAME_DIA: f32 = 6.5;
+const STRIP_NAME_GAP: f32 = 4.0;
+const STRIP_NAME_PAD: f32 = 2.0;
+
+/// Positions for a diamond+name (or name-only) cluster centered in `col_w`.
+/// Offsets are relative to the strip's left edge.
+#[derive(Clone, Copy, Debug)]
+struct StripNameLayout {
+    diamond_cx: f32,
+    text_x: f32,
+    text_w: f32,
+    group_x: f32,
+    group_w: f32,
+}
+
+impl StripNameLayout {
+    fn new(col_w: f32, text: &str, diamond: bool) -> Self {
+        let inner_x = STRIP_NAME_PAD;
+        let inner_w = (col_w - STRIP_NAME_PAD * 2.0).max(0.0);
+        let icon_w = if diamond { STRIP_NAME_DIA + STRIP_NAME_GAP } else { 0.0 };
+        let text_max = (inner_w - icon_w).max(1.0);
+        let text_w = approx_ui_advance(text, STRIP_NAME_FONT).min(text_max);
+        let group_w = icon_w + text_w;
+        let group_x = inner_x + (inner_w - group_w) * 0.5;
+        let text_x = group_x + icon_w;
+        Self {
+            diamond_cx: group_x + STRIP_NAME_DIA * 0.5,
+            text_x,
+            text_w: (inner_x + inner_w - text_x).max(1.0),
+            group_x,
+            group_w,
+        }
+    }
+}
+
 pub fn strip_name_label(cmds: &mut Vec<DrawCmd>, rect: Rect, text: &str, style: StripNameStyle) {
     if rect.w <= 0.0 || rect.h <= 0.0 {
         return;
@@ -847,34 +938,37 @@ pub fn strip_name_label(cmds: &mut Vec<DrawCmd>, rect: Rect, text: &str, style: 
     } else {
         style.color.unwrap_or(theme::SECONDARY_TEXT)
     };
-    let font = 11.5;
-    // One-line NAME_ROW. Give the label the full remaining strip width so
-    // short names never ellipsize; cosmic-text only trims when it truly
-    // cannot fit.
-    let line_h = 17.0;
-    let text_y = rect.y + (rect.h - line_h) * 0.5;
-    let dia = 6.5;
-    let gap = 4.0;
-    let pad = 2.0;
-    let inner_w = (rect.w - pad * 2.0).max(0.0);
-    let x0 = rect.x + pad;
+    let text_y = rect.y + (rect.h - STRIP_NAME_LINE_H) * 0.5;
+    let layout = StripNameLayout::new(rect.w, text, style.diamond);
     if style.diamond {
-        let text_w = (inner_w - dia - gap).max(1.0);
-        hollow_diamond(cmds, x0 + dia * 0.5, rect.y + rect.h * 0.5, dia, gem);
+        hollow_diamond(
+            cmds,
+            rect.x + layout.diamond_cx,
+            rect.y + rect.h * 0.5,
+            STRIP_NAME_DIA,
+            gem,
+        );
         theme::text(
             cmds,
-            Rect { x: x0 + dia + gap, y: text_y, w: text_w, h: line_h },
+            Rect { x: rect.x + layout.text_x, y: text_y, w: layout.text_w, h: STRIP_NAME_LINE_H },
             text,
-            font,
+            STRIP_NAME_FONT,
             label,
             false,
         );
     } else {
+        // MixLink Main: `Text.frame(maxWidth: .infinity)`. Center the name as
+        // the same cluster (no diamond) so a wide strip does not left-align it.
         theme::text_center(
             cmds,
-            Rect { x: x0, y: text_y, w: inner_w.max(1.0), h: line_h },
+            Rect {
+                x: rect.x + layout.group_x,
+                y: text_y,
+                w: layout.group_w.max(1.0),
+                h: STRIP_NAME_LINE_H,
+            },
             text,
-            font,
+            STRIP_NAME_FONT,
             label,
             false,
         );
@@ -919,11 +1013,18 @@ fn text_field_styled(
     monospaced: bool,
 ) {
     theme::hardware_surface(cmds, rect, theme::SurfaceStyle::Recessed);
-    theme::fill(cmds, Rect { x: rect.x, y: rect.y, w: rect.w, h: 1.0 }, [0.0, 0.0, 0.0, 0.55]);
+    theme::fill(cmds, rect, [0.0, 0.0, 0.0, 0.22]);
+    theme::fill(cmds, Rect { x: rect.x, y: rect.y, w: rect.w, h: 1.0 }, [1.0, 1.0, 1.0, 0.16]);
     theme::fill(
         cmds,
         Rect { x: rect.x, y: rect.y + rect.h - 1.0, w: rect.w, h: 1.0 },
-        [1.0, 1.0, 1.0, 0.05],
+        [0.0, 0.0, 0.0, 0.62],
+    );
+    theme::fill(cmds, Rect { x: rect.x, y: rect.y, w: 1.0, h: rect.h }, [1.0, 1.0, 1.0, 0.06]);
+    theme::fill(
+        cmds,
+        Rect { x: rect.x + rect.w - 1.0, y: rect.y, w: 1.0, h: rect.h },
+        [0.0, 0.0, 0.0, 0.45],
     );
     cmds.push(DrawCmd::RoundedRect {
         rect,
@@ -1242,5 +1343,83 @@ pub fn decibel_scale(cmds: &mut Vec<DrawCmd>, x: f32, top: f32, h: f32, placemen
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn col_mid(col_w: f32) -> f32 {
+        STRIP_NAME_PAD + (col_w - STRIP_NAME_PAD * 2.0) * 0.5
+    }
+
+    #[test]
+    fn diamond_and_name_cluster_is_centered() {
+        let col = Layout::CHANNEL_WIDTH;
+        let layout = StripNameLayout::new(col, "Rytm", true);
+        assert!(
+            (layout.group_x + layout.group_w * 0.5 - col_mid(col)).abs() < 0.05,
+            "cluster mid {} vs column mid {}",
+            layout.group_x + layout.group_w * 0.5,
+            col_mid(col)
+        );
+        // Icon then text, 4pt gap — not a diamond on the column centerline.
+        assert!(
+            (layout.text_x - (layout.diamond_cx + STRIP_NAME_DIA * 0.5) - STRIP_NAME_GAP).abs()
+                < 0.05
+        );
+        assert!(layout.group_x > STRIP_NAME_PAD + 8.0, "short name must not sit on the left pad");
+        assert!(layout.diamond_cx < layout.text_x);
+    }
+
+    #[test]
+    fn main_name_cluster_is_centered_without_diamond() {
+        let col = Layout::CHANNEL_WIDTH * Layout::MAIN_FACTOR;
+        let layout = StripNameLayout::new(col, "Main", false);
+        assert!(
+            (layout.group_x + layout.group_w * 0.5 - col_mid(col)).abs() < 0.05,
+            "Main mid {} vs column mid {}",
+            layout.group_x + layout.group_w * 0.5,
+            col_mid(col)
+        );
+        assert_eq!(layout.text_x, layout.group_x);
+        assert!(layout.group_x > STRIP_NAME_PAD + 8.0);
+    }
+
+    #[test]
+    fn long_name_uses_full_inner_width() {
+        let col = Layout::CHANNEL_WIDTH;
+        let layout = StripNameLayout::new(col, "EffectRack 2", true);
+        let inner = col - STRIP_NAME_PAD * 2.0;
+        assert!(layout.group_x >= STRIP_NAME_PAD - 0.05);
+        assert!(layout.group_x + layout.group_w <= STRIP_NAME_PAD + inner + 0.05);
+        assert!(layout.text_w + STRIP_NAME_DIA + STRIP_NAME_GAP <= inner + 0.05);
+    }
+
+    #[test]
+    fn strip_name_label_paints_centered_diamond_cluster() {
+        let mut cmds = Vec::new();
+        let col = Layout::CHANNEL_WIDTH;
+        strip_name_label(
+            &mut cmds,
+            Rect { x: 40.0, y: 10.0, w: col, h: Layout::NAME_ROW },
+            "EMU",
+            StripNameStyle { diamond: true, dim: false, color: None },
+        );
+        let layout = StripNameLayout::new(col, "EMU", true);
+        let diamond = cmds.iter().find_map(|c| match c {
+            DrawCmd::Line { a, .. } => Some(a.0),
+            _ => None,
+        });
+        let text_x = cmds.iter().find_map(|c| match c {
+            DrawCmd::Text(t) => Some(t.rect.x),
+            _ => None,
+        });
+        let Some(line_x) = diamond else { panic!("expected diamond strokes") };
+        let Some(text_x) = text_x else { panic!("expected name text") };
+        assert!((line_x - (40.0 + layout.diamond_cx)).abs() < STRIP_NAME_DIA);
+        assert!((text_x - (40.0 + layout.text_x)).abs() < 0.05);
+        assert!(text_x > 40.0 + STRIP_NAME_PAD + STRIP_NAME_DIA);
     }
 }

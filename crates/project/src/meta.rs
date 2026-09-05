@@ -33,6 +33,9 @@ pub struct ProjectMeta {
     pub selected_lane: Option<MixLane>,
     #[serde(default)]
     pub take_start_frames: HashMap<String, i64>,
+    /// Display titles for takes. WAV filenames stay `{N}-ch-…`.
+    #[serde(default)]
+    pub take_names: HashMap<String, String>,
     #[serde(default = "default_true")]
     pub grid_enabled: bool,
     #[serde(default)]
@@ -67,6 +70,7 @@ impl Default for ProjectMeta {
             arrangement: None,
             selected_lane: None,
             take_start_frames: HashMap::new(),
+            take_names: HashMap::new(),
             grid_enabled: true,
             grid: MixGrid::Bar1,
             pixels_per_bar: 48.0,
@@ -90,6 +94,26 @@ impl ProjectMeta {
     pub fn set_take_start_frame(&mut self, number: i32, frame: i64) {
         self.take_start_frames.insert(number.to_string(), frame.max(0));
     }
+
+    pub fn take_name(&self, number: i32) -> Option<&str> {
+        self.take_names.get(&number.to_string()).map(String::as_str).filter(|s| !s.is_empty())
+    }
+
+    pub fn set_take_name(&mut self, number: i32, name: impl Into<String>) {
+        let name = name.into().trim().to_string();
+        if name.is_empty() {
+            self.take_names.remove(&number.to_string());
+        } else {
+            self.take_names.insert(number.to_string(), name);
+        }
+    }
+
+    pub fn take_title(number: i32, name: Option<&str>) -> String {
+        match name.filter(|s| !s.is_empty()) {
+            Some(name) => name.to_string(),
+            None => format!("Take {number}"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -108,5 +132,16 @@ mod tests {
         assert_eq!(meta.take_start_frame(7), 48_000);
         meta.set_take_start_frame(7, 0);
         assert_eq!(mix.start_frame, 96_000);
+    }
+
+    #[test]
+    fn take_display_name_does_not_touch_empty() {
+        let mut meta = ProjectMeta::default();
+        assert_eq!(ProjectMeta::take_title(7, meta.take_name(7)), "Take 7");
+        meta.set_take_name(7, "  Kick stem  ");
+        assert_eq!(meta.take_name(7), Some("Kick stem"));
+        assert_eq!(ProjectMeta::take_title(7, meta.take_name(7)), "Kick stem");
+        meta.set_take_name(7, "   ");
+        assert_eq!(meta.take_name(7), None);
     }
 }

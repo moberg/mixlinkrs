@@ -1,6 +1,6 @@
 use analog::ReturnLane;
 
-use crate::arrangement::{self, ArrangementLayout, HEADER_W, RULER_H, TIME_RULER_H, TRACK_H};
+use crate::arrangement::{self, ArrangementLayout, HEADER_W, RULER_H, TIME_RULER_H};
 use crate::mixer::{self, MixerLayout, StripKind};
 use crate::theme::Layout;
 use crate::widgets;

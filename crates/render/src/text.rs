@@ -110,7 +110,7 @@ impl TextSystem {
             if single_line {
                 buffer.set_wrap(&mut self.font_system, Wrap::None);
             }
-            let attrs = ui_text_attrs(cmd.bold, cmd.monospaced);
+            let attrs = ui_text_attrs(cmd.bold, cmd.monospaced, cmd.italic);
             buffer.set_text(&mut self.font_system, &cmd.text, attrs, Shaping::Advanced);
             buffer.shape_until_scroll(&mut self.font_system, false);
             if single_line {
@@ -261,10 +261,11 @@ fn truncate_tail_ellipsis(
 
 /// MixLink `.font(.system(size:weight:design:))` — SF via SansSerif, SF Mono
 /// via Monospace. Semibold (not extra-bold) when `bold` is set.
-fn ui_text_attrs(bold: bool, monospaced: bool) -> Attrs<'static> {
+fn ui_text_attrs(bold: bool, monospaced: bool, italic: bool) -> Attrs<'static> {
     Attrs::new()
         .family(if monospaced { Family::Monospace } else { Family::SansSerif })
         .weight(if bold { Weight::SEMIBOLD } else { Weight::NORMAL })
+        .style(if italic { Style::Italic } else { Style::Normal })
 }
 
 /// cosmic-text defaults sans-serif to "Fira Sans". On macOS MixLink uses the
@@ -434,7 +435,12 @@ pub fn measure_text(system: &mut TextSystem, text: &str, size: f32) -> f32 {
     let metrics = Metrics::new(size, size * 1.25);
     let mut buffer = Buffer::new(&mut system.font_system, metrics);
     buffer.set_size(&mut system.font_system, Some(10_000.0), Some(size * 2.0));
-    buffer.set_text(&mut system.font_system, text, ui_text_attrs(false, false), Shaping::Advanced);
+    buffer.set_text(
+        &mut system.font_system,
+        text,
+        ui_text_attrs(false, false, false),
+        Shaping::Advanced,
+    );
     buffer.shape_until_scroll(&mut system.font_system, false);
     longest_line_w(&buffer)
 }
@@ -467,7 +473,7 @@ mod tests {
         if single_line {
             buffer.set_wrap(&mut font_system, Wrap::None);
         }
-        let attrs = ui_text_attrs(false, false);
+        let attrs = ui_text_attrs(false, false, false);
         buffer.set_text(&mut font_system, text, attrs, Shaping::Advanced);
         buffer.shape_until_scroll(&mut font_system, false);
         if single_line {
@@ -489,7 +495,7 @@ mod tests {
                 "{name} must stay on one line"
             );
         }
-        // Main uses the full inner width.
+        // Main has no diamond; the cluster still fits the padded inner width.
         assert_eq!(prepare_line_count("Main", 100.0 - 4.0, line_h, font), 1);
     }
 
@@ -547,7 +553,7 @@ mod tests {
         if single_line {
             buffer.set_wrap(font_system, Wrap::None);
         }
-        let attrs = ui_text_attrs(false, false);
+        let attrs = ui_text_attrs(false, false, false);
         buffer.set_text(font_system, text, attrs, Shaping::Advanced);
         buffer.shape_until_scroll(font_system, false);
         if single_line {

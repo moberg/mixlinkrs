@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use analog::{EffectRef, MixerBus};
 use engine_api::UiCommand;
-use project::{MixGrid, ProjectStore};
+use project::{MixGrid, ProjectMeta, ProjectStore};
 use render::Rect;
 use ui_mixlink::chrome::{self};
 use ui_mixlink::mixer::{self, MixerLayout, StripKind};
@@ -15,7 +15,6 @@ use ui_mixlink::widgets::MenuItem;
 use winit::event_loop::ActiveEventLoop;
 
 use crate::menu_action::MenuAction;
-use crate::mix_doc::project_parts;
 use crate::state::{AppState, Chrome};
 
 impl AppState {
@@ -41,37 +40,42 @@ impl AppState {
                     self.chrome.menu_action = None;
                     return true;
                 }
+                let switching = matches!(self.chrome.menu_action, Some(MenuAction::SwitchProject));
                 self.chrome.overlay = None;
                 self.chrome.menu_action = None;
                 self.chrome.text_focus = TextFocus::None;
+                if switching {
+                    let now = Instant::now();
+                    let double = self
+                        .chrome
+                        .last_click
+                        .map(|(t, lx, ly)| {
+                            t.elapsed().as_millis() < 350 && (x - lx).hypot(y - ly) < 4.0
+                        })
+                        .unwrap_or(false);
+                    self.chrome.last_click = Some((now, x, y));
+                    if double
+                        && matches!(
+                            chrome::hit_chrome(self.chrome.page, w, h, x, y),
+                            Some(
+                                chrome::ChromeHit::ProjectSelector | chrome::ChromeHit::ProjectMenu
+                            )
+                        )
+                    {
+                        self.begin_rename_project();
+                    }
+                }
                 true
             }
-            Overlay::Settings => {
-                let hits = overlay::settings_hits(w, h);
-                if !overlay::contains(hits.panel, x, y) {
-                    self.chrome.overlay = None;
-                    self.chrome.menu_action = None;
-                    self.chrome.text_focus = TextFocus::None;
-                    return true;
-                }
-                if overlay::contains(hits.post_fader, x, y) {
-                    let on = !self.surface.analog.config.sends_post_fader;
-                    self.surface.analog.set_sends_post_fader(on);
-                } else if overlay::contains(hits.hardware_strips, x, y) {
-                    let on = !self.surface.analog.config.hardware_strips;
-                    self.surface.analog.set_hardware_strips(on);
-                } else if overlay::contains(hits.osc_host, x, y) {
-                    self.chrome.text_focus = TextFocus::OscHost;
-                } else if overlay::contains(hits.osc_send, x, y) {
-                    self.chrome.text_focus = TextFocus::OscSend;
-                } else if overlay::contains(hits.osc_listen, x, y) {
-                    self.chrome.text_focus = TextFocus::OscListen;
-                } else if overlay::contains(hits.midi, x, y) {
-                    self.chrome.text_focus = TextFocus::MidiNeedle;
-                } else if overlay::contains(hits.apply, x, y) {
-                    self.apply_settings();
-                }
-                true
+        }
+    }
+
+    pub(crate) fn choose_projects_root(&mut self) {
+        if let Some(path) = crate::native::pick_projects_folder() {
+            if let Some(data) = ProjectStore::bookmark_for(&path) {
+                self.surface.analog.config.projects_root_bookmark = Some(data);
+                self.surface.analog.persist();
+                self.reload_mix();
             }
         }
     }
@@ -134,33 +138,16 @@ impl AppState {
                 vst3_host::slot_set_bypass(id as u32, on);
             }
             SidebarHit::PluginPlayback(id) => self.open_playback_menu(id, anchor),
-            SidebarHit::ProjectsFolder => {
-                if let Some(path) = crate::native::pick_projects_folder() {
-                    if let Some(data) = ProjectStore::bookmark_for(&path) {
-                        self.surface.analog.config.projects_root_bookmark = Some(data);
-                        self.surface.analog.persist();
-                        self.reload_mix();
-                    }
-                }
-            }
-            SidebarHit::ProjectName => self.chrome.text_focus = TextFocus::ProjectName,
-            SidebarHit::NewProject => {
-                if let Err(e) = self.session.project.create_project(&mut self.surface.analog.config)
-                {
-                    log::warn!("new project: {e}");
-                } else {
-                    self.surface.analog.persist();
-                    self.reload_mix();
-                }
-            }
-            SidebarHit::MixOut => self.open_output_menu(MenuAction::MixOut, anchor),
             SidebarHit::AudioDevice => self.open_device_menu(anchor),
             SidebarHit::AudioBuffer => self.open_buffer_menu(anchor),
             SidebarHit::Channels => self.chrome.open_or_focus_channels(event_loop),
             SidebarHit::Settings => {
-                self.chrome.overlay = Some(Overlay::Settings);
+                self.chrome.overlay = None;
                 self.chrome.menu_action = None;
-                self.chrome.text_focus = TextFocus::None;
+                if overlay::settings_text_focus(&self.chrome.text_focus) {
+                    self.chrome.text_focus = TextFocus::None;
+                }
+                self.chrome.open_or_focus_settings(event_loop);
             }
             SidebarHit::AddInsert => self.add_insert(),
             SidebarHit::RemoveInsert(id) => {
@@ -205,9 +192,30 @@ impl AppState {
 
 impl Chrome {
     pub(crate) fn place_menu(&mut self, anchor: Rect, items: Vec<MenuItem>, action: MenuAction) {
+        if let Some(ch) = self.channels.as_mut() {
+            ch.menu = None;
+        }
         let (w, h) = self.renderer.logical_size();
         let rect = overlay::layout_popup(anchor, &items, w, h);
         self.overlay = Some(Overlay::Menu { rect, items });
+        self.menu_action = Some(action);
+    }
+
+    pub(crate) fn place_channels_menu(
+        &mut self,
+        anchor: Rect,
+        items: Vec<MenuItem>,
+        action: MenuAction,
+    ) {
+        let (w, h) = match self.channels.as_ref() {
+            Some(ch) => ch.renderer.logical_size(),
+            None => return,
+        };
+        let rect = overlay::layout_popup_window(anchor, &items, w, h);
+        if let Some(ch) = self.channels.as_mut() {
+            ch.menu = Some(Overlay::Menu { rect, items });
+        }
+        self.overlay = None;
         self.menu_action = Some(action);
     }
 }
@@ -276,6 +284,16 @@ impl AppState {
     }
 
     pub(crate) fn open_output_menu(&mut self, action: MenuAction, anchor: Rect) {
+        let items = self.output_menu_items(&action);
+        self.chrome.place_menu(anchor, items, action);
+    }
+
+    pub(crate) fn open_channels_mix_out_menu(&mut self, anchor: Rect) {
+        let items = self.output_menu_items(&MenuAction::MixOut);
+        self.chrome.place_channels_menu(anchor, items, MenuAction::MixOut);
+    }
+
+    fn output_menu_items(&self, action: &MenuAction) -> Vec<MenuItem> {
         let current = match action {
             MenuAction::MixOut => Some(self.surface.analog.config.main_output),
             MenuAction::HardwareOutput { id } => self
@@ -284,12 +302,11 @@ impl AppState {
                 .config
                 .hardware_effects
                 .iter()
-                .find(|e| e.id == id)
+                .find(|e| e.id == *id)
                 .map(|e| e.output),
             _ => None,
         };
-        let items: Vec<MenuItem> = self
-            .surface
+        self.surface
             .analog
             .mixer
             .strips(MixerBus::Output)
@@ -300,8 +317,7 @@ impl AppState {
                 checked: current == Some(ch.id.index),
                 section: None,
             })
-            .collect();
-        self.chrome.place_menu(anchor, items, action);
+            .collect()
     }
 
     pub(crate) fn open_input_menu(&mut self, action: MenuAction, anchor: Rect) {
@@ -396,6 +412,79 @@ impl AppState {
         self.chrome.place_menu(chrome::grid_step_rect(), items, MenuAction::Grid);
     }
 
+    pub(crate) fn open_project_menu(&mut self) {
+        let current = ProjectStore::display_name(&self.surface.analog.config);
+        let items: Vec<MenuItem> = ProjectStore::list_projects(&self.surface.analog.config)
+            .into_iter()
+            .map(|name| MenuItem {
+                id: name.clone(),
+                label: name.clone(),
+                checked: current == name,
+                section: None,
+            })
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        let (w, _) = self.chrome.renderer.logical_size();
+        self.chrome.place_menu(
+            chrome::project_selector_rect(self.chrome.page, w),
+            items,
+            MenuAction::SwitchProject,
+        );
+    }
+
+    pub(crate) fn reveal_current_project(&mut self) {
+        let config = &self.surface.analog.config;
+        let path = ProjectStore::current_url(config).or_else(|| ProjectStore::resolve_root(config));
+        if let Some(path) = path {
+            crate::native::reveal_in_finder(&path);
+        }
+    }
+
+    pub(crate) fn create_new_project(&mut self) {
+        self.persist_project_meta();
+        if self.chrome.page == ui_mixlink::chrome::Page::Mix {
+            self.persist_mix();
+        }
+        if let Err(e) = self.session.project.create_project(&mut self.surface.analog.config) {
+            log::warn!("new project: {e}");
+        } else {
+            self.surface.analog.persist();
+            self.reload_mix();
+        }
+    }
+
+    pub(crate) fn switch_project(&mut self, name: &str) {
+        if name.is_empty() {
+            return;
+        }
+        if self.surface.analog.config.current_project_relative.as_deref() == Some(name) {
+            return;
+        }
+        self.persist_project_meta();
+        if self.chrome.page == ui_mixlink::chrome::Page::Mix {
+            self.persist_mix();
+        }
+        self.surface.analog.config.current_project_relative = Some(name.to_string());
+        self.surface.analog.persist();
+        self.reload_mix();
+    }
+
+    pub(crate) fn begin_rename_project(&mut self) {
+        let Some(name) = self.surface.analog.config.current_project_relative.clone() else {
+            return;
+        };
+        if name.is_empty() {
+            return;
+        }
+        self.chrome.text_focus = TextFocus::ProjectName;
+        self.chrome.edit_buf = name;
+        self.chrome.edit_replace = true;
+        self.chrome.caret_on = true;
+        self.chrome.caret_at = Instant::now();
+    }
+
     pub(crate) fn open_buffer_menu(&mut self, anchor: Rect) {
         let current = self.surface.analog.config.audio_buffer_frames.unwrap_or(64);
         let items: Vec<MenuItem> = [32, 64, 128, 256, 512]
@@ -412,21 +501,8 @@ impl AppState {
 
     pub(crate) fn edit_focus(&mut self, f: impl FnOnce(&mut String)) {
         match self.chrome.text_focus {
-            TextFocus::Tempo => {
+            TextFocus::Tempo | TextFocus::ProjectName => {
                 f(&mut self.chrome.edit_buf);
-            }
-            TextFocus::ProjectName => {
-                let (_, mut suffix) = project_parts(
-                    self.surface.analog.config.current_project_relative.as_deref().unwrap_or(""),
-                );
-                f(&mut suffix);
-                if let Err(e) =
-                    self.session.project.rename_current(&suffix, &mut self.surface.analog.config)
-                {
-                    log::warn!("rename: {e}");
-                } else {
-                    self.surface.analog.persist();
-                }
             }
             TextFocus::HardwareName(id) => {
                 let mut name = self
@@ -481,6 +557,9 @@ impl AppState {
                 f(&mut self.surface.analog.config.midi_device_contains);
                 self.surface.analog.persist();
             }
+            TextFocus::MixName(_) | TextFocus::TakeName(_) => {
+                f(&mut self.chrome.edit_buf);
+            }
             TextFocus::None => {}
         }
     }
@@ -493,7 +572,19 @@ impl AppState {
                     self.persist_project_meta();
                 }
             }
-            TextFocus::ProjectName => self.reload_mix(),
+            TextFocus::ProjectName => {
+                if let Err(e) = self
+                    .session
+                    .project
+                    .rename_current(&self.chrome.edit_buf, &mut self.surface.analog.config)
+                {
+                    log::warn!("rename: {e}");
+                } else {
+                    self.surface.analog.persist();
+                }
+            }
+            TextFocus::MixName(id) => self.rename_mix(id, self.chrome.edit_buf.clone()),
+            TextFocus::TakeName(n) => self.rename_take(n, self.chrome.edit_buf.clone()),
             _ => {}
         }
         self.chrome.text_focus = TextFocus::None;
@@ -503,6 +594,34 @@ impl AppState {
     pub(crate) fn begin_tempo_edit(&mut self) {
         self.chrome.text_focus = TextFocus::Tempo;
         self.chrome.edit_buf = crate::arrange::format_tempo(self.timeline.tempo);
+        self.chrome.edit_replace = true;
+        self.chrome.caret_on = true;
+        self.chrome.caret_at = Instant::now();
+    }
+
+    pub(crate) fn begin_rename_mix(&mut self, id: uuid::Uuid) {
+        let Some(name) = self.session.mixes.iter().find(|m| m.id == id).map(|m| m.name.clone())
+        else {
+            return;
+        };
+        self.select_mix(id);
+        self.chrome.text_focus = TextFocus::MixName(id);
+        self.chrome.edit_buf = name;
+        self.chrome.edit_replace = true;
+        self.chrome.caret_on = true;
+        self.chrome.caret_at = Instant::now();
+    }
+
+    pub(crate) fn begin_rename_take(&mut self, number: i32) {
+        if !self.session.takes.contains(&number) {
+            return;
+        }
+        self.select_take(number);
+        self.chrome.text_focus = TextFocus::TakeName(number);
+        self.chrome.edit_buf = ProjectMeta::take_title(
+            number,
+            self.session.take_names.get(&number).map(String::as_str),
+        );
         self.chrome.edit_replace = true;
         self.chrome.caret_on = true;
         self.chrome.caret_at = Instant::now();

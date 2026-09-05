@@ -94,6 +94,14 @@ impl AppState {
         }
     }
 
+    fn browser_hit_is_edit_target(&self, hit: ui_mixlink::mix_browser::BrowserHit) -> bool {
+        match (&self.chrome.text_focus, hit) {
+            (TextFocus::MixName(id), ui_mixlink::mix_browser::BrowserHit::Mix(hit)) => *id == hit,
+            (TextFocus::TakeName(n), ui_mixlink::mix_browser::BrowserHit::Take(hit)) => *n == hit,
+            _ => false,
+        }
+    }
+
     pub(crate) fn on_press(&mut self, event_loop: &ActiveEventLoop) {
         let (x, y) = self.chrome.cursor;
         let (w, h) = self.chrome.renderer.logical_size();
@@ -109,20 +117,27 @@ impl AppState {
         {
             self.commit_focus();
         }
+        if self.chrome.text_focus == TextFocus::ProjectName
+            && !matches!(
+                chrome::hit_chrome(self.chrome.page, w, h, x, y),
+                Some(ChromeHit::ProjectSelector)
+            )
+        {
+            self.commit_focus();
+        }
+        if matches!(self.chrome.text_focus, TextFocus::MixName(_) | TextFocus::TakeName(_)) {
+            let keep = ui_mixlink::mix_browser::hit(&self.mix_browser_view(), x, y)
+                .is_some_and(|hit| self.browser_hit_is_edit_target(hit));
+            if !keep {
+                self.commit_focus();
+            }
+        }
 
         if let Some(hit) = chrome::hit_chrome(self.chrome.page, w, h, x, y) {
             match hit {
                 ChromeHit::Play => self.toggle_play(),
                 ChromeHit::Rec => {
                     self.toggle_record();
-                    self.sync_xl_leds(true);
-                }
-                ChromeHit::MuteMode => {
-                    self.surface.analog.surface.toggle_mute_mode();
-                    self.sync_xl_leds(true);
-                }
-                ChromeHit::SoloMode => {
-                    self.surface.analog.surface.toggle_solo_mode();
                     self.sync_xl_leds(true);
                 }
                 ChromeHit::Grid => {
@@ -149,6 +164,30 @@ impl AppState {
                         self.persist_mix();
                     }
                     self.chrome.page = p;
+                }
+                ChromeHit::ProjectSelector | ChromeHit::ProjectMenu => {
+                    if self.chrome.text_focus == TextFocus::ProjectName {
+                        return;
+                    }
+                    let now = Instant::now();
+                    let double = self
+                        .chrome
+                        .last_click
+                        .map(|(t, lx, ly)| {
+                            t.elapsed().as_millis() < 350 && (x - lx).hypot(y - ly) < 4.0
+                        })
+                        .unwrap_or(false);
+                    self.chrome.last_click = Some((now, x, y));
+                    if double {
+                        self.begin_rename_project();
+                    } else {
+                        self.open_project_menu();
+                    }
+                }
+                ChromeHit::RevealProject => self.reveal_current_project(),
+                ChromeHit::NewProject => self.create_new_project(),
+                ChromeHit::TitleDrag => {
+                    let _ = self.chrome.window.drag_window();
                 }
             }
             return;
@@ -211,10 +250,18 @@ impl AppState {
                 }
                 match hit {
                     ui_mixlink::mix_browser::BrowserHit::Mix(id) => {
-                        self.select_mix(id);
+                        if double {
+                            self.begin_rename_mix(id);
+                        } else {
+                            self.select_mix(id);
+                        }
                     }
                     ui_mixlink::mix_browser::BrowserHit::Take(n) => {
-                        self.select_take(n);
+                        if double {
+                            self.begin_rename_take(n);
+                        } else {
+                            self.select_take(n);
+                        }
                     }
                     ui_mixlink::mix_browser::BrowserHit::Mixer => {
                         self.chrome.show_mixer = true;
@@ -672,7 +719,15 @@ impl AppState {
                 true
             }
             Key::Named(NamedKey::Backspace) => {
-                if self.chrome.text_focus == TextFocus::Tempo && self.chrome.edit_replace {
+                if self.chrome.edit_replace
+                    && matches!(
+                        self.chrome.text_focus,
+                        TextFocus::Tempo
+                            | TextFocus::ProjectName
+                            | TextFocus::MixName(_)
+                            | TextFocus::TakeName(_)
+                    )
+                {
                     self.chrome.edit_buf.clear();
                     self.chrome.edit_replace = false;
                 } else {
@@ -687,10 +742,18 @@ impl AppState {
                     if !c.chars().all(|ch| ch.is_ascii_digit() || ch == '.') {
                         return true;
                     }
-                    if self.chrome.edit_replace {
-                        self.chrome.edit_buf.clear();
-                        self.chrome.edit_replace = false;
-                    }
+                }
+                if self.chrome.edit_replace
+                    && matches!(
+                        self.chrome.text_focus,
+                        TextFocus::Tempo
+                            | TextFocus::ProjectName
+                            | TextFocus::MixName(_)
+                            | TextFocus::TakeName(_)
+                    )
+                {
+                    self.chrome.edit_buf.clear();
+                    self.chrome.edit_replace = false;
                 }
                 if c.chars().all(|ch| !ch.is_control()) {
                     let add = c.to_string();

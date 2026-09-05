@@ -74,13 +74,37 @@ impl ProjectStore {
         }
     }
 
-    /// `YYYY-MM-DD - N` for today, then select it.
+    /// Immediate subfolders of the projects root, sorted by name.
+    pub fn list_projects(config: &SessionConfig) -> Vec<String> {
+        let Some(root) = Self::resolve_root(config) else {
+            return Vec::new();
+        };
+        let Ok(entries) = fs::read_dir(&root) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let ft = entry.file_type().ok()?;
+                if !ft.is_dir() {
+                    return None;
+                }
+                let name = entry.file_name().into_string().ok()?;
+                if name.starts_with('.') {
+                    return None;
+                }
+                Some(name)
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Today’s local date (`YYYY-MM-DD`). Collisions become `YYYY-MM-DD-2`, then `-3`.
     pub fn create_project(&self, config: &mut SessionConfig) -> Result<PathBuf, StoreError> {
         let root = Self::resolve_root(config).ok_or(StoreError::NoRoot)?;
         fs::create_dir_all(&root)?;
-        let prefix = today_prefix();
-        let next = next_index(&root, &prefix, None);
-        let name = format!("{prefix} - {next}");
+        let name = unique_dated_name(&root, &today_prefix());
         let url = root.join(&name);
         fs::create_dir_all(&url)?;
         self.save_meta(&ProjectMeta::default(), &url)?;
@@ -88,7 +112,7 @@ impl ProjectStore {
         Ok(url)
     }
 
-    /// Keeps `YYYY-MM-DD - ` and replaces the rest. Empty name restores the numeric suffix.
+    /// Renames the project folder. Empty input is ignored (name unchanged).
     pub fn rename_current(
         &self,
         raw: &str,
@@ -96,23 +120,19 @@ impl ProjectStore {
     ) -> Result<PathBuf, StoreError> {
         let root = Self::resolve_root(config).ok_or(StoreError::NoRoot)?;
         let current = config.current_project_relative.clone().ok_or(StoreError::NoProject)?;
-        let date = date_prefix(&current).unwrap_or_else(today_prefix);
         let trimmed = sanitize_project_name(raw);
-        let next_name = if trimmed.is_empty() {
-            let n = next_index(&root, &date, Some(&current));
-            format!("{date} - {n}")
-        } else {
-            format!("{date} - {trimmed}")
-        };
+        if trimmed.is_empty() {
+            return Ok(root.join(&current));
+        }
         let from = root.join(&current);
-        let to = root.join(&next_name);
+        let to = root.join(&trimmed);
         if from.file_name() != to.file_name() {
             if to.exists() {
                 return Err(StoreError::NameTaken);
             }
             fs::rename(&from, &to)?;
         }
-        config.current_project_relative = Some(next_name);
+        config.current_project_relative = Some(trimmed);
         Ok(to)
     }
 
@@ -338,26 +358,21 @@ fn sanitize_project_name(raw: &str) -> String {
     mapped.trim_matches(|c: char| c == '-' || c.is_whitespace()).into()
 }
 
-fn next_index(root: &Path, prefix: &str, excluding: Option<&str>) -> i32 {
-    let Ok(entries) = fs::read_dir(root) else {
-        return 1;
-    };
-    let mut max_n = 0;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if excluding.is_some_and(|ex| name == ex) {
-            continue;
+fn unique_dated_name(root: &Path, date: &str) -> String {
+    if !root.join(date).exists() {
+        return date.to_string();
+    }
+    let mut n = 2i32;
+    loop {
+        let name = format!("{date}-{n}");
+        if !root.join(&name).exists() {
+            return name;
         }
-        if !name.starts_with(prefix) {
-            continue;
-        }
-        let suffix = name[prefix.len()..].trim_matches(|c: char| c == '-' || c.is_whitespace());
-        if let Ok(n) = suffix.parse::<i32>() {
-            max_n = max_n.max(n);
+        n = n.saturating_add(1);
+        if n > 10_000 {
+            return name;
         }
     }
-    max_n + 1
 }
 
 fn atomic_write(path: &Path, data: &[u8]) -> Result<(), StoreError> {
@@ -475,5 +490,48 @@ mod tests {
         assert_eq!(meta.active_mix_id, Some(id));
         assert_eq!(meta.arrangement, Some(crate::MixArrangement::Take(7)));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn test_config(root: &Path) -> SessionConfig {
+        let mut config = analog::SessionConfig::new();
+        config.projects_root_bookmark = ProjectStore::bookmark_for(root);
+        config
+    }
+
+    #[test]
+    fn create_project_uses_date_then_dash_2() {
+        let root = temp_dir();
+        let mut config = test_config(&root);
+        let store = ProjectStore::new();
+        let date = today_prefix();
+        let first = store.create_project(&mut config).unwrap();
+        assert_eq!(first.file_name().unwrap().to_string_lossy(), date);
+        assert!(first.join("project.json").exists());
+        assert_eq!(config.current_project_relative.as_deref(), Some(date.as_str()));
+        let second = store.create_project(&mut config).unwrap();
+        assert_eq!(second.file_name().unwrap().to_string_lossy(), format!("{date}-2"));
+        let third = store.create_project(&mut config).unwrap();
+        assert_eq!(third.file_name().unwrap().to_string_lossy(), format!("{date}-3"));
+        let listed = ProjectStore::list_projects(&config);
+        assert_eq!(listed, vec![date.clone(), format!("{date}-2"), format!("{date}-3")]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rename_current_ignores_empty_and_renames_folder() {
+        let root = temp_dir();
+        let mut config = test_config(&root);
+        let store = ProjectStore::new();
+        let created = store.create_project(&mut config).unwrap();
+        let original = created.file_name().unwrap().to_string_lossy().into_owned();
+        let same = store.rename_current("   ", &mut config).unwrap();
+        assert_eq!(same.file_name().unwrap().to_string_lossy(), original);
+        assert!(created.exists());
+        let renamed = store.rename_current("  Night session  ", &mut config).unwrap();
+        assert_eq!(renamed.file_name().unwrap().to_string_lossy(), "Night session");
+        assert!(!created.exists());
+        assert!(renamed.join("project.json").exists());
+        assert_eq!(config.current_project_relative.as_deref(), Some("Night session"));
+        let _ = fs::remove_dir_all(&root);
     }
 }

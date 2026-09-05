@@ -46,6 +46,8 @@ pub struct TextCmd {
     pub h_align: Align,
     pub v_align: Align,
     pub bold: bool,
+    /// MixLink `.italic()` / cosmic-text `Style::Italic`.
+    pub italic: bool,
     /// MixLink `.font(.system(..., design: .monospaced))`.
     pub monospaced: bool,
     /// Optional tighter clip rectangle. When set, the text renderer uses this

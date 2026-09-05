@@ -5,6 +5,9 @@ use crate::theme::{self, Layout};
 use crate::widgets;
 
 pub const HEADER_H: f32 = 36.0;
+/// Left inset so TEMPO / transport sit clear of the macOS traffic lights when
+/// the header is painted under a transparent titlebar.
+pub const HEADER_TRAFFIC_INSET: f32 = 78.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
@@ -27,9 +30,8 @@ pub struct ChromeState<'a> {
     pub osc_status: String,
     pub midi_status: String,
     pub last_midi: String,
-    pub mute_mode: bool,
-    pub solo_mode: bool,
     pub project_name: String,
+    pub project_active: bool,
     pub focus: &'a TextFocus,
     pub caret: bool,
 }
@@ -59,10 +61,11 @@ fn paint_header(cmds: &mut Vec<DrawCmd>, state: &ChromeState<'_>, w: f32) {
         theme::SurfaceStyle::Sidebar,
     );
     theme::seam_h(cmds, 0.0, HEADER_H - 2.0, w, true);
-    widgets::recessed_field(cmds, tempo_well_rect());
+    let tempo = tempo_well_rect();
+    widgets::recessed_field(cmds, tempo);
     theme::text(
         cmds,
-        Rect { x: 14.0, y: 8.0, w: 42.0, h: 20.0 },
+        Rect { x: tempo.x + 6.0, y: 8.0, w: 42.0, h: 20.0 },
         "TEMPO",
         9.0,
         theme::SECONDARY_TEXT,
@@ -85,14 +88,14 @@ fn paint_header(cmds: &mut Vec<DrawCmd>, state: &ChromeState<'_>, w: f32) {
     theme::text_mono(cmds, tempo_val, tempo_shown, 13.0, theme::TEXT, true);
     theme::text(
         cmds,
-        Rect { x: 114.0, y: 8.0, w: 28.0, h: 20.0 },
+        Rect { x: tempo.x + 106.0, y: 8.0, w: 28.0, h: 20.0 },
         "BPM",
         10.0,
         theme::TEXT_DIM,
         false,
     );
     if state.page == Page::Mix {
-        let mut x = 150.0;
+        let mut x = MIX_PLAY_X;
         widgets::hardware_pad(
             cmds,
             Rect { x, y: 6.0, w: 72.0, h: 24.0 },
@@ -153,23 +156,30 @@ fn paint_header(cmds: &mut Vec<DrawCmd>, state: &ChromeState<'_>, w: f32) {
             theme::BLUE,
         );
     } else {
-        let (mute, solo, rec) = record_mode_rects();
-        widgets::hardware_pad(cmds, mute, "Mute", state.mute_mode, theme::AMBER);
-        widgets::hardware_pad(cmds, solo, "Solo", state.solo_mode, theme::AMBER);
+        let rec = record_rec_rect();
         widgets::hardware_pad(cmds, rec, "Rec", state.recording, theme::METER_RED);
     }
+    let (selector, folder_btn, new_btn) = project_cluster_rects(state.page, w);
+    if *state.focus == TextFocus::ProjectName {
+        widgets::text_field(cmds, selector, &state.project_name, true, state.caret);
+    } else {
+        let label =
+            if state.project_name.is_empty() { "No project" } else { state.project_name.as_str() };
+        widgets::chrome_menu_pad(cmds, selector, label, state.project_active);
+    }
+    widgets::folder_icon_pad(cmds, folder_btn, true);
+    widgets::icon_pad(cmds, new_btn, "+", true);
     let (record, mix) = page_tab_rects(w);
     widgets::hardware_pad(cmds, record, "Record", state.page == Page::Record, theme::PRIMARY_TEXT);
     widgets::hardware_pad(cmds, mix, "Mix", state.page == Page::Mix, theme::PRIMARY_TEXT);
 }
 
-const MIX_PLAY_X: f32 = 150.0;
+const MIX_PLAY_X: f32 = HEADER_TRAFFIC_INSET + 142.0;
 const MIX_GRID_X: f32 = MIX_PLAY_X + 78.0 + 86.0;
 const MIX_STEP_X: f32 = MIX_GRID_X + 60.0;
 const MIX_STEP_GAP: f32 = 62.0;
-const REC_MODE_X: f32 = 150.0;
+const REC_MODE_X: f32 = HEADER_TRAFFIC_INSET + 142.0;
 const REC_PAD_W: f32 = 64.0;
-const REC_PAD_GAP: f32 = 6.0;
 
 /// MixLink grid-resolution well next to the Grid pad.
 pub fn grid_step_rect() -> Rect {
@@ -178,18 +188,15 @@ pub fn grid_step_rect() -> Rect {
 
 /// MixLink tempo well: label + value + BPM. Drag or click anywhere on it.
 pub fn tempo_well_rect() -> Rect {
-    Rect { x: 8.0, y: 6.0, w: 136.0, h: 24.0 }
+    Rect { x: HEADER_TRAFFIC_INSET, y: 6.0, w: 136.0, h: 24.0 }
 }
 
 fn tempo_value_rect() -> Rect {
-    Rect { x: 56.0, y: 6.0, w: 56.0, h: 24.0 }
+    Rect { x: HEADER_TRAFFIC_INSET + 48.0, y: 6.0, w: 56.0, h: 24.0 }
 }
 
-fn record_mode_rects() -> (Rect, Rect, Rect) {
-    let mute = Rect { x: REC_MODE_X, y: 6.0, w: REC_PAD_W, h: 24.0 };
-    let solo = Rect { x: mute.x + REC_PAD_W + REC_PAD_GAP, y: 6.0, w: REC_PAD_W, h: 24.0 };
-    let rec = Rect { x: solo.x + REC_PAD_W + REC_PAD_GAP, y: 6.0, w: REC_PAD_W, h: 24.0 };
-    (mute, solo, rec)
+fn record_rec_rect() -> Rect {
+    Rect { x: REC_MODE_X, y: 6.0, w: REC_PAD_W, h: 24.0 }
 }
 
 fn page_tab_rects(w: f32) -> (Rect, Rect) {
@@ -199,6 +206,51 @@ fn page_tab_rects(w: f32) -> (Rect, Rect) {
     let mix = Rect { x: w - PAD - TAB_W, y: 6.0, w: TAB_W, h: 24.0 };
     let record = Rect { x: mix.x - GAP - TAB_W, y: 6.0, w: TAB_W, h: 24.0 };
     (record, mix)
+}
+
+/// Square plus / folder pads, same height as RECORD/MIX.
+const PROJECT_NEW_W: f32 = 24.0;
+const PROJECT_FOLDER_W: f32 = PROJECT_NEW_W;
+const PROJECT_SEL_MAX_W: f32 = 188.0;
+const PROJECT_SEL_MIN_W: f32 = 96.0;
+const PROJECT_CHEVRON_HIT_W: f32 = 22.0;
+const PAGE_TAB_GAP: f32 = 6.0;
+/// Phantom square pad (same as + / folder) plus the same tab gaps that
+/// would sit on either side of it.
+const PROJECT_PAGE_GAP: f32 = PAGE_TAB_GAP + PROJECT_NEW_W + PAGE_TAB_GAP;
+
+fn mix_controls_right() -> f32 {
+    grid_step_rect().x + MIX_STEP_GAP + 70.0 + 78.0 + 78.0 + 80.0
+}
+
+fn record_mode_right() -> f32 {
+    let rec = record_rec_rect();
+    rec.x + rec.w
+}
+
+/// Dropdown + folder + New, left of RECORD with a grouping gap before the page tabs.
+pub fn project_cluster_rects(page: Page, w: f32) -> (Rect, Rect, Rect) {
+    let (record, _) = page_tab_rects(w);
+    let new_btn =
+        Rect { x: record.x - PROJECT_PAGE_GAP - PROJECT_NEW_W, y: 6.0, w: PROJECT_NEW_W, h: 24.0 };
+    let folder_btn = Rect {
+        x: new_btn.x - PAGE_TAB_GAP - PROJECT_FOLDER_W,
+        y: 6.0,
+        w: PROJECT_FOLDER_W,
+        h: 24.0,
+    };
+    let left_limit = match page {
+        Page::Mix => mix_controls_right() + PAGE_TAB_GAP,
+        Page::Record => record_mode_right() + PAGE_TAB_GAP,
+    };
+    let avail = (folder_btn.x - PAGE_TAB_GAP - left_limit).max(PROJECT_SEL_MIN_W);
+    let sel_w = avail.min(PROJECT_SEL_MAX_W);
+    let selector = Rect { x: folder_btn.x - PAGE_TAB_GAP - sel_w, y: 6.0, w: sel_w, h: 24.0 };
+    (selector, folder_btn, new_btn)
+}
+
+pub fn project_selector_rect(page: Page, w: f32) -> Rect {
+    project_cluster_rects(page, w).0
 }
 
 fn paint_footer(cmds: &mut Vec<DrawCmd>, state: &ChromeState<'_>, w: f32, h: f32) {
@@ -251,6 +303,19 @@ pub fn hit_chrome(page: Page, w: f32, _h: f32, x: f32, y: f32) -> Option<ChromeH
         if x >= mix.x && x < mix.x + mix.w {
             return Some(ChromeHit::Page(Page::Mix));
         }
+        let (selector, folder_btn, new_btn) = project_cluster_rects(page, w);
+        if widgets::contains(new_btn, x, y) {
+            return Some(ChromeHit::NewProject);
+        }
+        if widgets::contains(folder_btn, x, y) {
+            return Some(ChromeHit::RevealProject);
+        }
+        if widgets::contains(selector, x, y) {
+            if x >= selector.x + selector.w - PROJECT_CHEVRON_HIT_W {
+                return Some(ChromeHit::ProjectMenu);
+            }
+            return Some(ChromeHit::ProjectSelector);
+        }
         if page == Page::Mix {
             let mut bx = MIX_PLAY_X;
             if x >= bx && x < bx + 72.0 {
@@ -281,18 +346,12 @@ pub fn hit_chrome(page: Page, w: f32, _h: f32, x: f32, y: f32) -> Option<ChromeH
                 return Some(ChromeHit::Export);
             }
         } else {
-            let (mute, solo, rec) = record_mode_rects();
-            if widgets::contains(mute, x, y) {
-                return Some(ChromeHit::MuteMode);
-            }
-            if widgets::contains(solo, x, y) {
-                return Some(ChromeHit::SoloMode);
-            }
+            let rec = record_rec_rect();
             if widgets::contains(rec, x, y) {
                 return Some(ChromeHit::Rec);
             }
         }
-        return None;
+        return Some(ChromeHit::TitleDrag);
     }
     None
 }
@@ -308,9 +367,13 @@ pub enum ChromeHit {
     Knobs,
     Inserts,
     Export,
-    MuteMode,
-    SoloMode,
     Rec,
+    ProjectSelector,
+    ProjectMenu,
+    RevealProject,
+    NewProject,
+    /// Empty header chrome — `Window::drag_window` from the app shell.
+    TitleDrag,
 }
 
 #[cfg(test)]
@@ -341,11 +404,14 @@ mod tests {
     #[test]
     fn mix_inserts_toggle_hits() {
         let w = 1400.0;
-        let mut x = 150.0;
+        let mut x = MIX_PLAY_X;
         x += 78.0 + 86.0 + 60.0 + 62.0 + 70.0 + 78.0;
         let hit = hit_chrome(Page::Mix, w, 900.0, x + 4.0, 10.0);
         assert!(matches!(hit, Some(ChromeHit::Inserts)), "{hit:?}");
-        assert!(hit_chrome(Page::Record, w, 900.0, x + 4.0, 10.0).is_none());
+        assert!(matches!(
+            hit_chrome(Page::Record, w, 900.0, x + 4.0, 10.0),
+            Some(ChromeHit::TitleDrag)
+        ));
     }
 
     #[test]
@@ -362,24 +428,23 @@ mod tests {
     }
 
     #[test]
-    fn record_mode_pads_hit_in_the_header() {
+    fn record_rec_pad_hits_in_the_header() {
         let w = 1400.0;
         let h = 900.0;
-        let (mute, solo, rec) = record_mode_rects();
-        assert!(matches!(
-            hit_chrome(Page::Record, w, h, mute.x + 4.0, 12.0),
-            Some(ChromeHit::MuteMode)
-        ));
-        assert!(matches!(
-            hit_chrome(Page::Record, w, h, solo.x + 4.0, 12.0),
-            Some(ChromeHit::SoloMode)
-        ));
+        let rec = record_rec_rect();
         assert!(matches!(hit_chrome(Page::Record, w, h, rec.x + 4.0, 12.0), Some(ChromeHit::Rec)));
-        assert!(!matches!(
-            hit_chrome(Page::Mix, w, h, mute.x + 4.0, 12.0),
-            Some(ChromeHit::MuteMode | ChromeHit::SoloMode | ChromeHit::Rec)
+        assert!(matches!(
+            hit_chrome(Page::Record, w, h, rec.x + rec.w - 4.0, 12.0),
+            Some(ChromeHit::Rec)
         ));
-        assert!(hit_chrome(Page::Record, w, h, mute.x + 4.0, h - 12.0).is_none());
+        // Former MUTE/SOLO slots sit after REC and must not fire leftover hits.
+        let leftover_x = rec.x + rec.w + 8.0;
+        assert!(matches!(
+            hit_chrome(Page::Record, w, h, leftover_x, 12.0),
+            Some(ChromeHit::TitleDrag)
+        ));
+        assert!(!matches!(hit_chrome(Page::Mix, w, h, rec.x + 4.0, 12.0), Some(ChromeHit::Rec)));
+        assert!(hit_chrome(Page::Record, w, h, rec.x + 4.0, h - 12.0).is_none());
     }
 
     #[test]
@@ -390,6 +455,59 @@ mod tests {
         assert!(matches!(
             hit_chrome(Page::Mix, 1400.0, 900.0, MIX_GRID_X + 8.0, 12.0),
             Some(ChromeHit::Grid)
+        ));
+    }
+
+    #[test]
+    fn project_cluster_sits_left_of_record_and_does_not_steal_tabs() {
+        let w = 1400.0;
+        let (record, mix) = page_tab_rects(w);
+        let (selector, folder_btn, new_btn) = project_cluster_rects(Page::Record, w);
+        assert!((folder_btn.x - (selector.x + selector.w) - PAGE_TAB_GAP).abs() < 0.01);
+        assert!((new_btn.x - (folder_btn.x + folder_btn.w) - PAGE_TAB_GAP).abs() < 0.01);
+        assert!((record.x - (new_btn.x + new_btn.w) - PROJECT_PAGE_GAP).abs() < 0.01);
+        assert!(matches!(
+            hit_chrome(Page::Record, w, 900.0, selector.x + 8.0, 12.0),
+            Some(ChromeHit::ProjectSelector)
+        ));
+        assert!(matches!(
+            hit_chrome(Page::Record, w, 900.0, selector.x + selector.w - 6.0, 12.0),
+            Some(ChromeHit::ProjectMenu)
+        ));
+        assert!(matches!(
+            hit_chrome(Page::Mix, w, 900.0, folder_btn.x + 8.0, 12.0),
+            Some(ChromeHit::RevealProject)
+        ));
+        assert!(matches!(
+            hit_chrome(Page::Mix, w, 900.0, new_btn.x + 8.0, 12.0),
+            Some(ChromeHit::NewProject)
+        ));
+        let gap_x = new_btn.x + new_btn.w + PROJECT_PAGE_GAP * 0.5;
+        assert!(matches!(
+            hit_chrome(Page::Record, w, 900.0, gap_x, 12.0),
+            Some(ChromeHit::TitleDrag)
+        ));
+        assert!(matches!(
+            hit_chrome(Page::Record, w, 900.0, record.x + 4.0, 12.0),
+            Some(ChromeHit::Page(Page::Record))
+        ));
+        assert!(matches!(
+            hit_chrome(Page::Mix, w, 900.0, mix.x + 4.0, 12.0),
+            Some(ChromeHit::Page(Page::Mix))
+        ));
+        assert!(selector.x >= mix_controls_right());
+    }
+
+    #[test]
+    fn header_controls_clear_traffic_lights() {
+        let well = tempo_well_rect();
+        assert!(well.x >= HEADER_TRAFFIC_INSET);
+        let rec = record_rec_rect();
+        assert!(rec.x > well.x + well.w);
+        assert!(rec.x >= HEADER_TRAFFIC_INSET + 60.0);
+        assert!(matches!(
+            hit_chrome(Page::Record, 1400.0, 900.0, HEADER_TRAFFIC_INSET * 0.5, 12.0),
+            Some(ChromeHit::TitleDrag)
         ));
     }
 }

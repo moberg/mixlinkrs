@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use ui_mixlink::overlay::{self, TextFocus};
+use ui_mixlink::overlay::{self, ChannelsHit, Overlay, TextFocus};
 use winit::dpi::LogicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
@@ -43,13 +43,17 @@ impl Chrome {
         renderer.set_ui_zoom(zoom);
         window.focus_window();
         window.request_redraw();
-        self.channels = Some(ChannelsWindow { renderer, window, cursor: (0.0, 0.0), scroll: 0.0 });
+        self.channels =
+            Some(ChannelsWindow { renderer, window, cursor: (0.0, 0.0), scroll: 0.0, menu: None });
         self.text_focus = TextFocus::None;
     }
 
     pub(crate) fn close_channels(&mut self) {
         if matches!(self.text_focus, TextFocus::GearAlias(_)) {
             self.text_focus = TextFocus::None;
+        }
+        if self.channels.as_ref().is_some_and(|c| c.menu.is_some()) {
+            self.menu_action = None;
         }
         self.channels = None;
     }
@@ -60,8 +64,13 @@ impl Chrome {
             let (w, h) = ch.renderer.logical_size();
             let max = overlay::channels_max_scroll(analog, h);
             let scroll = ch.scroll.min(max);
-            let (cmds, _) =
+            let (mut cmds, _) =
                 overlay::paint_channels(analog, w, h, &self.text_focus, self.caret_on, scroll);
+            if let Some(menu) = &ch.menu {
+                let Overlay::Menu { rect, items } = menu;
+                let hover = overlay::menu_at(*rect, items, ch.cursor.0, ch.cursor.1);
+                cmds.extend(overlay::paint_menu(menu, hover));
+            }
             (cmds, scroll)
         };
         let Some(ch) = self.channels.as_mut() else { return };
@@ -71,21 +80,10 @@ impl Chrome {
         }
     }
 
-    pub(crate) fn on_channels_press(&mut self, analog: &AnalogEngine) {
-        let (x, y, w, h, scroll) = {
-            let Some(ch) = self.channels.as_ref() else { return };
-            let (w, h) = ch.renderer.logical_size();
-            (ch.cursor.0, ch.cursor.1, w, h, ch.scroll)
-        };
-        let (_, fields) = overlay::paint_channels(analog, w, h, &self.text_focus, false, scroll);
-        if let Some((_, id)) = fields.into_iter().find(|(r, _)| overlay::contains(*r, x, y)) {
-            self.text_focus = TextFocus::GearAlias(id);
-        } else if matches!(self.text_focus, TextFocus::GearAlias(_)) {
-            self.text_focus = TextFocus::None;
-        }
-    }
-
     pub(crate) fn on_channels_wheel(&mut self, analog: &AnalogEngine, dy: f32) {
+        if self.channels.as_ref().is_some_and(|ch| ch.menu.is_some()) {
+            return;
+        }
         let h = match self.channels.as_ref() {
             Some(ch) => ch.renderer.logical_size().1,
             None => return,
@@ -98,8 +96,62 @@ impl Chrome {
 }
 
 impl AppState {
+    pub(crate) fn on_channels_press(&mut self) {
+        let (x, y, w, h, scroll) = {
+            let Some(ch) = self.chrome.channels.as_ref() else { return };
+            let (w, h) = ch.renderer.logical_size();
+            (ch.cursor.0, ch.cursor.1, w, h, ch.scroll)
+        };
+        if let Some(Overlay::Menu { rect, items }) =
+            self.chrome.channels.as_ref().and_then(|c| c.menu.clone())
+        {
+            if overlay::contains(rect, x, y) {
+                if let Some(i) = overlay::menu_at(rect, &items, x, y) {
+                    if let Some(item) = items.get(i).cloned() {
+                        if let Some(action) = self.chrome.menu_action.take() {
+                            self.apply_menu(action, &item);
+                        }
+                    }
+                }
+            }
+            if let Some(ch) = self.chrome.channels.as_mut() {
+                ch.menu = None;
+            }
+            self.chrome.menu_action = None;
+            return;
+        }
+        let (_, hits) = overlay::paint_channels(
+            &self.surface.analog,
+            w,
+            h,
+            &self.chrome.text_focus,
+            false,
+            scroll,
+        );
+        if let Some((rect, hit)) = hits.into_iter().rev().find(|(r, _)| overlay::contains(*r, x, y))
+        {
+            match hit {
+                ChannelsHit::MixOut => self.open_channels_mix_out_menu(rect),
+                ChannelsHit::GearAlias(id) => self.chrome.text_focus = TextFocus::GearAlias(id),
+                ChannelsHit::Close => {
+                    self.chrome.close_channels();
+                    return;
+                }
+            }
+        } else if matches!(self.chrome.text_focus, TextFocus::GearAlias(_)) {
+            self.chrome.text_focus = TextFocus::None;
+        }
+    }
+
     pub(crate) fn on_channels_key(&mut self, key: &Key) {
         if matches!(key, Key::Named(NamedKey::Escape)) {
+            if self.chrome.channels.as_ref().is_some_and(|c| c.menu.is_some()) {
+                if let Some(ch) = self.chrome.channels.as_mut() {
+                    ch.menu = None;
+                }
+                self.chrome.menu_action = None;
+                return;
+            }
             if matches!(self.chrome.text_focus, TextFocus::GearAlias(_)) {
                 self.chrome.text_focus = TextFocus::None;
             }

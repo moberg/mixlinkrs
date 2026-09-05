@@ -10,7 +10,6 @@ use ui_mixlink::mixer::MixerLayout;
 use ui_mixlink::overlay::{self, Overlay, TextFocus};
 use ui_mixlink::sidebar;
 
-use crate::mix_doc::project_parts;
 use crate::state::AppState;
 use project::ProjectStore;
 use ui_mixlink::chrome::Page;
@@ -54,21 +53,15 @@ impl AppState {
             },
             midi_status: self.surface.midi.status(),
             last_midi: self.surface.last_midi.clone(),
-            mute_mode: matches!(
-                self.surface.analog.surface.track_control_mode,
-                analog::TrackControlMode::Mute
+            project_name: if self.chrome.text_focus == TextFocus::ProjectName {
+                self.chrome.edit_buf.clone()
+            } else {
+                self.surface.analog.config.current_project_relative.clone().unwrap_or_default()
+            },
+            project_active: matches!(
+                self.chrome.menu_action,
+                Some(crate::menu_action::MenuAction::SwitchProject)
             ),
-            solo_mode: matches!(
-                self.surface.analog.surface.track_control_mode,
-                analog::TrackControlMode::Solo
-            ),
-            project_name: self
-                .surface
-                .analog
-                .config
-                .current_project_relative
-                .clone()
-                .unwrap_or_default(),
             focus: &self.chrome.text_focus,
             caret: self.chrome.caret_on,
         };
@@ -154,18 +147,7 @@ impl AppState {
                     ),
                     engine: &self.surface.analog,
                 }));
-                scene.extend(ui_mixlink::mix_browser::paint(
-                    &ui_mixlink::mix_browser::MixBrowserView {
-                        x: bx,
-                        y: by,
-                        h: bh,
-                        mixes: &self.session.mixes,
-                        selected_mix: self.session.mix.as_ref().map(|m| m.id),
-                        takes: &self.session.takes,
-                        selected_take: self.session.viewing_take,
-                        mixer_collapsed: !self.chrome.show_mixer,
-                    },
-                ));
+                scene.extend(ui_mixlink::mix_browser::paint(&self.mix_browser_view()));
             }
         }
 
@@ -181,53 +163,20 @@ impl AppState {
 
         if let Some(overlay) = &self.chrome.overlay {
             scene.push(render::DrawCmd::Layer);
-            match overlay {
-                Overlay::Menu { .. } => {
-                    let hover = match overlay {
-                        Overlay::Menu { rect, items } => overlay::menu_at(
-                            *rect,
-                            items,
-                            self.chrome.cursor.0,
-                            self.chrome.cursor.1,
-                        ),
-                        _ => None,
-                    };
-                    scene.extend(overlay::paint_menu(overlay, hover));
-                }
-                Overlay::Settings => {
-                    let (cmds, _) = overlay::paint_settings(
-                        &self.surface.analog,
-                        w,
-                        h,
-                        &self.chrome.text_focus,
-                        self.chrome.caret_on,
-                    );
-                    scene.extend(cmds);
-                }
-            }
+            let Overlay::Menu { rect, items } = overlay;
+            let hover = overlay::menu_at(*rect, items, self.chrome.cursor.0, self.chrome.cursor.1);
+            scene.extend(overlay::paint_menu(overlay, hover));
         }
         let _ = self.chrome.renderer.render_scene(&scene);
     }
 
     pub(crate) fn with_sidebar_view<R>(&self, f: impl FnOnce(&sidebar::SidebarView<'_>) -> R) -> R {
-        let (proj_date, proj_suffix) = project_parts(
-            self.surface.analog.config.current_project_relative.as_deref().unwrap_or(""),
-        );
         let sample_rate = self.audio._stream.as_ref().map(|s| s.sample_rate()).unwrap_or(48_000);
         let buffer_frames = self.audio._stream.as_ref().map(|s| s.buffer_frames()).unwrap_or(128);
         let latency_ms = buffer_frames as f32 / sample_rate as f32 * 1000.0;
         f(&sidebar::SidebarView {
             page: self.chrome.page,
             engine: &self.surface.analog,
-            project_name: self
-                .surface
-                .analog
-                .config
-                .current_project_relative
-                .as_deref()
-                .unwrap_or("Projects folder"),
-            project_date: &proj_date,
-            project_suffix: &proj_suffix,
             sample_rate,
             buffer_frames,
             latency_ms,
@@ -242,6 +191,15 @@ impl AppState {
 
     pub(crate) fn mix_browser_view(&self) -> ui_mixlink::mix_browser::MixBrowserView<'_> {
         let (_, by, _, bh) = self.chrome.body_rect();
+        let (edit, edit_text) = match self.chrome.text_focus {
+            ui_mixlink::overlay::TextFocus::MixName(id) => {
+                (Some(ui_mixlink::mix_browser::BrowserEdit::Mix(id)), self.chrome.edit_buf.as_str())
+            }
+            ui_mixlink::overlay::TextFocus::TakeName(n) => {
+                (Some(ui_mixlink::mix_browser::BrowserEdit::Take(n)), self.chrome.edit_buf.as_str())
+            }
+            _ => (None, ""),
+        };
         ui_mixlink::mix_browser::MixBrowserView {
             x: 0.0,
             y: by,
@@ -249,8 +207,12 @@ impl AppState {
             mixes: &self.session.mixes,
             selected_mix: self.session.mix.as_ref().map(|m| m.id),
             takes: &self.session.takes,
+            take_names: &self.session.take_names,
             selected_take: self.session.viewing_take,
             mixer_collapsed: !self.chrome.show_mixer,
+            edit,
+            edit_text,
+            caret: self.chrome.caret_on,
         }
     }
 

@@ -2,6 +2,28 @@
 
 #![allow(dead_code)]
 
+use winit::window::WindowAttributes;
+
+/// Merge the wgpu content view under a transparent titlebar so the dark header
+/// paints to the top edge. Traffic lights stay; the system title string is hidden.
+///
+/// Do not use `with_titlebar_hidden` — winit maps that to a borderless style mask
+/// and drops the close/miniaturize/zoom buttons.
+pub fn merge_titlebar(attrs: WindowAttributes) -> WindowAttributes {
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::WindowAttributesExtMacOS;
+        attrs
+            .with_fullsize_content_view(true)
+            .with_titlebar_transparent(true)
+            .with_title_hidden(true)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        attrs
+    }
+}
+
 /// Dock / Cmd-Tab icon. `cargo run` is a bare binary, so the bundle icon never
 /// applies — set `NSApplication.applicationIconImage` once NSApp exists.
 pub fn apply_app_icon() {
@@ -30,6 +52,18 @@ fn apply_app_icon_macos() {
     unsafe { image.setSize(NSSize { width: 128.0, height: 128.0 }) };
     let app = NSApplication::sharedApplication(mtm);
     unsafe { app.setApplicationIconImage(Some(&image)) };
+}
+
+/// Open `path` in Finder (`open` on macOS). No-op elsewhere.
+pub fn reveal_in_finder(path: &std::path::Path) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(path).spawn();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+    }
 }
 
 pub fn pick_projects_folder() -> Option<std::path::PathBuf> {

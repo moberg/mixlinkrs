@@ -1,5 +1,7 @@
 //! Project document, takes, undo, and pasteboard.
 
+use std::collections::HashMap;
+
 use project::{MixDocument, MixPasteboard, ProjectStore, TakeInfo, UndoStack};
 
 #[derive(Default)]
@@ -8,6 +10,7 @@ pub(crate) struct Session {
     pub mix: Option<MixDocument>,
     pub mixes: Vec<MixDocument>,
     pub takes: Vec<i32>,
+    pub take_names: HashMap<i32, String>,
     pub take_infos: Vec<TakeInfo>,
     pub take_view: Option<Vec<project::MixTrack>>,
     pub viewing_take: Option<i32>,

@@ -25,6 +25,7 @@ pub(crate) struct Chrome {
     pub overlay: Option<Overlay>,
     pub menu_action: Option<MenuAction>,
     pub channels: Option<ChannelsWindow>,
+    pub settings: Option<SettingsWindow>,
     pub modifiers: ModifiersState,
     pub text_focus: TextFocus,
     pub edit_buf: String,
@@ -49,6 +50,14 @@ pub(crate) struct ChannelsWindow {
     pub window: Arc<Window>,
     pub cursor: (f32, f32),
     pub scroll: f32,
+    pub menu: Option<Overlay>,
+}
+
+/// MixLink `Settings` scene — dedicated wgpu window, not a mixer overlay.
+pub(crate) struct SettingsWindow {
+    pub renderer: render::Renderer,
+    pub window: Arc<Window>,
+    pub cursor: (f32, f32),
 }
 
 #[derive(Clone, Debug)]

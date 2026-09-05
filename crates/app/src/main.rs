@@ -27,6 +27,7 @@ mod paint;
 mod plugins;
 mod record;
 mod schedule;
+mod settings;
 mod state;
 mod transport;
 
@@ -59,11 +60,15 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         let Some(state) = self.state.as_mut() else { return };
         let is_channels = state.chrome.channels.as_ref().is_some_and(|c| c.window.id() == id);
+        let is_settings = state.chrome.settings.as_ref().is_some_and(|s| s.window.id() == id);
         let is_main = id == state.chrome.window.id();
-        if !is_main && !is_channels {
+        if !is_main && !is_channels && !is_settings {
             return;
         }
         match event {
+            WindowEvent::CloseRequested if is_settings => {
+                state.chrome.close_settings();
+            }
             WindowEvent::CloseRequested if is_channels => {
                 state.chrome.close_channels();
             }
@@ -80,6 +85,12 @@ impl ApplicationHandler for App {
                 }
                 event_loop.exit();
             }
+            WindowEvent::Resized(size) if is_settings => {
+                if let Some(win) = &mut state.chrome.settings {
+                    win.renderer.resize(size.width, size.height);
+                    win.window.request_redraw();
+                }
+            }
             WindowEvent::Resized(size) if is_channels => {
                 if let Some(ch) = &mut state.chrome.channels {
                     ch.renderer.resize(size.width, size.height);
@@ -89,6 +100,12 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 state.chrome.renderer.resize(size.width, size.height);
                 state.chrome.window.request_redraw();
+            }
+            WindowEvent::CursorMoved { position, .. } if is_settings => {
+                if let Some(win) = &mut state.chrome.settings {
+                    let s = win.renderer.effective_scale();
+                    win.cursor = (position.x as f32 / s, position.y as f32 / s);
+                }
             }
             WindowEvent::CursorMoved { position, .. } if is_channels => {
                 if let Some(ch) = &mut state.chrome.channels {
@@ -112,6 +129,13 @@ impl ApplicationHandler for App {
                         .as_ref()
                         .map(|c| c.renderer.effective_scale())
                         .unwrap_or(1.0)
+                } else if is_settings {
+                    state
+                        .chrome
+                        .settings
+                        .as_ref()
+                        .map(|s| s.renderer.effective_scale())
+                        .unwrap_or(1.0)
                 } else {
                     state.chrome.renderer.effective_scale()
                 };
@@ -125,9 +149,14 @@ impl ApplicationHandler for App {
                     state.on_wheel(dx, dy);
                 }
             }
+            WindowEvent::MouseInput { state: st, button: MouseButton::Left, .. } if is_settings => {
+                if st == ElementState::Pressed {
+                    state.on_settings_press();
+                }
+            }
             WindowEvent::MouseInput { state: st, button: MouseButton::Left, .. } if is_channels => {
                 if st == ElementState::Pressed {
-                    state.chrome.on_channels_press(&state.surface.analog);
+                    state.on_channels_press();
                 }
             }
             WindowEvent::MouseInput { state: st, button: MouseButton::Left, .. } => match st {
@@ -146,12 +175,19 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Focused(true) if is_main => {
-                if matches!(state.chrome.text_focus, TextFocus::GearAlias(_)) {
+                if matches!(state.chrome.text_focus, TextFocus::GearAlias(_))
+                    || ui_mixlink::overlay::settings_text_focus(&state.chrome.text_focus)
+                {
                     state.chrome.text_focus = TextFocus::None;
                 }
             }
             WindowEvent::ModifiersChanged(mods) => {
                 state.chrome.modifiers = mods.state();
+            }
+            WindowEvent::KeyboardInput { event, .. } if is_settings => {
+                if event.state == ElementState::Pressed {
+                    state.on_settings_key(&event.logical_key);
+                }
             }
             WindowEvent::KeyboardInput { event, .. } if is_channels => {
                 if event.state == ElementState::Pressed {
@@ -240,6 +276,9 @@ impl ApplicationHandler for App {
                     _ => {}
                 }
             }
+            WindowEvent::RedrawRequested if is_settings => {
+                state.chrome.paint_settings_window(&state.surface.analog);
+            }
             WindowEvent::RedrawRequested if is_channels => {
                 state.chrome.paint_channels_window(&state.surface.analog);
             }
@@ -248,6 +287,9 @@ impl ApplicationHandler for App {
                 state.paint();
                 if let Some(ch) = &state.chrome.channels {
                     ch.window.request_redraw();
+                }
+                if let Some(win) = &state.chrome.settings {
+                    win.window.request_redraw();
                 }
                 state.chrome.window.request_redraw();
             }

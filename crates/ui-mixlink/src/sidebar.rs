@@ -12,9 +12,6 @@ use crate::widgets;
 pub struct SidebarView<'a> {
     pub page: Page,
     pub engine: &'a AnalogEngine,
-    pub project_name: &'a str,
-    pub project_date: &'a str,
-    pub project_suffix: &'a str,
     pub sample_rate: u32,
     pub buffer_frames: u32,
     pub latency_ms: f32,
@@ -40,10 +37,6 @@ pub enum SidebarHit {
     PluginEdit(i32),
     PluginBypass(i32),
     PluginPlayback(i32),
-    ProjectsFolder,
-    ProjectName,
-    NewProject,
-    MixOut,
     AudioDevice,
     AudioBuffer,
     Channels,
@@ -155,20 +148,13 @@ fn record_content_h(view: &SidebarView<'_>) -> f32 {
     h += n_plug * (plugin_card_h() + GAP);
     h += OUTER - GAP;
     h += 16.0 + 8.0;
-    h += settings_content_h(view);
+    h += settings_content_h();
     h += 8.0;
     h
 }
 
-fn settings_content_h(view: &SidebarView<'_>) -> f32 {
-    const GROUP: f32 = 6.0;
-    let mut h = LABEL_H + GROUP + MENU_H + GROUP;
-    if !view.project_suffix.is_empty() || !view.project_date.is_empty() {
-        h += LABEL_H + GROUP + MENU_H + GROUP;
-    }
-    h += NEW_PROJECT_H + GROUP;
-    h += LABEL_H + PICKER_GAP + MENU_H + GROUP;
-    h += LABEL_H + PICKER_GAP + MENU_H + 4.0;
+fn settings_content_h() -> f32 {
+    let mut h = LABEL_H + PICKER_GAP + MENU_H + 4.0;
     h += 16.0;
     h
 }
@@ -283,13 +269,11 @@ fn paint_record(
 //   .padding(.vertical, 5) .padding(.horizontal, 6) — screenshot Heat/EffectRack
 //   drops the recessed well, leading chevron, no diamond.
 // Sidebar EDIT/BYPASS stay MixLink compact 26 (`Layout::BUTTON_H`); mixer SOLO unchanged.
-// NEW PROJECT is MixLink compact full-width; 27 is slightly larger than 26.
 const CARD_GAP: f32 = 6.0;
 const PICKER_GAP: f32 = 4.0;
 const LABEL_H: f32 = 16.0;
 const MENU_H: f32 = 24.0;
 const PLUGIN_PAD_H: f32 = Layout::BUTTON_H;
-const NEW_PROJECT_H: f32 = Layout::COMPACT_BUTTON_H;
 
 fn hardware_card_h() -> f32 {
     Layout::MODULE_PAD
@@ -459,64 +443,6 @@ fn paint_settings(
     y: &mut f32,
     w: f32,
 ) {
-    const GROUP: f32 = 6.0;
-    field_label(cmds, x, *y, w, "Projects folder");
-    *y += LABEL_H + GROUP;
-    let folder = Rect { x, y: *y, w, h: MENU_H };
-    widgets::channel_picker(cmds, folder, view.project_name, widgets::ChannelPickerStyle::value());
-    hits.push((folder, SidebarHit::ProjectsFolder));
-    *y += MENU_H + GROUP;
-    if !view.project_suffix.is_empty() || !view.project_date.is_empty() {
-        field_label(cmds, x, *y, w, "Project");
-        *y += LABEL_H + GROUP;
-        let row = Rect { x, y: *y, w, h: MENU_H };
-        widgets::recessed_field(cmds, row);
-        // MixLink project well is `.padding(.horizontal, 6)`; 8 matches MenuLabel.
-        let date = format!("{} -", view.project_date);
-        theme::text(
-            cmds,
-            Rect { x: x + 8.0, y: *y, w: 90.0, h: MENU_H },
-            date,
-            12.0,
-            theme::TEXT_DIM,
-            false,
-        );
-        let name = if *view.focus == TextFocus::ProjectName && view.caret {
-            format!("{}|", view.project_suffix)
-        } else {
-            view.project_suffix.to_string()
-        };
-        theme::text(
-            cmds,
-            Rect { x: x + 98.0, y: *y, w: w - 106.0, h: MENU_H },
-            name,
-            12.0,
-            theme::PRIMARY_TEXT,
-            false,
-        );
-        hits.push((Rect { x: x + 98.0, y: *y, w: w - 106.0, h: MENU_H }, SidebarHit::ProjectName));
-        *y += MENU_H + GROUP;
-    }
-    widgets::hardware_pad(
-        cmds,
-        Rect { x, y: *y, w, h: NEW_PROJECT_H },
-        "New project",
-        false,
-        theme::PRIMARY_TEXT,
-    );
-    hits.push((Rect { x, y: *y, w, h: NEW_PROJECT_H }, SidebarHit::NewProject));
-    *y += NEW_PROJECT_H + GROUP;
-    picker_stack(
-        cmds,
-        hits,
-        x,
-        *y,
-        w,
-        "Mix (Main Out)",
-        &view.engine.output_name(view.engine.config.main_output),
-        SidebarHit::MixOut,
-    );
-    *y += LABEL_H + PICKER_GAP + MENU_H + GROUP;
     picker_stack(cmds, hits, x, *y, w, "Audio Device", view.device_name, SidebarHit::AudioDevice);
     *y += LABEL_H + PICKER_GAP + MENU_H + 4.0;
     theme::text(
@@ -744,4 +670,61 @@ fn row_plus(
 
 pub fn hit(hits: &[(Rect, SidebarHit)], x: f32, y: f32) -> Option<SidebarHit> {
     hits.iter().rev().find(|(r, _)| widgets::contains(*r, x, y)).map(|(_, h)| h.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use analog::{AnalogEngine, MixerState, OscSession, SessionConfig, SurfaceState};
+
+    use super::*;
+
+    fn test_engine() -> AnalogEngine {
+        AnalogEngine::new(
+            MixerState::new(),
+            SurfaceState::new(),
+            SessionConfig::new(),
+            OscSession::new(),
+        )
+    }
+
+    fn record_view<'a>(engine: &'a AnalogEngine, focus: &'a TextFocus) -> SidebarView<'a> {
+        SidebarView {
+            page: Page::Record,
+            engine,
+            sample_rate: 48_000,
+            buffer_frames: 128,
+            latency_ms: 2.7,
+            device_name: "Test Device",
+            mix: None,
+            selected_lane: None,
+            scroll: 0.0,
+            focus,
+            caret: false,
+        }
+    }
+
+    fn texts(cmds: &[DrawCmd]) -> Vec<&str> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                DrawCmd::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn record_settings_keeps_audio_device_without_projects_folder() {
+        let mut engine = test_engine();
+        engine.config.hardware_effects.clear();
+        engine.config.plugins.clear();
+        let focus = TextFocus::None;
+        let view = record_view(&engine, &focus);
+        let (cmds, hits) = paint(&view, 1200.0, 800.0);
+        let labels = texts(&cmds);
+        assert!(labels.contains(&"SETTINGS"), "{labels:?}");
+        assert!(labels.contains(&"Audio Device"), "{labels:?}");
+        assert!(!labels.contains(&"Projects folder"), "{labels:?}");
+        assert!(hits.iter().any(|(_, h)| matches!(h, SidebarHit::AudioDevice)));
+        assert!(hits.iter().any(|(_, h)| matches!(h, SidebarHit::Settings)));
+    }
 }

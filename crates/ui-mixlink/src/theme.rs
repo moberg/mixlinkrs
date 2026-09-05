@@ -518,7 +518,17 @@ pub fn text(
     color: Color,
     bold: bool,
 ) {
-    emit_text(cmds, rect, s, size, color, bold, false, Align::Start, None);
+    emit_text(cmds, rect, s, size, color, bold, false, false, Align::Start, None);
+}
+
+pub fn text_italic(
+    cmds: &mut Vec<DrawCmd>,
+    rect: Rect,
+    s: impl Into<String>,
+    size: f32,
+    color: Color,
+) {
+    emit_text(cmds, rect, s, size, color, false, true, false, Align::Start, None);
 }
 
 pub fn text_mono(
@@ -529,7 +539,7 @@ pub fn text_mono(
     color: Color,
     bold: bool,
 ) {
-    emit_text(cmds, rect, s, size, color, bold, true, Align::Start, None);
+    emit_text(cmds, rect, s, size, color, bold, false, true, Align::Start, None);
 }
 
 pub fn text_clip(
@@ -541,7 +551,7 @@ pub fn text_clip(
     bold: bool,
     clip: Option<Rect>,
 ) {
-    emit_text(cmds, rect, s, size, color, bold, false, Align::Start, clip);
+    emit_text(cmds, rect, s, size, color, bold, false, false, Align::Start, clip);
 }
 
 pub fn text_center(
@@ -552,7 +562,7 @@ pub fn text_center(
     color: Color,
     bold: bool,
 ) {
-    emit_text(cmds, rect, s, size, color, bold, false, Align::Center, None);
+    emit_text(cmds, rect, s, size, color, bold, false, false, Align::Center, None);
 }
 
 pub fn text_center_mono(
@@ -563,7 +573,7 @@ pub fn text_center_mono(
     color: Color,
     bold: bool,
 ) {
-    emit_text(cmds, rect, s, size, color, bold, true, Align::Center, None);
+    emit_text(cmds, rect, s, size, color, bold, false, true, Align::Center, None);
 }
 
 fn emit_text(
@@ -573,6 +583,7 @@ fn emit_text(
     size: f32,
     color: Color,
     bold: bool,
+    italic: bool,
     monospaced: bool,
     h_align: Align,
     clip: Option<Rect>,
@@ -585,6 +596,7 @@ fn emit_text(
         h_align,
         v_align: Align::Center,
         bold,
+        italic,
         monospaced,
         clip,
     }));

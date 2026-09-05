@@ -22,6 +22,7 @@ pub(crate) enum MenuAction {
     TakeContext { number: i32 },
     Arrange,
     Grid,
+    SwitchProject,
 }
 
 impl AppState {
@@ -114,6 +115,7 @@ impl AppState {
                     self.persist_project_meta();
                 }
             }
+            MenuAction::SwitchProject => self.switch_project(&item.id),
         }
     }
 

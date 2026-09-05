@@ -7,7 +7,7 @@ mod surface;
 mod timeline;
 
 pub(crate) use audio::Audio;
-pub(crate) use chrome::{ChannelsWindow, Chrome, Drag};
+pub(crate) use chrome::{ChannelsWindow, Chrome, Drag, SettingsWindow};
 pub(crate) use session::Session;
 pub(crate) use surface::{MidiIo, Surface};
 pub(crate) use timeline::Timeline;
@@ -39,7 +39,7 @@ impl AppState {
     pub(crate) fn boot(event_loop: &ActiveEventLoop) -> Self {
         let window = Arc::new(
             event_loop
-                .create_window(
+                .create_window(crate::native::merge_titlebar(
                     Window::default_attributes()
                         .with_title("MixLinkRs")
                         .with_inner_size(LogicalSize::new(1672.0, 941.0))
@@ -47,7 +47,7 @@ impl AppState {
                             MixerLayout::min_window_width(3) as f64,
                             640.0,
                         )),
-                )
+                ))
                 .expect("window"),
         );
         crate::native::apply_app_icon();
@@ -132,6 +132,7 @@ impl AppState {
                 mix: None,
                 mixes: Vec::new(),
                 takes: Vec::new(),
+                take_names: HashMap::new(),
                 take_infos: Vec::new(),
                 take_view: None,
                 viewing_take: None,
@@ -164,6 +165,7 @@ impl AppState {
                 overlay: None,
                 menu_action: None,
                 channels: None,
+                settings: None,
                 modifiers: ModifiersState::empty(),
                 text_focus: TextFocus::None,
                 edit_buf: String::new(),
