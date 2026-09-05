@@ -15,7 +15,7 @@ pub enum AdsrStage {
 pub struct Adsr {
     pub attack_s: Sample,
     pub decay_s: Sample,
-    pub sustain: Sample,  // 0..1
+    pub sustain: Sample, // 0..1
     pub release_s: Sample,
     level: Sample,
     stage: AdsrStage,

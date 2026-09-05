@@ -28,7 +28,6 @@ pub struct SidebarView<'a> {
 
 #[derive(Clone, Debug)]
 pub enum SidebarHit {
-    Page(Page),
     AddHardware,
     RemoveHardware(i32),
     EditHardwareName(i32),
@@ -56,12 +55,31 @@ pub enum SidebarHit {
     InsertBypass(uuid::Uuid),
 }
 
+const FOOT_H: f32 = 40.0;
+
+pub fn body_rect(window_w: f32, window_h: f32) -> Rect {
+    let x = window_w - Layout::SIDEBAR_WIDTH;
+    let y = crate::chrome::HEADER_H;
+    let sh = window_h - crate::chrome::HEADER_H - Layout::FOOTER_H;
+    Rect { x, y, w: Layout::SIDEBAR_WIDTH, h: (sh - FOOT_H).max(0.0) }
+}
+
+pub fn max_scroll(view: &SidebarView<'_>, window_h: f32) -> f32 {
+    let body_h = body_rect(0.0, window_h).h;
+    let content = match view.page {
+        Page::Record => record_content_h(view),
+        Page::Mix => mix_content_h(view),
+    };
+    (content - body_h).max(0.0)
+}
+
 pub fn paint(view: &SidebarView<'_>, w: f32, h: f32) -> (Vec<DrawCmd>, Vec<(Rect, SidebarHit)>) {
     let mut cmds = Vec::new();
     let mut hits = Vec::new();
     let x = w - Layout::SIDEBAR_WIDTH;
     let y = crate::chrome::HEADER_H;
     let sh = h - crate::chrome::HEADER_H - Layout::FOOTER_H;
+    cmds.push(DrawCmd::Layer);
     theme::hardware_surface(
         &mut cmds,
         Rect { x, y, w: Layout::SIDEBAR_WIDTH, h: sh },
@@ -69,38 +87,27 @@ pub fn paint(view: &SidebarView<'_>, w: f32, h: f32) -> (Vec<DrawCmd>, Vec<(Rect
     );
     theme::seam_v(&mut cmds, x, y, sh, true);
 
-    let body_y = y + 42.0;
-    let body_h = sh - 42.0 - 40.0;
-    let clip = Rect { x, y: body_y, w: Layout::SIDEBAR_WIDTH, h: body_h };
+    let clip = body_rect(w, h);
+    let max_scroll = max_scroll(view, h);
+    let scroll = view.scroll.clamp(0.0, max_scroll);
 
-    let mut yy = body_y + 8.0 - view.scroll;
+    cmds.push(DrawCmd::Layer);
+    cmds.push(DrawCmd::Clip { rect: clip });
+    let mut yy = clip.y + 8.0 - scroll;
     if view.page == Page::Record {
         paint_record(view, &mut cmds, &mut hits, x, &mut yy, clip);
     } else {
         paint_mix(view, &mut cmds, &mut hits, x, &mut yy, clip);
     }
+    hits.retain(|(r, _)| rects_overlap(*r, clip));
 
-    theme::fill(&mut cmds, Rect { x, y, w: Layout::SIDEBAR_WIDTH, h: 42.0 }, [0.0, 0.0, 0.0, 0.12]);
-    theme::seam_h(&mut cmds, x, y + 40.0, Layout::SIDEBAR_WIDTH, false);
-    widgets::hardware_pad(
-        &mut cmds,
-        Rect { x: x + 8.0, y: y + 8.0, w: 110.0, h: 26.0 },
-        "Record",
-        view.page == Page::Record,
-        theme::PRIMARY_TEXT,
-    );
-    widgets::hardware_pad(
-        &mut cmds,
-        Rect { x: x + 126.0, y: y + 8.0, w: 110.0, h: 26.0 },
-        "Mix",
-        view.page == Page::Mix,
-        theme::PRIMARY_TEXT,
-    );
-    hits.push((Rect { x: x + 8.0, y: y + 8.0, w: 110.0, h: 26.0 }, SidebarHit::Page(Page::Record)));
-    hits.push((Rect { x: x + 126.0, y: y + 8.0, w: 110.0, h: 26.0 }, SidebarHit::Page(Page::Mix)));
-
+    cmds.push(DrawCmd::Layer);
     let by = y + sh - 36.0;
-    theme::fill(&mut cmds, Rect { x, y: by - 4.0, w: Layout::SIDEBAR_WIDTH, h: 40.0 }, [0.0, 0.0, 0.0, 0.12]);
+    theme::hardware_surface(
+        &mut cmds,
+        Rect { x, y: by - 4.0, w: Layout::SIDEBAR_WIDTH, h: FOOT_H },
+        theme::SurfaceStyle::Sidebar,
+    );
     theme::seam_h(&mut cmds, x, by - 4.0, Layout::SIDEBAR_WIDTH, false);
     widgets::hardware_pad(
         &mut cmds,
@@ -112,7 +119,84 @@ pub fn paint(view: &SidebarView<'_>, w: f32, h: f32) -> (Vec<DrawCmd>, Vec<(Rect
     widgets::icon_pad(&mut cmds, Rect { x: x + 214.0, y: by, w: 26.0, h: 26.0 }, "⚙", true);
     hits.push((Rect { x: x + 136.0, y: by, w: 72.0, h: 26.0 }, SidebarHit::Channels));
     hits.push((Rect { x: x + 214.0, y: by, w: 26.0, h: 26.0 }, SidebarHit::Settings));
+
+    if max_scroll > 0.5 {
+        widgets::scrollbar(
+            &mut cmds,
+            Rect {
+                x: x + Layout::SIDEBAR_WIDTH - 8.0,
+                y: clip.y + 4.0,
+                w: 5.0,
+                h: (clip.h - 8.0).max(8.0),
+            },
+            scroll,
+            max_scroll,
+        );
+    }
     (cmds, hits)
+}
+
+fn rects_overlap(a: Rect, b: Rect) -> bool {
+    a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y
+}
+
+fn record_content_h(view: &SidebarView<'_>) -> f32 {
+    const GAP: f32 = 6.0;
+    const OUTER: f32 = 10.0;
+    const HEAD_GAP: f32 = 12.0;
+    let n_hw = view.engine.config.hardware_effects.len() as f32;
+    let n_plug = view.engine.config.plugins.len() as f32;
+    let mut h = 8.0;
+    h += 18.0 + HEAD_GAP;
+    h += Layout::HEADER_BUTTON + GAP;
+    h += n_hw * (hardware_card_h() + GAP);
+    h += OUTER - GAP;
+    h += Layout::HEADER_BUTTON + GAP;
+    h += n_plug * (plugin_card_h() + GAP);
+    h += OUTER - GAP;
+    h += 16.0 + 8.0;
+    h += settings_content_h(view);
+    h += 8.0;
+    h
+}
+
+fn settings_content_h(view: &SidebarView<'_>) -> f32 {
+    const GROUP: f32 = 6.0;
+    let mut h = LABEL_H + GROUP + MENU_H + GROUP;
+    if !view.project_suffix.is_empty() || !view.project_date.is_empty() {
+        h += LABEL_H + GROUP + MENU_H + GROUP;
+    }
+    h += NEW_PROJECT_H + GROUP;
+    h += LABEL_H + PICKER_GAP + MENU_H + GROUP;
+    h += LABEL_H + PICKER_GAP + MENU_H + 4.0;
+    h += 16.0;
+    h
+}
+
+fn mix_content_h(view: &SidebarView<'_>) -> f32 {
+    let insert_h = Layout::MODULE_PAD
+        + Layout::HEADER_BUTTON
+        + CARD_GAP
+        + MENU_H
+        + CARD_GAP
+        + PLUGIN_PAD_H
+        + Layout::MODULE_PAD;
+    let lane = view.selected_lane.unwrap_or(MixLane::Main);
+    let n = view
+        .mix
+        .and_then(|m| m.tracks.iter().find(|t| t.lane == lane))
+        .map(|t| t.inserts.len())
+        .unwrap_or(0) as f32;
+    let mut h = 8.0;
+    h += Layout::HEADER_BUTTON + CARD_GAP;
+    h += 16.0 + CARD_GAP;
+    if n > 0.0 {
+        h += n * (insert_h + CARD_GAP);
+    } else {
+        h += 18.0;
+    }
+    h += 8.0;
+    h
 }
 
 fn paint_record(
@@ -134,7 +218,14 @@ fn paint_record(
     let inner_w = Layout::SIDEBAR_WIDTH - SIDE * 2.0;
 
     // MixLink EFFECTS: 13 semibold MixerTheme.primaryText
-    theme::text(cmds, Rect { x: inner_x, y: *y, w: inner_w, h: 18.0 }, "EFFECTS", 13.0, theme::PRIMARY_TEXT, true);
+    theme::text(
+        cmds,
+        Rect { x: inner_x, y: *y, w: inner_w, h: 18.0 },
+        "EFFECTS",
+        13.0,
+        theme::PRIMARY_TEXT,
+        true,
+    );
     *y += 18.0 + HEAD_GAP;
 
     row_plus(cmds, hits, x, *y, "Hardware effects", SidebarHit::AddHardware, true);
@@ -164,7 +255,14 @@ fn paint_record(
     }
     *y += OUTER - GAP;
     // MixLink SETTINGS: 12 semibold MixerTheme.secondaryText, VStack spacing 6.
-    theme::text(cmds, Rect { x: inner_x, y: *y, w: inner_w, h: 16.0 }, "SETTINGS", 12.0, theme::SECONDARY_TEXT, true);
+    theme::text(
+        cmds,
+        Rect { x: inner_x, y: *y, w: inner_w, h: 16.0 },
+        "SETTINGS",
+        12.0,
+        theme::SECONDARY_TEXT,
+        true,
+    );
     *y += 16.0 + 8.0;
     paint_settings(view, cmds, hits, inner_x, y, inner_w);
     let _ = ReturnLane::SendA;
@@ -310,7 +408,13 @@ fn paint_plugin_card(
     let btn_gap = CARD_GAP;
     let btn_w = (cw - btn_gap) * 0.5;
     let btn_h = PLUGIN_PAD_H;
-    widgets::hardware_pad(cmds, Rect { x: cx, y: cy, w: btn_w, h: btn_h }, "Edit", false, theme::PRIMARY_TEXT);
+    widgets::hardware_pad(
+        cmds,
+        Rect { x: cx, y: cy, w: btn_w, h: btn_h },
+        "Edit",
+        false,
+        theme::PRIMARY_TEXT,
+    );
     widgets::hardware_pad(
         cmds,
         Rect { x: cx + btn_w + btn_gap, y: cy, w: btn_w, h: btn_h },
@@ -319,7 +423,10 @@ fn paint_plugin_card(
         theme::AMBER,
     );
     hits.push((Rect { x: cx, y: cy, w: btn_w, h: btn_h }, SidebarHit::PluginEdit(plug.id)));
-    hits.push((Rect { x: cx + btn_w + btn_gap, y: cy, w: btn_w, h: btn_h }, SidebarHit::PluginBypass(plug.id)));
+    hits.push((
+        Rect { x: cx + btn_w + btn_gap, y: cy, w: btn_w, h: btn_h },
+        SidebarHit::PluginBypass(plug.id),
+    ));
     cy += btn_h + CARD_GAP;
     // MixLink PluginSlotView: HStack spacing 8, 11 medium textDim + ChannelPicker(title: nil).
     const PLAYBACK_LABEL_W: f32 = 108.0;
@@ -366,7 +473,14 @@ fn paint_settings(
         widgets::recessed_field(cmds, row);
         // MixLink project well is `.padding(.horizontal, 6)`; 8 matches MenuLabel.
         let date = format!("{} -", view.project_date);
-        theme::text(cmds, Rect { x: x + 8.0, y: *y, w: 90.0, h: MENU_H }, date, 12.0, theme::TEXT_DIM, false);
+        theme::text(
+            cmds,
+            Rect { x: x + 8.0, y: *y, w: 90.0, h: MENU_H },
+            date,
+            12.0,
+            theme::TEXT_DIM,
+            false,
+        );
         let name = if *view.focus == TextFocus::ProjectName && view.caret {
             format!("{}|", view.project_suffix)
         } else {
@@ -408,7 +522,10 @@ fn paint_settings(
     theme::text(
         cmds,
         Rect { x, y: *y, w, h: 16.0 },
-        format!("{} Hz · {} frames · {:.1} ms", view.sample_rate, view.buffer_frames, view.latency_ms),
+        format!(
+            "{} Hz · {} frames · {:.1} ms",
+            view.sample_rate, view.buffer_frames, view.latency_ms
+        ),
         10.0,
         theme::TEXT_DIM,
         false,
@@ -431,11 +548,25 @@ fn paint_mix(
         w: Layout::HEADER_BUTTON,
         h: Layout::HEADER_BUTTON,
     };
-    theme::text(cmds, Rect { x: x + 8.0, y: *y, w: 180.0, h: Layout::HEADER_BUTTON }, lane.title().to_uppercase(), 13.0, theme::PRIMARY_TEXT, true);
+    theme::text(
+        cmds,
+        Rect { x: x + 8.0, y: *y, w: 180.0, h: Layout::HEADER_BUTTON },
+        lane.title().to_uppercase(),
+        13.0,
+        theme::PRIMARY_TEXT,
+        true,
+    );
     widgets::icon_pad(cmds, plus, "+", true);
     hits.push((plus, SidebarHit::AddInsert));
     *y += Layout::HEADER_BUTTON + CARD_GAP;
-    theme::text(cmds, Rect { x: x + 8.0, y: *y, w: 120.0, h: 16.0 }, "INSERTS", 11.0, theme::SECONDARY_TEXT, true);
+    theme::text(
+        cmds,
+        Rect { x: x + 8.0, y: *y, w: 120.0, h: 16.0 },
+        "INSERTS",
+        11.0,
+        theme::SECONDARY_TEXT,
+        true,
+    );
     *y += 16.0 + CARD_GAP;
     let track: Option<&MixTrack> = view.mix.and_then(|m| m.tracks.iter().find(|t| t.lane == lane));
     if let Some(track) = track {
@@ -463,7 +594,12 @@ fn paint_mix(
             };
             theme::text(
                 cmds,
-                Rect { x: cx, y: cy0, w: cw - Layout::HEADER_BUTTON - CARD_GAP, h: Layout::HEADER_BUTTON },
+                Rect {
+                    x: cx,
+                    y: cy0,
+                    w: cw - Layout::HEADER_BUTTON - CARD_GAP,
+                    h: Layout::HEADER_BUTTON,
+                },
                 insert.title(),
                 12.0,
                 theme::PRIMARY_TEXT,
@@ -475,14 +611,24 @@ fn paint_mix(
             widgets::channel_picker(
                 cmds,
                 menu,
-                insert.bundle_path.as_deref().and_then(|p| std::path::Path::new(p).file_name().and_then(|s| s.to_str())).unwrap_or("No plugin"),
+                insert
+                    .bundle_path
+                    .as_deref()
+                    .and_then(|p| std::path::Path::new(p).file_name().and_then(|s| s.to_str()))
+                    .unwrap_or("No plugin"),
                 widgets::ChannelPickerStyle::plugin(),
             );
             hits.push((menu, SidebarHit::InsertBundle(insert.id)));
             let by = menu.y + MENU_H + CARD_GAP;
             let btn_w = (cw - CARD_GAP) * 0.5;
             let btn_h = PLUGIN_PAD_H;
-            widgets::hardware_pad(cmds, Rect { x: cx, y: by, w: btn_w, h: btn_h }, "Edit", false, theme::PRIMARY_TEXT);
+            widgets::hardware_pad(
+                cmds,
+                Rect { x: cx, y: by, w: btn_w, h: btn_h },
+                "Edit",
+                false,
+                theme::PRIMARY_TEXT,
+            );
             widgets::hardware_pad(
                 cmds,
                 Rect { x: cx + btn_w + CARD_GAP, y: by, w: btn_w, h: btn_h },
@@ -490,12 +636,25 @@ fn paint_mix(
                 insert.bypassed,
                 theme::AMBER,
             );
-            hits.push((Rect { x: cx, y: by, w: btn_w, h: btn_h }, SidebarHit::InsertEdit(insert.id)));
-            hits.push((Rect { x: cx + btn_w + CARD_GAP, y: by, w: btn_w, h: btn_h }, SidebarHit::InsertBypass(insert.id)));
+            hits.push((
+                Rect { x: cx, y: by, w: btn_w, h: btn_h },
+                SidebarHit::InsertEdit(insert.id),
+            ));
+            hits.push((
+                Rect { x: cx + btn_w + CARD_GAP, y: by, w: btn_w, h: btn_h },
+                SidebarHit::InsertBypass(insert.id),
+            ));
             *y += insert_h + CARD_GAP;
         }
     } else {
-        theme::text(cmds, Rect { x: x + 8.0, y: *y, w: 200.0, h: 18.0 }, "Select a channel", 11.0, theme::TEXT_DIM, false);
+        theme::text(
+            cmds,
+            Rect { x: x + 8.0, y: *y, w: 200.0, h: 18.0 },
+            "Select a channel",
+            11.0,
+            theme::TEXT_DIM,
+            false,
+        );
     }
 }
 

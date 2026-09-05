@@ -103,10 +103,9 @@ impl OscSession {
         socket.set_reuse_address(true)?;
         socket.set_recv_buffer_size(RCVBUF)?;
         let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, listen_port);
-        socket.bind(&bind_addr.into()).map_err(|source| OscError::Bind {
-            port: listen_port,
-            source,
-        })?;
+        socket
+            .bind(&bind_addr.into())
+            .map_err(|source| OscError::Bind { port: listen_port, source })?;
         socket.set_read_timeout(Some(RECV_TIMEOUT))?;
 
         let udp: UdpSocket = socket.into();

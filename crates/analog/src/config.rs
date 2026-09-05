@@ -74,9 +74,7 @@ impl Default for SessionConfig {
 impl SessionConfig {
     pub fn new() -> Self {
         Self {
-            strips: (0..8)
-                .map(|i| StripBinding::new(i, MixerBus::Input, i * 2, true))
-                .collect(),
+            strips: (0..8).map(|i| StripBinding::new(i, MixerBus::Input, i * 2, true)).collect(),
             main_output: 0,
             aux_a: SendDestination::Output(14),
             aux_b: SendDestination::Output(16),
@@ -218,7 +216,10 @@ impl SessionConfig {
                 if let Some(ref_) = self.effect_ref(ret) {
                     match ref_ {
                         EffectRef::Plugin(id) => {
-                            return self.plugin(id).map(|p| p.return_channel).unwrap_or(ret as i32 * 2);
+                            return self
+                                .plugin(id)
+                                .map(|p| p.return_channel)
+                                .unwrap_or(ret as i32 * 2);
                         }
                         EffectRef::Hardware(_) => {}
                     }
@@ -229,9 +230,7 @@ impl SessionConfig {
                 if ret == ReturnLane::Bus2 {
                     return self.mix_bus2;
                 }
-                self.plugin(ret as i32)
-                    .map(|p| p.return_channel)
-                    .unwrap_or(16 + ret as i32 * 2)
+                self.plugin(ret as i32).map(|p| p.return_channel).unwrap_or(16 + ret as i32 * 2)
             }
             MixLane::Main => 0,
         }
@@ -257,7 +256,9 @@ impl SessionConfig {
 
     pub fn apply_destination(&mut self, dest: SendDestination, lane: ReturnLane) {
         match dest {
-            SendDestination::Plugin(id) => self.set_return_effect(lane, Some(EffectRef::Plugin(id))),
+            SendDestination::Plugin(id) => {
+                self.set_return_effect(lane, Some(EffectRef::Plugin(id)))
+            }
             SendDestination::Output(index) => {
                 if let Some(EffectRef::Hardware(hid)) = self.effect_ref(lane) {
                     if let Some(hw) = self.hardware_effects.iter_mut().find(|h| h.id == hid) {
@@ -282,12 +283,7 @@ impl SessionConfig {
 
     pub fn insert_hardware_effect(&mut self, output: i32, input: i32, name: &str) -> i32 {
         let id = self.hardware_effects.iter().map(|h| h.id).max().unwrap_or(-1) + 1;
-        self.hardware_effects.push(HardwareEffect {
-            id,
-            name: name.to_string(),
-            output,
-            input,
-        });
+        self.hardware_effects.push(HardwareEffect { id, name: name.to_string(), output, input });
         id
     }
 
@@ -346,11 +342,8 @@ impl SessionConfig {
         match dest {
             SendDestination::Plugin(id) => self.returns[i].effect = Some(EffectRef::Plugin(id)),
             SendDestination::Output(out) => {
-                let input = if self.returns[i].input != 0 {
-                    self.returns[i].input
-                } else {
-                    fallback_input
-                };
+                let input =
+                    if self.returns[i].input != 0 { self.returns[i].input } else { fallback_input };
                 let hid = self.insert_hardware_effect(out, input, "");
                 if let Some(row) = self.returns.iter_mut().find(|r| r.id == lane as i32) {
                     row.effect = Some(EffectRef::Hardware(hid));
@@ -382,19 +375,13 @@ impl SessionConfig {
     pub fn slot_destination(&self, slot: RoutingSlot) -> SendDestination {
         match slot {
             RoutingSlot::Mix => SendDestination::Output(self.main_output),
-            RoutingSlot::SendA => {
-                self.send_destination(ReturnLane::SendA).unwrap_or(self.aux_a)
+            RoutingSlot::SendA => self.send_destination(ReturnLane::SendA).unwrap_or(self.aux_a),
+            RoutingSlot::SendB => self.send_destination(ReturnLane::SendB).unwrap_or(self.aux_b),
+            RoutingSlot::SendC | RoutingSlot::SendD | RoutingSlot::SendE | RoutingSlot::SendF => {
+                slot.lane()
+                    .and_then(|lane| self.send_destination(lane))
+                    .unwrap_or(SendDestination::Output(0))
             }
-            RoutingSlot::SendB => {
-                self.send_destination(ReturnLane::SendB).unwrap_or(self.aux_b)
-            }
-            RoutingSlot::SendC
-            | RoutingSlot::SendD
-            | RoutingSlot::SendE
-            | RoutingSlot::SendF => slot
-                .lane()
-                .and_then(|lane| self.send_destination(lane))
-                .unwrap_or(SendDestination::Output(0)),
             RoutingSlot::Bus1 => self
                 .send_destination(ReturnLane::Bus1)
                 .unwrap_or(SendDestination::Output(self.mix_bus1)),
@@ -568,10 +555,7 @@ mod opt_base64 {
     }
 
     fn decode(s: &str) -> Result<Vec<u8>, &'static str> {
-        let filtered: Vec<u8> = s
-            .bytes()
-            .filter(|b| !b.is_ascii_whitespace())
-            .collect();
+        let filtered: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
         if filtered.len() % 4 != 0 {
             return Err("invalid base64 length");
         }

@@ -8,12 +8,16 @@ pub const TEXT_DIM: Color = [0.55, 0.55, 0.58, 1.0];
 pub const ORANGE: Color = [1.00, 0.45, 0.12, 1.0];
 pub const AMBER: Color = [1.00, 0.62, 0.14, 1.0];
 pub const BLUE: Color = [0.22, 0.55, 0.95, 1.0];
+/// Mix / take browser selection (sampled from MixLink Take 7 highlight).
+pub const BROWSER_SELECTED: Color = [42.0 / 255.0, 70.0 / 255.0, 120.0 / 255.0, 1.0];
 pub const METER_GREEN: Color = [0.20, 0.82, 0.32, 1.0];
 pub const METER_YELLOW: Color = [0.95, 0.82, 0.18, 1.0];
 pub const METER_RED: Color = [0.95, 0.22, 0.18, 1.0];
 pub const POINTER: Color = [0xEE as f32 / 255.0, 0xEE as f32 / 255.0, 0xEA as f32 / 255.0, 1.0];
-pub const PRIMARY_TEXT: Color = [0xDE as f32 / 255.0, 0xDF as f32 / 255.0, 0xDC as f32 / 255.0, 1.0];
-pub const SECONDARY_TEXT: Color = [0xA7 as f32 / 255.0, 0xA9 as f32 / 255.0, 0xA5 as f32 / 255.0, 1.0];
+pub const PRIMARY_TEXT: Color =
+    [0xDE as f32 / 255.0, 0xDF as f32 / 255.0, 0xDC as f32 / 255.0, 1.0];
+pub const SECONDARY_TEXT: Color =
+    [0xA7 as f32 / 255.0, 0xA9 as f32 / 255.0, 0xA5 as f32 / 255.0, 1.0];
 pub const DEEP_SLOT: Color = [0.035, 0.038, 0.035, 1.0];
 pub const SEAM_DARK: Color = [0.0, 0.0, 0.0, 0.75];
 pub const SEAM_HIGHLIGHT: Color = [1.0, 1.0, 1.0, 0.055];
@@ -97,6 +101,36 @@ pub fn send_color(lane: analog::ReturnLane) -> Color {
     }
 }
 
+/// Arrangement / mixer lane family: channels, returns, buses, main.
+pub fn lane_kind_color(lane: analog::MixLane) -> Color {
+    match lane {
+        analog::MixLane::Strip(_) => [0.52, 0.76, 0.98, 1.0],
+        analog::MixLane::ReturnLane(lane) if lane.is_send() => [0.38, 0.86, 0.50, 1.0],
+        analog::MixLane::ReturnLane(_) => [0.98, 0.74, 0.28, 1.0],
+        analog::MixLane::Main => TEXT,
+    }
+}
+
+pub fn lane_kind_header(lane: analog::MixLane, selected: bool) -> Color {
+    let [r, g, b, _] = lane_kind_color(lane);
+    if selected {
+        [r * 0.22 + 0.10, g * 0.16 + 0.08, b * 0.12 + 0.06, 1.0]
+    } else {
+        [r * 0.10 + 0.11, g * 0.08 + 0.11, b * 0.06 + 0.11, 1.0]
+    }
+}
+
+pub fn clip_color_for_lane(take: i32, lane: analog::MixLane) -> Color {
+    let take = clip_color(take);
+    let kind = lane_kind_color(lane);
+    [
+        take[0] * 0.55 + kind[0] * 0.45,
+        take[1] * 0.55 + kind[1] * 0.45,
+        take[2] * 0.55 + kind[2] * 0.45,
+        1.0,
+    ]
+}
+
 pub fn fill(cmds: &mut Vec<DrawCmd>, rect: Rect, color: Color) {
     cmds.push(DrawCmd::Rect { rect, color });
 }
@@ -116,7 +150,11 @@ pub fn hardware_surface(cmds: &mut Vec<DrawCmd>, rect: Rect, style: SurfaceStyle
 /// MixLink `MixerChassis`: brushed upper faceplate, seam, fader-bay metal + inset.
 pub fn mixer_chassis(cmds: &mut Vec<DrawCmd>, rect: Rect, upper_height: f32) {
     let upper_h = upper_height.clamp(0.0, rect.h);
-    hardware_surface(cmds, Rect { x: rect.x, y: rect.y, w: rect.w, h: upper_h }, SurfaceStyle::UpperFaceplate);
+    hardware_surface(
+        cmds,
+        Rect { x: rect.x, y: rect.y, w: rect.w, h: upper_h },
+        SurfaceStyle::UpperFaceplate,
+    );
     faceplate_seam(cmds, rect.x, rect.y + upper_h, rect.w);
     let bay = Rect {
         x: rect.x,
@@ -339,8 +377,16 @@ pub fn material_grain(cmds: &mut Vec<DrawCmd>, rect: Rect, _mat: &Material) {
 }
 
 pub fn seam_h(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, w: f32, strong: bool) {
-    fill(cmds, Rect { x, y, w, h: 1.0 }, if strong { [0.07, 0.07, 0.07, 1.0] } else { [0.09, 0.09, 0.09, 1.0] });
-    fill(cmds, Rect { x, y: y + 1.0, w, h: 1.0 }, [1.0, 1.0, 1.0, if strong { 0.055 } else { 0.035 }]);
+    fill(
+        cmds,
+        Rect { x, y, w, h: 1.0 },
+        if strong { [0.07, 0.07, 0.07, 1.0] } else { [0.09, 0.09, 0.09, 1.0] },
+    );
+    fill(
+        cmds,
+        Rect { x, y: y + 1.0, w, h: 1.0 },
+        [1.0, 1.0, 1.0, if strong { 0.055 } else { 0.035 }],
+    );
 }
 
 pub fn seam_v(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, h: f32, strong: bool) {
@@ -360,8 +406,16 @@ pub fn channel_seam(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, h: f32, strong: boo
         left: [0.0, 0.0, 0.0, 0.0],
         right: [0.0, 0.0, 0.0, if strong { 0.07 } else { 0.04 }],
     });
-    fill(cmds, Rect { x, y, w: 1.0, h }, if strong { [0.055, 0.055, 0.055, 1.0] } else { [0.07, 0.07, 0.07, 1.0] });
-    fill(cmds, Rect { x: x + 1.0, y, w: 1.0, h }, if strong { [0.045, 0.045, 0.045, 1.0] } else { [0.06, 0.06, 0.06, 1.0] });
+    fill(
+        cmds,
+        Rect { x, y, w: 1.0, h },
+        if strong { [0.055, 0.055, 0.055, 1.0] } else { [0.07, 0.07, 0.07, 1.0] },
+    );
+    fill(
+        cmds,
+        Rect { x: x + 1.0, y, w: 1.0, h },
+        if strong { [0.045, 0.045, 0.045, 1.0] } else { [0.06, 0.06, 0.06, 1.0] },
+    );
 }
 
 /// MixLink `UpperFaceplateCellChrome` on a send or pan cell.
@@ -396,7 +450,11 @@ pub fn faceplate_cell(cmds: &mut Vec<DrawCmd>, rect: Rect, last_send: bool, pan:
             bottom: [0.0, 0.0, 0.0, if last_send { 0.025 } else { 0.02 }],
         });
         if last_send {
-            fill(cmds, Rect { x: rect.x, y: rect.y + rect.h - 1.0, w: rect.w, h: 1.0 }, [0.0, 0.0, 0.0, 0.30]);
+            fill(
+                cmds,
+                Rect { x: rect.x, y: rect.y + rect.h - 1.0, w: rect.w, h: 1.0 },
+                [0.0, 0.0, 0.0, 0.30],
+            );
         } else {
             seam_h(cmds, rect.x, rect.y + rect.h - 2.0, rect.w, false);
         }
@@ -419,11 +477,25 @@ pub fn channel_bay_shading(cmds: &mut Vec<DrawCmd>, rect: Rect) {
     );
 }
 
-pub fn text(cmds: &mut Vec<DrawCmd>, rect: Rect, s: impl Into<String>, size: f32, color: Color, bold: bool) {
+pub fn text(
+    cmds: &mut Vec<DrawCmd>,
+    rect: Rect,
+    s: impl Into<String>,
+    size: f32,
+    color: Color,
+    bold: bool,
+) {
     emit_text(cmds, rect, s, size, color, bold, false, Align::Start, None);
 }
 
-pub fn text_mono(cmds: &mut Vec<DrawCmd>, rect: Rect, s: impl Into<String>, size: f32, color: Color, bold: bool) {
+pub fn text_mono(
+    cmds: &mut Vec<DrawCmd>,
+    rect: Rect,
+    s: impl Into<String>,
+    size: f32,
+    color: Color,
+    bold: bool,
+) {
     emit_text(cmds, rect, s, size, color, bold, true, Align::Start, None);
 }
 
@@ -439,11 +511,25 @@ pub fn text_clip(
     emit_text(cmds, rect, s, size, color, bold, false, Align::Start, clip);
 }
 
-pub fn text_center(cmds: &mut Vec<DrawCmd>, rect: Rect, s: impl Into<String>, size: f32, color: Color, bold: bool) {
+pub fn text_center(
+    cmds: &mut Vec<DrawCmd>,
+    rect: Rect,
+    s: impl Into<String>,
+    size: f32,
+    color: Color,
+    bold: bool,
+) {
     emit_text(cmds, rect, s, size, color, bold, false, Align::Center, None);
 }
 
-pub fn text_center_mono(cmds: &mut Vec<DrawCmd>, rect: Rect, s: impl Into<String>, size: f32, color: Color, bold: bool) {
+pub fn text_center_mono(
+    cmds: &mut Vec<DrawCmd>,
+    rect: Rect,
+    s: impl Into<String>,
+    size: f32,
+    color: Color,
+    bold: bool,
+) {
     emit_text(cmds, rect, s, size, color, bold, true, Align::Center, None);
 }
 
@@ -511,7 +597,12 @@ impl Layout {
     pub const HEADER_BUTTON: f32 = 22.0;
     /// MixLink `HardwareModuleModifier` `.padding(7)`.
     pub const MODULE_PAD: f32 = 7.0;
-    pub const BUTTON_STACK: f32 = 130.0;
+    /// Gap between the two pads on a shared row (Solo/Mute, Bus 1/Bus 2).
+    pub const BUTTON_PAIR_GAP: f32 = 4.0;
+    /// Vertical gap between the Solo/Mute row and the Bus row.
+    pub const BUTTON_ROW_GAP: f32 = 5.0;
+    /// Two shared rows + bottom pad (was four stacked full-width pads).
+    pub const BUTTON_STACK: f32 = 65.0;
     pub const BUTTON_RADIUS: f32 = 1.5;
     pub const KNOB_DRAG_PX: f32 = 180.0;
     pub const METER_SEGMENTS: i32 = 64;
@@ -523,7 +614,11 @@ impl Layout {
     pub const FADER_BAY_INSET: f32 = 10.0;
 
     pub fn send_row_h(lane: analog::ReturnLane) -> f32 {
-        if lane == analog::ReturnLane::SendA { Self::SEND_ROW_A } else { Self::SEND_ROW }
+        if lane == analog::ReturnLane::SendA {
+            Self::SEND_ROW_A
+        } else {
+            Self::SEND_ROW
+        }
     }
 
     pub fn send_lane_h(lane: analog::ReturnLane) -> f32 {
@@ -593,5 +688,27 @@ pub fn pan_text(unit: f32) -> String {
         format!("L{}", -n)
     } else {
         format!("R{n}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use analog::{MixLane, ReturnLane};
+
+    use super::*;
+
+    #[test]
+    fn lane_kinds_use_distinct_colors() {
+        let ch = lane_kind_color(MixLane::Strip(0));
+        let ret = lane_kind_color(MixLane::ReturnLane(ReturnLane::SendA));
+        let bus = lane_kind_color(MixLane::ReturnLane(ReturnLane::Bus1));
+        let main = lane_kind_color(MixLane::Main);
+        assert_ne!(ch, ret);
+        assert_ne!(ch, bus);
+        assert_ne!(ret, bus);
+        assert_ne!(ch, main);
+        assert_eq!(ch, lane_kind_color(MixLane::Strip(7)));
+        assert_eq!(ret, lane_kind_color(MixLane::ReturnLane(ReturnLane::SendC)));
+        assert_eq!(bus, lane_kind_color(MixLane::ReturnLane(ReturnLane::Bus2)));
     }
 }

@@ -9,11 +9,7 @@ use crate::widgets::{self, MenuItem};
 
 #[derive(Clone, Debug)]
 pub enum Overlay {
-    Menu {
-        rect: Rect,
-        items: Vec<MenuItem>,
-        action: MenuAction,
-    },
+    Menu { rect: Rect, items: Vec<MenuItem>, action: MenuAction },
     Settings,
 }
 
@@ -69,7 +65,13 @@ pub fn paint_menu(overlay: &Overlay, hover: Option<usize>) -> Vec<DrawCmd> {
     cmds
 }
 
-pub fn paint_settings(engine: &AnalogEngine, w: f32, h: f32, focus: &TextFocus, caret: bool) -> (Vec<DrawCmd>, Rect) {
+pub fn paint_settings(
+    engine: &AnalogEngine,
+    w: f32,
+    h: f32,
+    focus: &TextFocus,
+    caret: bool,
+) -> (Vec<DrawCmd>, Rect) {
     let mut cmds = Vec::new();
     let rect = settings_panel(w, h);
     theme::fill(&mut cmds, Rect { x: 0.0, y: 0.0, w, h }, [0.0, 0.0, 0.0, 0.62]);
@@ -160,16 +162,7 @@ pub fn paint_channels(
     let mut cmds = Vec::new();
     theme::fill(&mut cmds, Rect { x: 0.0, y: 0.0, w, h }, theme::WINDOW);
     let (left, right) = channels_columns(w, h);
-    theme::fill(
-        &mut cmds,
-        Rect {
-            x: left.w,
-            y: 0.0,
-            w: 1.0,
-            h,
-        },
-        CHANNELS_DIVIDER,
-    );
+    theme::fill(&mut cmds, Rect { x: left.w, y: 0.0, w: 1.0, h }, CHANNELS_DIVIDER);
     let mut fields = Vec::new();
     paint_channel_col(
         &mut cmds,
@@ -199,27 +192,14 @@ pub fn paint_channels(
 pub fn channels_columns(w: f32, h: f32) -> (Rect, Rect) {
     let mid = (w * 0.5).floor();
     (
-        Rect {
-            x: 0.0,
-            y: 0.0,
-            w: mid,
-            h,
-        },
-        Rect {
-            x: mid + 1.0,
-            y: 0.0,
-            w: (w - mid - 1.0).max(0.0),
-            h,
-        },
+        Rect { x: 0.0, y: 0.0, w: mid, h },
+        Rect { x: mid + 1.0, y: 0.0, w: (w - mid - 1.0).max(0.0), h },
     )
 }
 
 pub fn channels_max_scroll(engine: &AnalogEngine, h: f32) -> f32 {
-    let n = engine
-        .mixer
-        .strips(MixerBus::Input)
-        .len()
-        .max(engine.mixer.strips(MixerBus::Output).len());
+    let n =
+        engine.mixer.strips(MixerBus::Input).len().max(engine.mixer.strips(MixerBus::Output).len());
     let content = CHANNELS_LIST_Y + n as f32 * CHANNELS_ROW_STRIDE + CHANNELS_BOTTOM_PAD;
     (content - h).max(0.0)
 }
@@ -250,24 +230,14 @@ fn paint_channel_col(
     );
     let list_top = rect.y + CHANNELS_LIST_Y;
     let list_h = (rect.h - CHANNELS_LIST_Y).max(0.0);
-    let clip = Rect {
-        x: rect.x,
-        y: list_top,
-        w: rect.w,
-        h: list_h,
-    };
+    let clip = Rect { x: rect.x, y: list_top, w: rect.w, h: list_h };
     let mut y = list_top - scroll;
     for ch in engine.mixer.strips(bus) {
         let visible = y + CHANNELS_ROW_H > list_top && y < list_top + list_h;
         if visible {
             theme::text_clip(
                 cmds,
-                Rect {
-                    x: rect.x + CHANNELS_PAD_X,
-                    y,
-                    w: CHANNELS_LABEL_W,
-                    h: CHANNELS_ROW_H,
-                },
+                Rect { x: rect.x + CHANNELS_PAD_X, y, w: CHANNELS_LABEL_W, h: CHANNELS_ROW_H },
                 AnalogEngine::hardware_label(&ch),
                 12.0,
                 theme::TEXT_DIM,
@@ -351,12 +321,7 @@ pub fn clamp_to_window(rect: Rect, window_w: f32, window_h: f32) -> Rect {
 
 pub fn settings_panel(window_w: f32, window_h: f32) -> Rect {
     clamp_to_window(
-        Rect {
-            x: window_w * 0.5 - 220.0,
-            y: 64.0,
-            w: 440.0,
-            h: (window_h - 120.0).min(420.0),
-        },
+        Rect { x: window_w * 0.5 - 220.0, y: 64.0, w: 440.0, h: (window_h - 120.0).min(420.0) },
         window_w,
         window_h,
     )
@@ -399,22 +364,12 @@ mod tests {
     use crate::widgets::MenuItem;
 
     fn item(label: &str) -> MenuItem {
-        MenuItem {
-            id: label.into(),
-            label: label.into(),
-            checked: false,
-            section: None,
-        }
+        MenuItem { id: label.into(), label: label.into(), checked: false, section: None }
     }
 
     #[test]
     fn popup_shifts_left_when_past_right_edge() {
-        let anchor = Rect {
-            x: 670.0,
-            y: 200.0,
-            w: 232.0,
-            h: 22.0,
-        };
+        let anchor = Rect { x: 670.0, y: 200.0, w: 232.0, h: 22.0 };
         let items = vec![item("Digiface USB (24145053)  18/18")];
         let r = layout_popup(anchor, &items, 900.0, 700.0);
         assert!(r.x + r.w <= 900.0 - OVERLAY_MARGIN + 0.5);
@@ -425,12 +380,7 @@ mod tests {
 
     #[test]
     fn popup_sizes_to_content_not_short_string() {
-        let anchor = Rect {
-            x: 20.0,
-            y: 80.0,
-            w: 230.0,
-            h: 22.0,
-        };
+        let anchor = Rect { x: 20.0, y: 80.0, w: 230.0, h: 22.0 };
         let items = vec![item("Digiface USB (24145053)  18/18")];
         let r = layout_popup(anchor, &items, 1200.0, 800.0);
         assert!(r.w > 230.0, "menu should grow to the device name, got {}", r.w);
@@ -439,31 +389,16 @@ mod tests {
 
     #[test]
     fn popup_flips_above_near_footer() {
-        let anchor = Rect {
-            x: 40.0,
-            y: 640.0,
-            w: 200.0,
-            h: 22.0,
-        };
+        let anchor = Rect { x: 40.0, y: 640.0, w: 200.0, h: 22.0 };
         let items = vec![item("A"), item("B"), item("C"), item("D")];
         let r = layout_popup(anchor, &items, 900.0, 700.0);
-        assert!(
-            r.y + r.h <= anchor.y + 0.5,
-            "expected flip above the field, y={} h={}",
-            r.y,
-            r.h
-        );
+        assert!(r.y + r.h <= anchor.y + 0.5, "expected flip above the field, y={} h={}", r.y, r.h);
         assert!(r.y >= OVERLAY_MARGIN);
     }
 
     #[test]
     fn popup_opens_below_when_there_is_room() {
-        let anchor = Rect {
-            x: 40.0,
-            y: 100.0,
-            w: 200.0,
-            h: 22.0,
-        };
+        let anchor = Rect { x: 40.0, y: 100.0, w: 200.0, h: 22.0 };
         let items = vec![item("A")];
         let r = layout_popup(anchor, &items, 900.0, 700.0);
         assert!(r.y >= anchor.y + anchor.h);
@@ -495,12 +430,7 @@ mod tests {
 
     #[test]
     fn menu_hover_ignores_x_outside_shifted_rect() {
-        let rect = Rect {
-            x: 100.0,
-            y: 50.0,
-            w: 200.0,
-            h: 80.0,
-        };
+        let rect = Rect { x: 100.0, y: 50.0, w: 200.0, h: 80.0 };
         let items = vec![item("A"), item("B")];
         assert!(menu_at(rect, &items, 110.0, 60.0).is_some());
         assert!(menu_at(rect, &items, 20.0, 60.0).is_none());

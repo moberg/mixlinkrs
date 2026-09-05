@@ -1,8 +1,8 @@
 //! Waveform LOD: per-file min/max (and peak) bins, MixLink gamma, column downsample.
 //!
-//! MixLink `ArrangementView.drawClipWaveform`:
-//! `mag = pow(peak / maxPeak, 0.45)`, floor 0.6 px, `scale >= 1` max-of-bucket
-//! and `scale < 1` nearest-sample upsample.
+//! Arrangement clips draw bipolar min/max (linear, per-file `maxPeak`) so
+//! transients stay one-column spikes. Peak + `pow(n, 0.45)` remains available
+//! for MixLink-style magnitude fills.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -170,6 +170,103 @@ pub fn column_half_pixels(peak: f32, max_peak: f32, half: f32) -> f32 {
     (gamma_mag(peak, max_peak) * half).max(MIN_HALF_PX)
 }
 
+/// Per-column min/max matching the `bins_for_width` downsample / upsample.
+///
+/// Used for bipolar waveform drawing so a one-bin transient survives as a
+/// full-height spike instead of being averaged into the body.
+pub fn minmax_for_width(
+    min: &[f32],
+    max: &[f32],
+    start: usize,
+    count: usize,
+    cols: usize,
+    start_x: f64,
+    full_width: f64,
+) -> Vec<(f32, f32)> {
+    let n = min.len().min(max.len());
+    if count == 0 || cols == 0 || full_width <= 1.0 || start >= n {
+        return Vec::new();
+    }
+    let count = count.min(n - start);
+    let scale = count as f64 / full_width;
+    let i0 = ((start_x * scale) as i64).clamp(0, (count as i64) - 1) as usize;
+    let i1 = (((start_x + cols as f64) * scale + 0.999) as i64).clamp((i0 + 1) as i64, count as i64)
+        as usize;
+
+    let at_min = |i: usize| min[start + i];
+    let at_max = |i: usize| max[start + i];
+    let mut out = vec![(0.0f32, 0.0f32); cols];
+
+    if scale >= 1.0 {
+        let mut col = 0usize;
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        let mut next_i =
+            (((start_x + 1.0) * scale) as i64).clamp((i0 + 1) as i64, count as i64) as usize;
+        for i in i0..i1 {
+            if i >= next_i && col < cols {
+                out[col] = finite_pair(lo, hi);
+                col += 1;
+                lo = f32::INFINITY;
+                hi = f32::NEG_INFINITY;
+                next_i = ((next_i + 1) as i64)
+                    .max(((start_x + col as f64 + 1.0) * scale) as i64)
+                    .clamp(0, count as i64) as usize;
+            }
+            lo = lo.min(at_min(i));
+            hi = hi.max(at_max(i));
+        }
+        while col < cols {
+            out[col] = finite_pair(lo, hi);
+            col += 1;
+            lo = f32::INFINITY;
+            hi = f32::NEG_INFINITY;
+        }
+    } else {
+        for x in 0..cols {
+            let i = (((start_x + x as f64) * scale) as i64).clamp(0, (count as i64) - 1) as usize;
+            out[x] = (at_min(i), at_max(i));
+        }
+    }
+    out
+}
+
+/// One `(min, max)` per LOD bin in the visible window, plus a neighbour on
+/// each side so the strip can slope off-screen. `x0` is the first point's
+/// offset from the clip left; spacing is pixels per bin.
+pub fn minmax_zoom_points(
+    min: &[f32],
+    max: &[f32],
+    start: usize,
+    count: usize,
+    start_x: f64,
+    vis_width: f64,
+    full_width: f64,
+) -> (f64, f64, Vec<(f32, f32)>) {
+    let n = min.len().min(max.len());
+    if count == 0 || vis_width <= 0.0 || full_width <= 1.0 || start >= n {
+        return (0.0, 1.0, Vec::new());
+    }
+    let count = count.min(n - start);
+    if count == 0 {
+        return (0.0, 1.0, Vec::new());
+    }
+    let px_per_bin = full_width / count as f64;
+    let last_i = (count as i64) - 1;
+    let first = ((start_x / px_per_bin).floor() as i64 - 1).clamp(0, last_i) as usize;
+    let last = (((start_x + vis_width) / px_per_bin).ceil() as i64 + 1).clamp(first as i64, last_i)
+        as usize;
+    let mut out = Vec::with_capacity(last - first + 1);
+    for i in first..=last {
+        out.push((min[start + i], max[start + i]));
+    }
+    (first as f64 * px_per_bin, px_per_bin, out)
+}
+
+fn finite_pair(lo: f32, hi: f32) -> (f32, f32) {
+    (if lo.is_finite() { lo } else { 0.0 }, if hi.is_finite() { hi } else { 0.0 })
+}
+
 /// Per-column peaks matching `drawClipWaveform` downsample / upsample.
 ///
 /// `peaks[start .. start+count]` is the clip slice; `maxPeak` is **not**
@@ -188,8 +285,8 @@ pub fn bins_for_width(
     let count = count.min(peaks.len() - start);
     let scale = count as f64 / full_width;
     let i0 = ((start_x * scale) as i64).clamp(0, (count as i64) - 1) as usize;
-    let i1 = (((start_x + cols as f64) * scale + 0.999) as i64)
-        .clamp((i0 + 1) as i64, count as i64) as usize;
+    let i1 = (((start_x + cols as f64) * scale + 0.999) as i64).clamp((i0 + 1) as i64, count as i64)
+        as usize;
 
     let at = |i: usize| peaks[start + i];
     let mut out = vec![0.0f32; cols];
@@ -299,9 +396,69 @@ mod tests {
     }
 
     #[test]
+    fn downsample_keeps_transient_spike() {
+        let mut min = vec![0.0f32; 64];
+        let mut max = vec![0.0f32; 64];
+        min[10] = -1.0;
+        max[10] = 1.0;
+        let cols = minmax_for_width(&min, &max, 0, 64, 16, 0.0, 16.0);
+        assert_eq!(cols.len(), 16);
+        let spikes = cols.iter().filter(|(lo, hi)| *lo <= -0.999 && *hi >= 0.999).count();
+        let quiet = cols.iter().filter(|(lo, hi)| lo.abs() < 0.01 && hi.abs() < 0.01).count();
+        assert_eq!(spikes, 1, "{cols:?}");
+        assert_eq!(quiet, 15, "{cols:?}");
+    }
+
+    #[test]
+    fn minmax_viewport_slice_matches_full_window() {
+        let min: Vec<f32> = (0..8).map(|i| -(i as f32) / 8.0).collect();
+        let max: Vec<f32> = (0..8).map(|i| (i as f32) / 8.0).collect();
+        let full = minmax_for_width(&min, &max, 0, 8, 8, 0.0, 8.0);
+        let mid = minmax_for_width(&min, &max, 0, 8, 3, 2.0, 8.0);
+        assert_eq!(mid.len(), 3);
+        assert!((mid[0].0 - full[2].0).abs() < 1e-6 && (mid[0].1 - full[2].1).abs() < 1e-6);
+        assert!((mid[2].0 - full[4].0).abs() < 1e-6 && (mid[2].1 - full[4].1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn zoom_points_one_per_bin() {
+        let min = [-0.2f32, -0.8, -0.4];
+        let max = [0.2f32, 0.8, 0.4];
+        let (x0, spacing, pts) = minmax_zoom_points(&min, &max, 0, 3, 10.0, 10.0, 30.0);
+        assert!((spacing - 10.0).abs() < 1e-6);
+        assert_eq!(pts.len(), 3);
+        assert!((x0 - 0.0).abs() < 1e-6);
+        assert!((pts[1].0 + 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn zoom_points_stay_near_viewport() {
+        let min: Vec<f32> = (0..40).map(|i| i as f32).collect();
+        let max = min.clone();
+        let (x0, spacing, pts) = minmax_zoom_points(&min, &max, 0, 40, 80.0, 30.0, 400.0);
+        assert!((spacing - 10.0).abs() < 1e-6);
+        assert!(pts.len() < 10, "{pts:?}");
+        assert!(pts.len() >= 3);
+        assert!(x0 >= 60.0 && x0 <= 80.0);
+    }
+
+    #[test]
+    fn minmax_upsample_repeats_nearest() {
+        let min = [-0.2f32, -0.8];
+        let max = [0.2f32, 0.8];
+        let cols = minmax_for_width(&min, &max, 0, 2, 4, 0.0, 4.0);
+        assert_eq!(cols.len(), 4);
+        assert!((cols[0].0 + 0.2).abs() < 1e-6 && (cols[0].1 - 0.2).abs() < 1e-6);
+        assert!((cols[2].0 + 0.8).abs() < 1e-6 && (cols[2].1 - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
     fn epoch_bumps_on_finish() {
         let cache = WaveformCache::new();
-        cache.insert("3-ch-01-Rytm.wav", WaveformLod { peaks: vec![0.2], max_peak: 0.2, ..Default::default() });
+        cache.insert(
+            "3-ch-01-Rytm.wav",
+            WaveformLod { peaks: vec![0.2], max_peak: 0.2, ..Default::default() },
+        );
         assert_eq!(cache.epoch(), 0);
         cache.note_file_finished("3-ch-01-Rytm.wav");
         assert_eq!(cache.epoch(), 1);

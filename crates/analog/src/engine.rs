@@ -369,7 +369,9 @@ impl AnalogEngine {
             let Some(source) = self.return_source(lane) else {
                 continue;
             };
-            if node.source_bus != source.0 || node.source != source.1 || node.dest != self.config.main_output
+            if node.source_bus != source.0
+                || node.source != source.1
+                || node.dest != self.config.main_output
             {
                 continue;
             }
@@ -576,11 +578,8 @@ impl AnalogEngine {
     }
 
     pub fn hardware_label(ch: &MixerChannel) -> String {
-        let name = if ch.name.is_empty() {
-            format!("ADAT {}", ch.id.index + 1)
-        } else {
-            ch.name.clone()
-        };
+        let name =
+            if ch.name.is_empty() { format!("ADAT {}", ch.id.index + 1) } else { ch.name.clone() };
         if name.contains('/') || name == "PH" {
             return name;
         }
@@ -907,11 +906,9 @@ impl AnalogEngine {
                 .hardware_effect(id)
                 .map(|h| h.title())
                 .unwrap_or_else(|| "Hardware".into()),
-            EffectRef::Plugin(id) => self
-                .config
-                .plugin(id)
-                .map(|p| p.title())
-                .unwrap_or_else(|| "Plugin".into()),
+            EffectRef::Plugin(id) => {
+                self.config.plugin(id).map(|p| p.title()).unwrap_or_else(|| "Plugin".into())
+            }
         }
     }
 
@@ -929,20 +926,16 @@ impl AnalogEngine {
     pub fn destination_name(&self, dest: SendDestination) -> String {
         match dest {
             SendDestination::Output(i) => self.output_name(i),
-            SendDestination::Plugin(id) => self
-                .config
-                .plugin(id)
-                .map(|p| p.title())
-                .unwrap_or_else(|| "Plugin".into()),
+            SendDestination::Plugin(id) => {
+                self.config.plugin(id).map(|p| p.title()).unwrap_or_else(|| "Plugin".into())
+            }
         }
     }
 
     pub fn set_strip_source(&mut self, strip: usize, id: ChannelID) {
-        let linked = self
-            .mixer
-            .channel(id)
-            .map(|c| c.stereo)
-            .unwrap_or_else(|| self.config.strips.get(strip).map(|s| s.linked_stereo).unwrap_or(true));
+        let linked = self.mixer.channel(id).map(|c| c.stereo).unwrap_or_else(|| {
+            self.config.strips.get(strip).map(|s| s.linked_stereo).unwrap_or(true)
+        });
         self.remap_strip(strip, id, linked);
         self.persist();
     }
@@ -1200,12 +1193,7 @@ impl AnalogEngine {
         self.persist();
     }
 
-    pub fn silence_return(
-        &mut self,
-        id: i32,
-        source: Option<(MixerBus, i32)>,
-        dest: Option<i32>,
-    ) {
+    pub fn silence_return(&mut self, id: i32, source: Option<(MixerBus, i32)>, dest: Option<i32>) {
         self.write_return_fader(id, 0.0, dest, source);
     }
 

@@ -18,7 +18,10 @@ fn main() {
     if !have_sdk && script.exists() && env::var("MIXLINK_BUILD_VST3").is_ok() {
         let status = Command::new("bash")
             .arg(&script)
-            .env("MIXLINK_VST3_ARCHS", env::var("MIXLINK_VST3_ARCHS").unwrap_or_else(|_| "arm64".into()))
+            .env(
+                "MIXLINK_VST3_ARCHS",
+                env::var("MIXLINK_VST3_ARCHS").unwrap_or_else(|_| "arm64".into()),
+            )
             .current_dir(root)
             .status();
         if let Ok(s) = status {
@@ -32,14 +35,7 @@ fn main() {
     if sdk_lib.exists() {
         let sdk_inc = root.join("Vendor/vst3sdk");
         let status = Command::new("clang++")
-            .args([
-                "-c",
-                "-fobjc-arc",
-                "-std=c++17",
-                "-fPIC",
-                "-O2",
-                "-o",
-            ])
+            .args(["-c", "-fobjc-arc", "-std=c++17", "-fPIC", "-O2", "-o"])
             .arg(out.join("MixLinkVST3Bridge.o"))
             .arg(manifest.join("native/MixLinkVST3Bridge.mm"))
             .arg(format!("-I{}", sdk_inc.display()))

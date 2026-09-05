@@ -5,9 +5,9 @@
 
 pub mod block;
 pub mod env;
+pub mod fft;
 pub mod filter;
 pub mod interp;
-pub mod fft;
 pub mod onset;
 
 /// Mono sample type used throughout the engine.
@@ -44,7 +44,11 @@ pub fn db_to_amp(db: f32) -> f32 {
 /// Convert linear amplitude to dB. Clamps at -inf for zero.
 #[inline]
 pub fn amp_to_db(amp: f32) -> f32 {
-    if amp <= 1e-12 { -240.0 } else { 20.0 * amp.log10() }
+    if amp <= 1e-12 {
+        -240.0
+    } else {
+        20.0 * amp.log10()
+    }
 }
 
 /// MIDI note to Hz (A4 = 69 = 440 Hz).

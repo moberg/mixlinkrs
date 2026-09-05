@@ -1,4 +1,4 @@
-use asset::{bins_for_width, column_half_pixels, WaveformCache};
+use asset::{minmax_for_width, minmax_zoom_points, WaveformCache};
 use project::{MixDocument, MixGrid, MixLane, MixTime};
 use render::{DrawCmd, Rect};
 
@@ -40,33 +40,23 @@ pub struct ArrangementView<'a> {
 pub fn paint(view: &ArrangementView<'_>) -> Vec<DrawCmd> {
     let mut cmds = Vec::with_capacity(512);
     let l = view.layout;
-    theme::fill(&mut cmds, Rect { x: l.x, y: l.y, w: l.w, h: l.h }, [0.0, 0.0, 0.0, 0.35]);
-    theme::fill(&mut cmds, Rect { x: l.x, y: l.y, w: HEADER_W, h: l.h - TIME_RULER_H }, [0.0, 0.0, 0.0, 0.22]);
-    theme::seam_v(&mut cmds, l.x + HEADER_W - 2.0, l.y, l.h - TIME_RULER_H, true);
+    let bounds = Rect { x: l.x, y: l.y, w: l.w, h: l.h };
+    let timeline = Rect { x: l.x + HEADER_W, y: l.y, w: (l.w - HEADER_W).max(0.0), h: l.h };
+    let legend = Rect { x: l.x, y: l.y, w: HEADER_W, h: (l.h - TIME_RULER_H).max(0.0) };
 
-    theme::hardware_surface(&mut cmds, Rect { x: l.x, y: l.y, w: HEADER_W, h: RULER_H }, theme::SurfaceStyle::UpperFaceplate);
+    cmds.push(DrawCmd::Layer);
+    cmds.push(DrawCmd::Clip { rect: bounds });
+    theme::fill(&mut cmds, bounds, [0.0, 0.0, 0.0, 0.35]);
+
+    cmds.push(DrawCmd::Layer);
+    cmds.push(DrawCmd::Clip { rect: timeline });
     paint_bar_ruler(&mut cmds, view);
-    let _n = view.tracks.len();
     for (i, track) in view.tracks.iter().enumerate() {
         let y = l.y + RULER_H + i as f32 * TRACK_H - l.scroll_y;
         if y + TRACK_H < l.y || y > l.y + l.h - TIME_RULER_H {
             continue;
         }
-        let selected = view.selected_lane == Some(track.lane);
-        theme::fill(
-            &mut cmds,
-            Rect { x: l.x, y, w: HEADER_W, h: TRACK_H },
-            if selected { [theme::ORANGE[0], theme::ORANGE[1], theme::ORANGE[2], 0.18] } else { [1.0, 1.0, 1.0, 0.03] },
-        );
-        theme::text(
-            &mut cmds,
-            Rect { x: l.x + 8.0, y, w: HEADER_W - 10.0, h: TRACK_H },
-            track.name.clone(),
-            11.0,
-            if selected { theme::TEXT } else { theme::TEXT_DIM },
-            selected,
-        );
-        theme::seam_h(&mut cmds, l.x, y + TRACK_H - 1.0, l.w, false);
+        theme::seam_h(&mut cmds, l.x + HEADER_W, y + TRACK_H - 1.0, l.w - HEADER_W, false);
         paint_lane(&mut cmds, view, track, y);
     }
     if view.tracks.is_empty() {
@@ -81,20 +71,95 @@ pub fn paint(view: &ArrangementView<'_>) -> Vec<DrawCmd> {
     }
     paint_start_marker(&mut cmds, view);
     paint_playhead(&mut cmds, view);
+
+    cmds.push(DrawCmd::Layer);
+    theme::fill(&mut cmds, legend, [0.11, 0.11, 0.11, 1.0]);
+    theme::hardware_surface(
+        &mut cmds,
+        Rect { x: l.x, y: l.y, w: HEADER_W, h: RULER_H },
+        theme::SurfaceStyle::UpperFaceplate,
+    );
+    theme::seam_v(&mut cmds, l.x + HEADER_W - 2.0, l.y, legend.h, true);
+    for (i, track) in view.tracks.iter().enumerate() {
+        let y = l.y + RULER_H + i as f32 * TRACK_H - l.scroll_y;
+        if y + TRACK_H < l.y || y > l.y + l.h - TIME_RULER_H {
+            continue;
+        }
+        let selected = view.selected_lane == Some(track.lane);
+        let kind: analog::MixLane = track.lane.into();
+        let kind_color = theme::lane_kind_color(kind);
+        let lane_bot = l.y + l.h - TIME_RULER_H;
+        let header = Rect {
+            x: l.x,
+            y: y.max(l.y + RULER_H),
+            w: HEADER_W,
+            h: (y + TRACK_H).min(lane_bot) - y.max(l.y + RULER_H),
+        };
+        if header.h <= 0.5 {
+            continue;
+        }
+        theme::fill(&mut cmds, header, theme::lane_kind_header(kind, selected));
+        theme::fill(
+            &mut cmds,
+            Rect { x: l.x, y: header.y, w: 3.0, h: header.h },
+            kind_color,
+        );
+        theme::text_clip(
+            &mut cmds,
+            Rect { x: l.x + 8.0, y, w: HEADER_W - 10.0, h: TRACK_H },
+            track.lane.labeled_name(&track.name),
+            11.0,
+            kind_color,
+            selected,
+            Some(header),
+        );
+        theme::seam_h(&mut cmds, l.x, y + TRACK_H - 1.0, HEADER_W, false);
+    }
+
+    cmds.push(DrawCmd::Layer);
+    cmds.push(DrawCmd::Clip { rect: bounds });
     paint_time_ruler(&mut cmds, view);
+    cmds.push(DrawCmd::Layer);
     cmds
 }
 
 fn x_of(view: &ArrangementView<'_>, frame: i64) -> f32 {
-    let bar = MixTime::bar_of(frame, view.tempo, view.sample_rate);
-    view.layout.x + HEADER_W + bar as f32 * view.layout.pixels_per_bar - view.layout.scroll_x
+    x_of_frame(&view.layout, frame, view.tempo, view.sample_rate)
+}
+
+pub fn x_of_frame(layout: &ArrangementLayout, frame: i64, tempo: f64, rate: f64) -> f32 {
+    let bar = MixTime::bar_of(frame, tempo, rate);
+    layout.x + HEADER_W + bar as f32 * layout.pixels_per_bar - layout.scroll_x
+}
+
+/// START badge in the bar ruler — the only place the marker is grabbed.
+pub fn start_marker_hit(
+    layout: &ArrangementLayout,
+    origin: i64,
+    tempo: f64,
+    rate: f64,
+    x: f32,
+    y: f32,
+) -> bool {
+    let mx = x_of_frame(layout, origin, tempo, rate);
+    x >= mx - 8.0 && x < mx + 42.0 && y >= layout.y && y < layout.y + RULER_H
 }
 
 fn paint_bar_ruler(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
     let l = view.layout;
-    theme::hardware_surface(cmds, Rect { x: l.x + HEADER_W, y: l.y, w: l.w - HEADER_W, h: RULER_H }, theme::SurfaceStyle::UpperFaceplate);
+    theme::hardware_surface(
+        cmds,
+        Rect { x: l.x + HEADER_W, y: l.y, w: l.w - HEADER_W, h: RULER_H },
+        theme::SurfaceStyle::UpperFaceplate,
+    );
     let ppb = l.pixels_per_bar;
-    let step = if ppb >= 36.0 { 1.0 } else if ppb * 4.0 >= 36.0 { 4.0 } else { 8.0 };
+    let step = if ppb >= 36.0 {
+        1.0
+    } else if ppb * 4.0 >= 36.0 {
+        4.0
+    } else {
+        8.0
+    };
     let start_bar = MixTime::bar_of(-view.origin, view.tempo, view.sample_rate);
     let end_bar = start_bar + ((l.w - HEADER_W + l.scroll_x) / ppb.max(1.0)) as f64 + 4.0;
     let mut bar = (start_bar / step).floor() * step;
@@ -113,7 +178,14 @@ fn paint_bar_ruler(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
                     } else {
                         theme::TEXT_DIM
                     };
-                    theme::text_mono(cmds, Rect { x: x + 3.0, y: l.y + 2.0, w: 24.0, h: 14.0 }, format!("{n}"), 9.0, color, musical == 0.0);
+                    theme::text_mono(
+                        cmds,
+                        Rect { x: x + 3.0, y: l.y + 2.0, w: 24.0, h: 14.0 },
+                        format!("{n}"),
+                        9.0,
+                        color,
+                        musical == 0.0,
+                    );
                 }
             }
         }
@@ -121,7 +193,12 @@ fn paint_bar_ruler(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
     }
 }
 
-fn paint_lane(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>, track: &project::MixTrack, y: f32) {
+fn paint_lane(
+    cmds: &mut Vec<DrawCmd>,
+    view: &ArrangementView<'_>,
+    track: &project::MixTrack,
+    y: f32,
+) {
     let l = view.layout;
     draw_grid(cmds, view, y, TRACK_H);
     for clip in &track.clips {
@@ -134,7 +211,7 @@ fn paint_lane(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>, track: &proje
             continue;
         }
         let selected = view.selected_clips.contains(&clip.id);
-        let mut color = theme::clip_color(clip.source_take);
+        let mut color = theme::clip_color_for_lane(clip.source_take, track.lane.into());
         color[3] = if selected { 0.95 } else { 0.72 };
         cmds.push(DrawCmd::RoundedRect { rect, color, radius: 3.0 });
         cmds.push(DrawCmd::Line {
@@ -151,40 +228,89 @@ fn paint_lane(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>, track: &proje
             [1.0, 1.0, 1.0, 0.8],
             true,
         );
-        if let Some(cache) = view.waveforms {
-            if let Some(lod) = cache.get(&clip.source_file) {
-                let cols = rect.w.max(1.0) as usize;
-                let start = (clip.source_start_frame as usize / asset::SAMPLES_PER_BIN).min(lod.peaks.len());
-                let count = (clip.source_frame_count as usize / asset::SAMPLES_PER_BIN).max(1);
-                let cols_peaks = bins_for_width(&lod.peaks, start, count, cols, 0.0, cols as f64);
-                let half = (rect.h * 0.5 - 8.0).max(4.0);
-                let bins: Vec<(f32, f32)> = cols_peaks
-                    .iter()
-                    .map(|p| {
-                        let mag = column_half_pixels(*p, lod.max_peak, 1.0);
-                        (-mag, mag)
-                    })
-                    .collect();
-                if !bins.is_empty() {
-                    cmds.push(DrawCmd::WaveformBins {
-                        x0: rect.x,
-                        y_center: rect.y + rect.h * 0.55,
-                        height: half * 2.0,
-                        bar_w: 1.0,
-                        color: [1.0, 1.0, 1.0, 0.55],
-                        bins,
-                    });
-                }
-            }
-        }
+        paint_clip_waveform(cmds, view, clip, rect);
     }
     if let Some((lane, a, b)) = view.bar_selection {
         if lane == track.lane {
             let x0 = x_of(view, a.min(b));
             let x1 = x_of(view, a.max(b)).max(x0 + 2.0);
-            theme::fill(cmds, Rect { x: x0, y, w: x1 - x0, h: TRACK_H }, [theme::ORANGE[0], theme::ORANGE[1], theme::ORANGE[2], 0.22]);
+            theme::fill(
+                cmds,
+                Rect { x: x0, y, w: x1 - x0, h: TRACK_H },
+                [theme::ORANGE[0], theme::ORANGE[1], theme::ORANGE[2], 0.22],
+            );
         }
     }
+}
+
+/// Visible slice only. Zoomed out: one min/max column per pixel. Zoomed in:
+/// one point per LOD bin, spaced in clip pixels, so the strip can slope.
+fn paint_clip_waveform(
+    cmds: &mut Vec<DrawCmd>,
+    view: &ArrangementView<'_>,
+    clip: &project::MixClip,
+    rect: Rect,
+) {
+    let Some(cache) = view.waveforms else {
+        return;
+    };
+    let Some(lod) = cache.get(&clip.source_file) else {
+        return;
+    };
+    if lod.min.is_empty() || lod.max.is_empty() {
+        return;
+    }
+    let l = view.layout;
+    let vis_x0 = rect.x.max(l.x + HEADER_W);
+    let vis_x1 = (rect.x + rect.w).min(l.x + l.w);
+    if vis_x1 <= vis_x0 {
+        return;
+    }
+    let full_width = f64::from(rect.w);
+    if full_width <= 1.0 {
+        return;
+    }
+    let start_x = f64::from(vis_x0 - rect.x);
+    let vis_w = f64::from(vis_x1 - vis_x0);
+    let n = lod.min.len().min(lod.max.len());
+    let bin_start = (clip.source_start_frame as usize / asset::SAMPLES_PER_BIN).min(n);
+    let bin_count = (clip.source_frame_count as usize / asset::SAMPLES_PER_BIN)
+        .max(1)
+        .min(n.saturating_sub(bin_start));
+    if bin_count == 0 {
+        return;
+    }
+    let peak = lod.max_peak.max(1e-5);
+    let scale = bin_count as f64 / full_width;
+    let (x0, bar_w, mut bins) = if scale >= 1.0 {
+        let cols = vis_w.ceil() as usize;
+        (
+            vis_x0,
+            1.0f32,
+            minmax_for_width(&lod.min, &lod.max, bin_start, bin_count, cols, start_x, full_width),
+        )
+    } else {
+        let (x_off, spacing, pts) = minmax_zoom_points(
+            &lod.min, &lod.max, bin_start, bin_count, start_x, vis_w, full_width,
+        );
+        (rect.x + x_off as f32, spacing as f32, pts)
+    };
+    for (mn, mx) in &mut bins {
+        *mn = (*mn / peak).clamp(-1.0, 1.0);
+        *mx = (*mx / peak).clamp(-1.0, 1.0);
+    }
+    if bins.is_empty() {
+        return;
+    }
+    let half = (rect.h * 0.5 - 8.0).max(4.0);
+    cmds.push(DrawCmd::WaveformBins {
+        x0,
+        y_center: rect.y + rect.h * 0.55,
+        height: half * 2.0,
+        bar_w,
+        color: [1.0, 1.0, 1.0, 0.78],
+        bins,
+    });
 }
 
 fn draw_grid(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>, y: f32, h: f32) {
@@ -203,7 +329,12 @@ fn draw_grid(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>, y: f32, h: f32
             let frame = view.origin + MixTime::frame_from_bar(bar, view.tempo, view.sample_rate);
             let x = x_of(view, frame);
             if x >= l.x + HEADER_W && x <= l.x + l.w {
-                cmds.push(DrawCmd::Line { a: (x, y), b: (x, y + h), color: [1.0, 1.0, 1.0, op], thickness: 1.0 });
+                cmds.push(DrawCmd::Line {
+                    a: (x, y),
+                    b: (x, y + h),
+                    color: [1.0, 1.0, 1.0, op],
+                    thickness: 1.0,
+                });
             }
             bar += step;
         }
@@ -215,10 +346,16 @@ fn draw_grid(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>, y: f32, h: f32
             let end = start + ((l.w + l.scroll_x) / ppb.max(1.0)) as f64 + 2.0;
             let mut bar = (start / step).floor() * step;
             while bar <= end {
-                let frame = view.origin + MixTime::frame_from_bar(bar, view.tempo, view.sample_rate);
+                let frame =
+                    view.origin + MixTime::frame_from_bar(bar, view.tempo, view.sample_rate);
                 let x = x_of(view, frame);
                 if x >= l.x + HEADER_W && x <= l.x + l.w {
-                    cmds.push(DrawCmd::Line { a: (x, y), b: (x, y + h), color: [1.0, 1.0, 1.0, 0.035], thickness: 1.0 });
+                    cmds.push(DrawCmd::Line {
+                        a: (x, y),
+                        b: (x, y + h),
+                        color: [1.0, 1.0, 1.0, 0.035],
+                        thickness: 1.0,
+                    });
                 }
                 bar += step;
             }
@@ -237,7 +374,14 @@ fn paint_start_marker(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
         thickness: 1.4,
     });
     theme::fill(cmds, Rect { x: x - 8.0, y: l.y + 1.0, w: 50.0, h: 14.0 }, theme::METER_GREEN);
-    theme::text_mono(cmds, Rect { x: x - 4.0, y: l.y + 1.0, w: 44.0, h: 14.0 }, "▶ START", 8.0, [0.0, 0.0, 0.0, 0.85], true);
+    theme::text_mono(
+        cmds,
+        Rect { x: x - 4.0, y: l.y + 1.0, w: 44.0, h: 14.0 },
+        "▶ START",
+        8.0,
+        [0.0, 0.0, 0.0, 0.85],
+        true,
+    );
 }
 
 fn paint_playhead(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
@@ -250,16 +394,36 @@ fn paint_playhead(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
 fn paint_time_ruler(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
     let l = view.layout;
     let y = l.y + l.h - TIME_RULER_H;
-    theme::hardware_surface(cmds, Rect { x: l.x, y, w: HEADER_W, h: TIME_RULER_H }, theme::SurfaceStyle::UpperFaceplate);
-    theme::hardware_surface(cmds, Rect { x: l.x + HEADER_W, y, w: l.w - HEADER_W, h: TIME_RULER_H }, theme::SurfaceStyle::UpperFaceplate);
+    theme::hardware_surface(
+        cmds,
+        Rect { x: l.x, y, w: HEADER_W, h: TIME_RULER_H },
+        theme::SurfaceStyle::UpperFaceplate,
+    );
+    theme::hardware_surface(
+        cmds,
+        Rect { x: l.x + HEADER_W, y, w: l.w - HEADER_W, h: TIME_RULER_H },
+        theme::SurfaceStyle::UpperFaceplate,
+    );
     theme::seam_h(cmds, l.x, y, l.w, true);
     theme::seam_v(cmds, l.x + HEADER_W - 2.0, y, TIME_RULER_H, true);
     let clock = MixTime::format_clock(view.playhead, view.sample_rate);
-    theme::text_center_mono(cmds, Rect { x: l.x, y, w: HEADER_W, h: TIME_RULER_H }, clock, 10.0, theme::TEXT, true);
+    theme::text_center_mono(
+        cmds,
+        Rect { x: l.x, y, w: HEADER_W, h: TIME_RULER_H },
+        clock,
+        10.0,
+        theme::TEXT,
+        true,
+    );
     paint_time_ticks(cmds, view, y);
     let play_x = x_of(view, view.playhead);
     if play_x >= l.x + HEADER_W && play_x <= l.x + l.w {
-        cmds.push(DrawCmd::Line { a: (play_x, y), b: (play_x, y + TIME_RULER_H), color: theme::ORANGE, thickness: 1.2 });
+        cmds.push(DrawCmd::Line {
+            a: (play_x, y),
+            b: (play_x, y + TIME_RULER_H),
+            color: theme::ORANGE,
+            thickness: 1.2,
+        });
     }
 }
 
@@ -349,4 +513,109 @@ pub fn visible_bars(last: i64, play: i64, origin: i64, tempo: f64, rate: f64) ->
 pub fn frame_at(x: f32, layout: &ArrangementLayout, tempo: f64, rate: f64) -> i64 {
     let local = ((x - layout.x - HEADER_W) + layout.scroll_x).max(0.0);
     MixTime::frame_from_bar((local / layout.pixels_per_bar.max(1.0)) as f64, tempo, rate)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asset::WaveformLod;
+    use project::{MixClip, MixLane, MixTrack};
+
+    #[test]
+    fn zoomed_in_waveform_stays_viewport_sized() {
+        let cache = WaveformCache::new();
+        cache.insert(
+            "clip.wav",
+            WaveformLod {
+                min: vec![-0.5; 10_000],
+                max: vec![0.5; 10_000],
+                peaks: vec![0.5; 10_000],
+                max_peak: 1.0,
+            },
+        );
+        let mut track = MixTrack::empty(MixLane::Strip(0), Some("Ch 1".into()));
+        track.clips = vec![MixClip {
+            id: uuid::Uuid::nil(),
+            source_take: 1,
+            source_lane: MixLane::Strip(0),
+            source_file: "clip.wav".into(),
+            source_start_frame: 0,
+            source_frame_count: 10_000 * asset::SAMPLES_PER_BIN as i64,
+            mix_start_frame: 0,
+        }];
+        let view = ArrangementView {
+            layout: ArrangementLayout {
+                x: 0.0,
+                y: 0.0,
+                w: 800.0,
+                h: 400.0,
+                scroll_x: 0.0,
+                scroll_y: 0.0,
+                pixels_per_bar: 16_000.0,
+            },
+            mix: None,
+            tracks: std::slice::from_ref(&track),
+            selected_lane: None,
+            selected_clips: &[],
+            playhead: 0,
+            origin: 0,
+            tempo: 120.0,
+            sample_rate: 48_000.0,
+            grid: MixGrid::Bar1,
+            grid_enabled: false,
+            viewing_take: false,
+            bar_selection: None,
+            waveforms: Some(&cache),
+        };
+        let cmds = paint(&view);
+        let (bins, bar_w) = cmds
+            .iter()
+            .find_map(|c| match c {
+                DrawCmd::WaveformBins { bins, bar_w, .. } => Some((bins.len(), *bar_w)),
+                _ => None,
+            })
+            .expect("waveform");
+        assert!(bar_w > 1.0, "zoomed-in strip spaces LOD bins, got bar_w={bar_w}");
+        assert!(bins < 800, "must not emit one column per pixel, got {bins}");
+        assert!(bins > 20, "visible slice should still cover the lane");
+    }
+
+    #[test]
+    fn arrangement_clips_to_its_bounds() {
+        let track = MixTrack::empty(MixLane::Strip(0), Some("Ch 1".into()));
+        let layout = ArrangementLayout {
+            x: 148.0,
+            y: 40.0,
+            w: 800.0,
+            h: 400.0,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            pixels_per_bar: 48.0,
+        };
+        let cmds = paint(&ArrangementView {
+            layout,
+            mix: None,
+            tracks: std::slice::from_ref(&track),
+            selected_lane: None,
+            selected_clips: &[],
+            playhead: 0,
+            origin: 0,
+            tempo: 120.0,
+            sample_rate: 48_000.0,
+            grid: MixGrid::Bar1,
+            grid_enabled: false,
+            viewing_take: false,
+            bar_selection: None,
+            waveforms: None,
+        });
+        let clips: Vec<Rect> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                DrawCmd::Clip { rect } => Some(*rect),
+                _ => None,
+            })
+            .collect();
+        assert!(!clips.is_empty());
+        assert!(clips.iter().all(|r| r.x >= 147.9 && r.x + r.w <= 948.1));
+    }
 }

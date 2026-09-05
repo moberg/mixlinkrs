@@ -47,6 +47,45 @@ impl MixLane {
         }
     }
 
+    /// Arrangement / mixer label matching take filenames: `ch 01 Rytm`,
+    /// `ret A BigSky`, `bus 01 No effect`.
+    pub fn labeled_name(self, name: &str) -> String {
+        let name = name.trim();
+        let skip_name = name.is_empty() || name == self.title();
+        match self {
+            Self::Strip(i) => {
+                if skip_name {
+                    format!("ch {:02}", i + 1)
+                } else {
+                    format!("ch {:02} {name}", i + 1)
+                }
+            }
+            Self::ReturnLane(lane) if lane.is_send() => {
+                let letter = lane.strip_title();
+                if skip_name {
+                    format!("ret {letter}")
+                } else {
+                    format!("ret {letter} {name}")
+                }
+            }
+            Self::ReturnLane(lane) => {
+                let n = if lane == ReturnLane::Bus1 { 1 } else { 2 };
+                if skip_name {
+                    format!("bus {n:02}")
+                } else {
+                    format!("bus {n:02} {name}")
+                }
+            }
+            Self::Main => {
+                if name.is_empty() {
+                    "mix".into()
+                } else {
+                    name.into()
+                }
+            }
+        }
+    }
+
     pub fn default_lanes(send_count: i32) -> Vec<Self> {
         let mut lanes: Vec<Self> = (0..8).map(Self::Strip).collect();
         let n = send_count.clamp(2, MAX_SEND_COUNT) as usize;
@@ -155,7 +194,9 @@ impl MixClip {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MixKnobMap {
+    #[serde(rename = "insertID", alias = "insertId")]
     pub insert_id: Uuid,
+    #[serde(rename = "parameterID", alias = "parameterId")]
     pub parameter_id: u32,
     pub label: String,
 }
@@ -167,7 +208,8 @@ pub struct MixInsert {
     pub name: String,
     #[serde(default)]
     pub bundle_path: Option<String>,
-    #[serde(default)]
+    /// MixLink writes `classUID`.
+    #[serde(default, rename = "classUID", alias = "classUid")]
     pub class_uid: Option<String>,
     pub bypassed: bool,
 }
@@ -444,6 +486,15 @@ impl MixDocument {
         self.start_frame = self.start_frame.max(0);
     }
 
+    /// MixLink `channelTracks`: arrangement lanes only. Unused Ch 1–8 stay off the mix mixer.
+    pub fn channel_tracks(&self) -> Vec<MixTrack> {
+        self.tracks
+            .iter()
+            .filter(|t| t.lane != MixLane::Main && !t.is_unused_template_strip())
+            .cloned()
+            .collect()
+    }
+
     pub fn last_clip_end(&self) -> i64 {
         self.tracks
             .iter()
@@ -582,10 +633,7 @@ impl MixGrid {
     }
 
     pub fn from_raw(value: f64) -> Self {
-        Self::ALL
-            .into_iter()
-            .find(|g| (g.raw() - value).abs() < 1e-9)
-            .unwrap_or(Self::Bar1)
+        Self::ALL.into_iter().find(|g| (g.raw() - value).abs() < 1e-9).unwrap_or(Self::Bar1)
     }
 
     pub fn title(self) -> &'static str {
@@ -724,6 +772,28 @@ impl TakeInfo {
     pub fn frame_count(&self) -> i64 {
         self.files.iter().map(|f| f.frame_count).max().unwrap_or(0)
     }
+
+    /// MixLink `arrangementTracks` while a take is selected: one clip per file.
+    pub fn arrangement_tracks(&self) -> Vec<MixTrack> {
+        self.files
+            .iter()
+            .filter(|file| file.lane != MixLane::Main)
+            .map(|file| {
+                let mut track = MixTrack::empty(file.lane, Some(file.name.clone()));
+                track.id = take_clip_id(0, &format!("lane.{}", file.lane.id()));
+                track.clips = vec![MixClip {
+                    id: take_clip_id(self.number, &file.filename),
+                    source_take: self.number,
+                    source_lane: file.lane,
+                    source_file: file.filename.clone(),
+                    source_start_frame: 0,
+                    source_frame_count: file.frame_count,
+                    mix_start_frame: 0,
+                }];
+                track
+            })
+            .collect()
+    }
 }
 
 /// `/ : \ space` → `-`, collapse `--`, empty → `Track`.
@@ -789,7 +859,8 @@ pub fn take_wav_name(take: i32, lane: MixLane, name: &str) -> String {
 
 /// Inverse of [`take_wav_name`]. Name dashes become spaces.
 pub fn parse_take_wav(filename: &str) -> Option<(i32, MixLane, String)> {
-    let stem = filename.strip_suffix(".wav").or_else(|| filename.strip_suffix(".WAV")).unwrap_or(filename);
+    let stem =
+        filename.strip_suffix(".wav").or_else(|| filename.strip_suffix(".WAV")).unwrap_or(filename);
     let mut parts = stem.splitn(4, '-');
     let take = parts.next()?.parse::<i32>().ok()?;
     match parts.next()? {
@@ -878,18 +949,12 @@ mod tests {
 
     #[test]
     fn take_wav_name_fixtures() {
-        assert_eq!(
-            take_wav_name(3, MixLane::Strip(0), "Rytm"),
-            "3-ch-01-Rytm.wav"
-        );
+        assert_eq!(take_wav_name(3, MixLane::Strip(0), "Rytm"), "3-ch-01-Rytm.wav");
         assert_eq!(
             take_wav_name(3, MixLane::ReturnLane(ReturnLane::SendA), "BigSky"),
             "3-ret-A-BigSky.wav"
         );
-        assert_eq!(
-            take_wav_name(3, MixLane::ReturnLane(ReturnLane::Bus1), "x"),
-            "3-bus-01-x.wav"
-        );
+        assert_eq!(take_wav_name(3, MixLane::ReturnLane(ReturnLane::Bus1), "x"), "3-bus-01-x.wav");
         assert_eq!(take_wav_name(3, MixLane::Main, "ignored"), "3-mix.wav");
     }
 
@@ -898,6 +963,18 @@ mod tests {
         assert_eq!(sanitize_take_name("A / B:C"), "A-B-C");
         assert_eq!(sanitize_take_name("  "), "Track");
         assert_eq!(sanitize_take_name("a  b"), "a-b");
+    }
+
+    #[test]
+    fn labeled_name_includes_ch_ret_bus() {
+        assert_eq!(MixLane::Strip(0).labeled_name("Rytm"), "ch 01 Rytm");
+        assert_eq!(MixLane::ReturnLane(ReturnLane::SendA).labeled_name("BigSky"), "ret A BigSky");
+        assert_eq!(
+            MixLane::ReturnLane(ReturnLane::Bus1).labeled_name("No effect"),
+            "bus 01 No effect"
+        );
+        assert_eq!(MixLane::Strip(4).labeled_name("Ch 5"), "ch 05");
+        assert_eq!(MixLane::Main.labeled_name("Main"), "Main");
     }
 
     #[test]
@@ -910,10 +987,7 @@ mod tests {
             (3, MixLane::ReturnLane(ReturnLane::SendA), "BigSky")
         );
         let (take, lane, name) = parse_take_wav("3-bus-01-x.wav").unwrap();
-        assert_eq!(
-            (take, lane, name.as_str()),
-            (3, MixLane::ReturnLane(ReturnLane::Bus1), "x")
-        );
+        assert_eq!((take, lane, name.as_str()), (3, MixLane::ReturnLane(ReturnLane::Bus1), "x"));
         let (take, lane, name) = parse_take_wav("3-mix.wav").unwrap();
         assert_eq!((take, lane, name.as_str()), (3, MixLane::Main, "Mix"));
     }
@@ -924,6 +998,51 @@ mod tests {
         assert_eq!(titles, ["1/16", "1/8", "1/4", "1/2", "1", "2", "4", "8"]);
         assert_eq!(MixGrid::default(), MixGrid::Bar1);
         assert_eq!(MixGrid::from_raw(0.0625), MixGrid::Bar16);
+    }
+
+    #[test]
+    fn mixlink_mix_json_loads() {
+        let json = r#"{
+            "id":"E2F1556A-BF54-41FF-9C00-5007D6A285FD",
+            "name":"Mix 1",
+            "startFrame":0,
+            "tracks":[{
+                "id":"75FA665E-2C43-4561-A27A-D309F5FD62E4",
+                "name":"Rytm",
+                "solo":false,"mute":false,"pan":0.5,"fader":0.91549295,
+                "knobs":[0,0,0,0,0,0],
+                "knobMaps":[null,null,null,null,null,null],
+                "inserts":[],
+                "automation":[],
+                "lane":{"kind":"strip","index":0},
+                "clips":[{
+                    "id":"69ADFBEB-DB59-4359-8DE0-0A7416A86121",
+                    "sourceTake":7,
+                    "sourceLane":{"kind":"strip","index":0},
+                    "sourceFile":"7-ch-01-Rytm.wav",
+                    "sourceStartFrame":49356,
+                    "sourceFrameCount":19014900,
+                    "mixStartFrame":0
+                }]
+            }]
+        }"#;
+        let mix: MixDocument = serde_json::from_str(json).unwrap();
+        assert_eq!(mix.name, "Mix 1");
+        assert_eq!(mix.tracks[0].clips[0].source_file, "7-ch-01-Rytm.wav");
+        assert_eq!(mix.tracks[0].inserts.len(), 0);
+    }
+
+    #[test]
+    fn unused_template_strips_are_not_mix_channels() {
+        let mix = MixDocument::empty("Mix 1", 2);
+        assert!(mix.channel_tracks().iter().all(|t| !matches!(t.lane, MixLane::Strip(_))));
+        assert!(mix.channel_tracks().iter().all(|t| t.lane != MixLane::Main));
+        let mut mix = MixDocument::empty("Mix 1", 2);
+        mix.tracks[0].name = "Rytm".into();
+        mix.tracks[0].fader = 0.4;
+        let channels = mix.channel_tracks();
+        assert!(channels.iter().any(|t| t.name == "Rytm" && (t.fader - 0.4).abs() < 1e-6));
+        assert_eq!(channels.iter().filter(|t| matches!(t.lane, MixLane::Strip(_))).count(), 1);
     }
 
     #[test]
@@ -959,6 +1078,8 @@ mod tests {
         assert!(json.contains("\"sourceTake\""));
         assert!(json.contains("\"startFrame\""));
         assert!(json.contains("\"kind\": \"strip\""));
+        assert!(json.contains("\"classUID\""));
+        assert!(json.contains("\"insertID\""));
         let back: MixDocument = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, mix.id);
         assert_eq!(back.name, mix.name);
@@ -967,10 +1088,7 @@ mod tests {
         assert_eq!(back.tracks[0].clips[0].source_file, "3-ch-01-Rytm.wav");
         assert_eq!(back.tracks[0].inserts[0].name, "BigSky");
         assert_eq!(back.tracks[0].automation.len(), 3);
-        assert_eq!(
-            back.tracks[0].automation_value(MixAutomationTarget::Volume, 0, 0.0),
-            0.5
-        );
+        assert_eq!(back.tracks[0].automation_value(MixAutomationTarget::Volume, 0, 0.0), 0.5);
     }
 
     #[test]

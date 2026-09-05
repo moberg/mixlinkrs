@@ -62,6 +62,8 @@ pub struct Schedule {
     pub taps: [AudioTapBinding; TAP_COUNT],
     pub lanes: [LanePlayer; MIX_PLAY_MAX_LANES],
     pub any_solo: bool,
+    /// Mix-page Control Room: listen gain after the Main bus. Export is pre-CR.
+    pub listen_amp: f32,
 }
 
 impl Schedule {
@@ -76,6 +78,7 @@ impl Schedule {
             taps,
             lanes: [LanePlayer::default(); MIX_PLAY_MAX_LANES],
             any_solo: false,
+            listen_amp: 1.0,
         }
     }
 }

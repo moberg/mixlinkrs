@@ -7,7 +7,7 @@ use analog::SessionConfig;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::document::MixDocument;
+use crate::document::{parse_take_wav, MixDocument, MixLane, TakeFile, TakeInfo};
 use crate::meta::ProjectMeta;
 use crate::session::{bookmark_from_path, insert_state_url, resolve_bookmark, uuid_upper};
 
@@ -59,11 +59,7 @@ impl ProjectStore {
     }
 
     pub fn date_label(config: &SessionConfig) -> String {
-        config
-            .current_project_relative
-            .as_deref()
-            .and_then(date_prefix)
-            .unwrap_or_default()
+        config.current_project_relative.as_deref().and_then(date_prefix).unwrap_or_default()
     }
 
     /// Editable suffix after `YYYY-MM-DD - `.
@@ -169,11 +165,52 @@ impl ProjectStore {
         serde_json::from_slice(&data).ok()
     }
 
+    /// MixLink `MixStore.scanTakes`: parseable non-mix WAVs grouped by take number.
+    pub fn scan_take_infos(&self, project: &Path, sample_rate: f64) -> Vec<TakeInfo> {
+        scan_take_infos(project, sample_rate)
+    }
+
     pub fn save_mix(&self, mix: &MixDocument, project: &Path) -> Result<(), StoreError> {
         fs::create_dir_all(project)?;
         let data = serde_json::to_vec_pretty(mix)?;
         atomic_write(&self.mix_url(mix.id, project), &data)
     }
+}
+
+/// MixLink `MixStore.scanTakes` — `{N}-mix.wav` is recorded but hidden from the take list.
+pub fn scan_take_infos(project: &Path, sample_rate: f64) -> Vec<TakeInfo> {
+    let Ok(entries) = fs::read_dir(project) else {
+        return Vec::new();
+    };
+    let mut grouped: std::collections::BTreeMap<i32, Vec<TakeFile>> =
+        std::collections::BTreeMap::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.to_ascii_lowercase().ends_with(".wav") {
+            continue;
+        }
+        let Some((take, lane, display)) = parse_take_wav(name) else {
+            continue;
+        };
+        if lane == MixLane::Main {
+            continue;
+        }
+        grouped.entry(take).or_default().push(TakeFile {
+            lane,
+            name: display,
+            filename: name.to_string(),
+            frame_count: 0,
+            sample_rate,
+        });
+    }
+    grouped
+        .into_iter()
+        .map(|(number, mut files)| {
+            files.sort_by(|a, b| a.lane.id().cmp(&b.lane.id()));
+            TakeInfo { number, files }
+        })
+        .collect()
 }
 
 /// Largest integer before the first `-` of any `.wav` in `project`.
@@ -321,10 +358,8 @@ mod tests {
             assert_eq!(
                 &name,
                 match name.as_str() {
-                    "3-ch-01-Rytm.wav"
-                    | "3-ret-A-BigSky.wav"
-                    | "3-bus-01-x.wav"
-                    | "3-mix.wav" => name.as_str(),
+                    "3-ch-01-Rytm.wav" | "3-ret-A-BigSky.wav" | "3-bus-01-x.wav" | "3-mix.wav" =>
+                        name.as_str(),
                     other => panic!("unexpected name {other}"),
                 }
             );
@@ -352,6 +387,40 @@ mod tests {
         store.save_meta(&meta, &dir).unwrap();
         assert_eq!(scan_takes(&dir), 1);
         assert_eq!(store.next_take(&dir), 5);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_take_infos_hides_mix_wav() {
+        let dir = temp_dir();
+        fs::write(dir.join("7-ch-01-Rytm.wav"), []).unwrap();
+        fs::write(dir.join("7-ret-A-BigSky.wav"), []).unwrap();
+        fs::write(dir.join("7-mix.wav"), []).unwrap();
+        let takes = scan_take_infos(&dir, 48_000.0);
+        assert_eq!(takes.len(), 1);
+        assert_eq!(takes[0].number, 7);
+        assert_eq!(takes[0].files.len(), 2);
+        assert!(takes[0].files.iter().all(|f| f.lane != MixLane::Main));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_meta_reads_mixlink_active_mix_id() {
+        let dir = temp_dir();
+        let id = Uuid::from_u128(0xE2F1556A_BF54_41FF_9C00_5007D6A285FD);
+        fs::write(
+            dir.join("project.json"),
+            format!(
+                r#"{{"nextTake":8,"tempo":123,"mixes":[{{"id":"{id}","name":"Mix 1"}}],"activeMixID":"{id}","arrangement":{{"kind":"take","number":7}},"gridEnabled":false,"grid":1,"pixelsPerBar":14.2}}"#
+            ),
+        )
+        .unwrap();
+        let store = ProjectStore::new();
+        let meta = store.load_meta(&dir);
+        assert_eq!(meta.next_take, 8);
+        assert_eq!(meta.tempo, 123.0);
+        assert_eq!(meta.active_mix_id, Some(id));
+        assert_eq!(meta.arrangement, Some(crate::MixArrangement::Take(7)));
         let _ = fs::remove_dir_all(&dir);
     }
 }

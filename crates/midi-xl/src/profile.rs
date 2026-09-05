@@ -59,8 +59,8 @@ pub const TRACK_SELECT_RIGHT_LED_INDEX: u8 = 0x2F;
 
 /// Every LED index a full `Set LEDs` message must list (`0x18`…`0x2F`).
 pub const ALL_LED_INDICES: [u8; 24] = [
-    0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26,
-    0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F,
+    0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+    0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F,
 ];
 
 /// Launchkey-family / some Factory & Mk2 custom modes (no overlap with User CCs).
@@ -355,14 +355,8 @@ mod tests {
             // User template pads are notes. Factory templates may emit the
             // same numbers as CC, but MixLink matches knob CCs first (41–48,
             // GM 91/93), so only assert the note-on path here.
-            assert_eq!(
-                identify(0x90, FOCUS_NOTES[i], 127),
-                Some(Control::Focus(i))
-            );
-            assert_eq!(
-                identify(0x90, CONTROL_NOTES[i], 127),
-                Some(Control::Control(i))
-            );
+            assert_eq!(identify(0x90, FOCUS_NOTES[i], 127), Some(Control::Focus(i)));
+            assert_eq!(identify(0x90, CONTROL_NOTES[i], 127), Some(Control::Control(i)));
         }
 
         assert_eq!(identify(0x90, 105, 127), Some(Control::Device));

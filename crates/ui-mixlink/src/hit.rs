@@ -19,10 +19,12 @@ pub enum Hit {
     StartMarker,
     Locate,
     MixFader { track: usize, rail_top: f32, rail_bot: f32 },
+    MixControlRoomFader { rail_top: f32, rail_bot: f32 },
     MixPan { track: usize },
     MixMute { track: usize },
     MixSolo { track: usize },
     MixKnob { track: usize, knob: usize },
+    MixMixerHandle,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -75,11 +77,7 @@ pub fn hit_mixer(layout: &MixerLayout, send_count: usize, x: f32, y: f32) -> Opt
     if y >= bay_y && y < bay_y + bay_h {
         let bay = mixer::FaderBay::layout(sx, bay_y, sw, bay_h);
         if widgets::contains(bay.hit, x, y) {
-            return Some(Hit::Fader {
-                kind,
-                rail_top: bay.rail_top,
-                rail_bot: bay.rail_bot,
-            });
+            return Some(Hit::Fader { kind, rail_top: bay.rail_top, rail_bot: bay.rail_bot });
         }
         return None;
     }
@@ -88,20 +86,28 @@ pub fn hit_mixer(layout: &MixerLayout, send_count: usize, x: f32, y: f32) -> Opt
         return Some(Hit::Name { kind });
     }
     yy += Layout::NAME_ROW;
-    if y >= yy {
-        let rel = y - yy;
-        let which = if rel < 31.0 {
-            Pad::Solo
-        } else if rel < 62.0 {
-            Pad::Mute
-        } else if rel < 93.0 {
-            Pad::Bus1
-        } else {
-            Pad::Bus2
-        };
-        return Some(Hit::Pad { kind, which });
+    let row1 = yy + Layout::BUTTON_H + Layout::BUTTON_ROW_GAP;
+    if y >= yy && y < yy + Layout::BUTTON_H {
+        let (solo, mute) = mixer::button_pair_rects(sx, yy, sw);
+        if widgets::contains(solo, x, y) {
+            return Some(Hit::Pad { kind, which: Pad::Solo });
+        }
+        if widgets::contains(mute, x, y) {
+            return Some(Hit::Pad { kind, which: Pad::Mute });
+        }
+        return None;
     }
-    Some(Hit::Name { kind })
+    if matches!(kind, StripKind::Input(_)) && y >= row1 && y < row1 + Layout::BUTTON_H {
+        let (bus1, bus2) = mixer::button_pair_rects(sx, row1, sw);
+        if widgets::contains(bus1, x, y) {
+            return Some(Hit::Pad { kind, which: Pad::Bus1 });
+        }
+        if widgets::contains(bus2, x, y) {
+            return Some(Hit::Pad { kind, which: Pad::Bus2 });
+        }
+        return None;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -137,6 +143,33 @@ mod tests {
     }
 
     #[test]
+    fn paired_pads_hit_left_and_right() {
+        let layout = MixerLayout::new(0.0, 0.0, 1600.0, 900.0, 2);
+        let (sx, sw) = mixer::strip_frame(&layout, 2, StripKind::Input(0));
+        let (bay_y, bay_h) = mixer::fader_bay_frame(&layout, 2);
+        let stack_y = bay_y + bay_h + Layout::NAME_ROW;
+        let (solo, mute) = mixer::button_pair_rects(sx, stack_y, sw);
+        match hit_mixer(&layout, 2, solo.x + solo.w * 0.5, solo.y + 8.0) {
+            Some(Hit::Pad { kind: StripKind::Input(0), which: Pad::Solo }) => {}
+            other => panic!("solo pad, got {other:?}"),
+        }
+        match hit_mixer(&layout, 2, mute.x + mute.w * 0.5, mute.y + 8.0) {
+            Some(Hit::Pad { kind: StripKind::Input(0), which: Pad::Mute }) => {}
+            other => panic!("mute pad, got {other:?}"),
+        }
+        let (bus1, bus2) =
+            mixer::button_pair_rects(sx, stack_y + Layout::BUTTON_H + Layout::BUTTON_ROW_GAP, sw);
+        match hit_mixer(&layout, 2, bus1.x + bus1.w * 0.5, bus1.y + 8.0) {
+            Some(Hit::Pad { kind: StripKind::Input(0), which: Pad::Bus1 }) => {}
+            other => panic!("bus1 pad, got {other:?}"),
+        }
+        match hit_mixer(&layout, 2, bus2.x + bus2.w * 0.5, bus2.y + 8.0) {
+            Some(Hit::Pad { kind: StripKind::Input(0), which: Pad::Bus2 }) => {}
+            other => panic!("bus2 pad, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn main_name_row_hits_name_but_is_not_a_menu_kind() {
         let layout = MixerLayout::new(0.0, 0.0, 1600.0, 900.0, 2);
         let (sx, sw) = mixer::strip_frame(&layout, 2, StripKind::Main);
@@ -146,9 +179,43 @@ mod tests {
             other => panic!("Main name row should be Hit::Name(Main), got {other:?}"),
         }
     }
+
+    #[test]
+    fn start_badge_hits_marker_not_ruler() {
+        let layout = ArrangementLayout {
+            x: 148.0,
+            y: 40.0,
+            w: 800.0,
+            h: 400.0,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            pixels_per_bar: 48.0,
+        };
+        let origin = 0;
+        let mx = arrangement::x_of_frame(&layout, origin, 120.0, 48_000.0);
+        match hit_arrangement(&layout, 1, origin, 120.0, 48_000.0, mx, layout.y + 8.0) {
+            Some(Hit::StartMarker) => {}
+            other => panic!("START badge, got {other:?}"),
+        }
+        match hit_arrangement(&layout, 1, origin, 120.0, 48_000.0, mx + 80.0, layout.y + 8.0) {
+            Some(Hit::Ruler { .. }) => {}
+            other => panic!("empty ruler, got {other:?}"),
+        }
+    }
 }
 
-pub fn hit_arrangement(layout: &ArrangementLayout, track_count: usize, x: f32, y: f32) -> Option<Hit> {
+pub fn hit_arrangement(
+    layout: &ArrangementLayout,
+    track_count: usize,
+    origin: i64,
+    tempo: f64,
+    rate: f64,
+    x: f32,
+    y: f32,
+) -> Option<Hit> {
+    if arrangement::start_marker_hit(layout, origin, tempo, rate, x, y) {
+        return Some(Hit::StartMarker);
+    }
     if y >= layout.y + layout.h - TIME_RULER_H {
         return Some(Hit::TimeRuler);
     }
@@ -176,45 +243,54 @@ pub fn hit_mix_mixer(
     h: f32,
     track_count: usize,
     show_knobs: bool,
+    visible: bool,
     x: f32,
     y: f32,
 ) -> Option<Hit> {
-    if x < x0 || y < y0 || x > x0 + w || y > y0 + h || track_count == 0 {
+    if x < x0 || y < y0 || x > x0 + w || y > y0 + h {
         return None;
     }
-    let ch_w = ((w - 8.0) / track_count as f32).clamp(88.0, 106.0);
+    if !visible {
+        return Some(Hit::MixMixerHandle);
+    }
+    if track_count == 0 {
+        return None;
+    }
+    let strip_count = track_count + 1;
+    let ch_w = crate::mix_mixer::channel_width(w, strip_count);
     let i = ((x - x0 - 4.0) / ch_w) as i32;
-    if i < 0 || i as usize >= track_count {
+    if i < 0 || i as usize >= strip_count {
         return None;
     }
     let i = i as usize;
-    let mut yy = y0 + 8.0;
+    let geom = crate::mix_mixer::strip_geom(x0, y0, h, ch_w, i, show_knobs);
+    if i == track_count {
+        if widgets::contains(geom.fader_hit, x, y) {
+            return Some(Hit::MixControlRoomFader {
+                rail_top: geom.rail_top,
+                rail_bot: geom.rail_bot,
+            });
+        }
+        return None;
+    }
     if show_knobs {
-        for k in 0..project::KNOB_COUNT {
-            if y >= yy && y < yy + 16.0 {
+        for (k, rect) in geom.knobs.iter().enumerate() {
+            if widgets::contains(*rect, x, y) {
                 return Some(Hit::MixKnob { track: i, knob: k });
             }
-            yy += 16.0;
         }
     }
-    yy += 18.0;
-    if y >= yy && y < yy + 36.0 {
+    if widgets::contains(mixer::knob_hit_rect(geom.pan), x, y) {
         return Some(Hit::MixPan { track: i });
     }
-    yy += 36.0;
-    let meter_h = (h - (yy - y0) - 36.0).max(40.0);
-    if y >= yy && y < yy + meter_h {
-        return Some(Hit::MixFader {
-            track: i,
-            rail_top: yy,
-            rail_bot: yy + meter_h - crate::theme::Layout::FADER_CAP_H,
-        });
+    if widgets::contains(geom.fader_hit, x, y) {
+        return Some(Hit::MixFader { track: i, rail_top: geom.rail_top, rail_bot: geom.rail_bot });
     }
-    if y >= y0 + h - 28.0 {
-        if x < x0 + 4.0 + i as f32 * ch_w + ch_w * 0.5 {
-            return Some(Hit::MixMute { track: i });
-        }
+    if widgets::contains(geom.solo, x, y) {
         return Some(Hit::MixSolo { track: i });
+    }
+    if widgets::contains(geom.mute, x, y) {
+        return Some(Hit::MixMute { track: i });
     }
     None
 }

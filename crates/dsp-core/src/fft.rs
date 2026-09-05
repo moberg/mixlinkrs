@@ -22,32 +22,16 @@ impl RealFft {
     }
 
     pub fn scratch_len(&self) -> usize {
-        self.forward
-            .get_scratch_len()
-            .max(self.inverse.get_scratch_len())
+        self.forward.get_scratch_len().max(self.inverse.get_scratch_len())
     }
 
-    pub fn forward(
-        &self,
-        input: &mut [f32],
-        output: &mut [Complex32],
-        scratch: &mut [Complex32],
-    ) {
+    pub fn forward(&self, input: &mut [f32], output: &mut [Complex32], scratch: &mut [Complex32]) {
         // realfft signature is (indata, outdata, scratch)
-        self.forward
-            .process_with_scratch(input, output, scratch)
-            .expect("realfft forward failed");
+        self.forward.process_with_scratch(input, output, scratch).expect("realfft forward failed");
     }
 
-    pub fn inverse(
-        &self,
-        input: &mut [Complex32],
-        output: &mut [f32],
-        scratch: &mut [Complex32],
-    ) {
-        self.inverse
-            .process_with_scratch(input, output, scratch)
-            .expect("realfft inverse failed");
+    pub fn inverse(&self, input: &mut [Complex32], output: &mut [f32], scratch: &mut [Complex32]) {
+        self.inverse.process_with_scratch(input, output, scratch).expect("realfft inverse failed");
     }
 }
 

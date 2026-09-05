@@ -7,15 +7,15 @@ use std::sync::{Arc, Mutex};
 
 use coreaudio_sys::{
     kAudioDevicePropertyBufferFrameSize, kAudioDevicePropertyDeviceNameCFString,
-    kAudioDevicePropertyStreamConfiguration,
-    kAudioDevicePropertyStreamFormat, kAudioHardwarePropertyDefaultInputDevice,
-    kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDevices,
-    kAudioObjectPropertyElementMaster, kAudioObjectPropertyScopeGlobal,
-    kAudioObjectPropertyScopeInput, kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject,
-    AudioBufferList, AudioDeviceCreateIOProcID, AudioDeviceDestroyIOProcID, AudioDeviceIOProcID,
-    AudioDeviceID, AudioDeviceStart, AudioDeviceStop, AudioObjectGetPropertyData,
-    AudioObjectGetPropertyDataSize, AudioObjectID, AudioObjectPropertyAddress,
-    AudioObjectSetPropertyData, AudioStreamBasicDescription, AudioTimeStamp, CFStringRef, OSStatus,
+    kAudioDevicePropertyStreamConfiguration, kAudioDevicePropertyStreamFormat,
+    kAudioHardwarePropertyDefaultInputDevice, kAudioHardwarePropertyDefaultOutputDevice,
+    kAudioHardwarePropertyDevices, kAudioObjectPropertyElementMaster,
+    kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput,
+    kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject, AudioBufferList,
+    AudioDeviceCreateIOProcID, AudioDeviceDestroyIOProcID, AudioDeviceID, AudioDeviceIOProcID,
+    AudioDeviceStart, AudioDeviceStop, AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize,
+    AudioObjectID, AudioObjectPropertyAddress, AudioObjectSetPropertyData,
+    AudioStreamBasicDescription, AudioTimeStamp, CFStringRef, OSStatus,
 };
 use thiserror::Error;
 
@@ -134,7 +134,11 @@ impl Drop for DeviceStream {
     }
 }
 
-fn open_device(device: AudioDeviceID, frames: Option<u32>, cb: DuplexCb) -> Result<DeviceStream, CaError> {
+fn open_device(
+    device: AudioDeviceID,
+    frames: Option<u32>,
+    cb: DuplexCb,
+) -> Result<DeviceStream, CaError> {
     let format = get_stream_format(device, kAudioObjectPropertyScopeOutput)?;
     let sample_rate = format.mSampleRate;
     if let Some(f) = frames {
@@ -144,8 +148,12 @@ fn open_device(device: AudioDeviceID, frames: Option<u32>, cb: DuplexCb) -> Resu
     let state = Arc::new(StreamState {
         cb: Mutex::new(cb),
         anchor: HostTimeAnchor::new(sample_rate),
-        in_bufs: UnsafeCell::new([AudioBuf { data: std::ptr::null_mut(), channels: 0, frames: 0 }; MAX_CA_BUFS]),
-        out_bufs: UnsafeCell::new([AudioBuf { data: std::ptr::null_mut(), channels: 0, frames: 0 }; MAX_CA_BUFS]),
+        in_bufs: UnsafeCell::new(
+            [AudioBuf { data: std::ptr::null_mut(), channels: 0, frames: 0 }; MAX_CA_BUFS],
+        ),
+        out_bufs: UnsafeCell::new(
+            [AudioBuf { data: std::ptr::null_mut(), channels: 0, frames: 0 }; MAX_CA_BUFS],
+        ),
         buffer_frames: actual,
         sample_rate_u32: sample_rate as u32,
         xruns: AtomicU64::new(0),
@@ -165,11 +173,7 @@ fn open_device(device: AudioDeviceID, frames: Option<u32>, cb: DuplexCb) -> Resu
         }
         return Err(CaError::Os(status));
     }
-    log::info!(
-        "audio: {} Hz, {} frame buffer, device {device}",
-        sample_rate as u32,
-        actual
-    );
+    log::info!("audio: {} Hz, {} frame buffer, device {device}", sample_rate as u32, actual);
     Ok(DeviceStream { device, proc_id, state, started: AtomicBool::new(true) })
 }
 
@@ -199,20 +203,13 @@ extern "C" fn io_proc(
     let out_slot = unsafe { &mut *state.out_bufs.get() };
     let n_in = fill_bufs(in_slot, in_data);
     let n_out = fill_bufs(out_slot, out_data as *const AudioBufferList);
-    let frames = out_slot[..n_out]
-        .first()
-        .or(in_slot[..n_in].first())
-        .map(|b| b.frames)
-        .unwrap_or(0);
+    let frames =
+        out_slot[..n_out].first().or(in_slot[..n_in].first()).map(|b| b.frames).unwrap_or(0);
     if frames == 0 {
         return 0;
     }
-    let timing = Timing {
-        host_time,
-        sample_time,
-        frames,
-        sample_rate: state.sample_rate_u32 as f64,
-    };
+    let timing =
+        Timing { host_time, sample_time, frames, sample_rate: state.sample_rate_u32 as f64 };
     let input = BufferList { buffers: &in_slot[..n_in] };
     let output = BufferList { buffers: &out_slot[..n_out] };
     if let Ok(mut guard) = state.cb.try_lock() {
@@ -248,7 +245,13 @@ pub fn enumerate_devices() -> Vec<DeviceInfo> {
     };
     let mut size = 0u32;
     let status = unsafe {
-        AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &addr, 0, std::ptr::null(), &mut size)
+        AudioObjectGetPropertyDataSize(
+            kAudioObjectSystemObject,
+            &addr,
+            0,
+            std::ptr::null(),
+            &mut size,
+        )
     };
     if status != 0 || size == 0 {
         return Vec::new();
@@ -312,7 +315,14 @@ fn device_name(id: AudioDeviceID) -> Option<String> {
     let mut cf: CFStringRef = std::ptr::null();
     let mut size = std::mem::size_of::<CFStringRef>() as u32;
     let status = unsafe {
-        AudioObjectGetPropertyData(id, &addr, 0, std::ptr::null(), &mut size, &mut cf as *mut _ as *mut c_void)
+        AudioObjectGetPropertyData(
+            id,
+            &addr,
+            0,
+            std::ptr::null(),
+            &mut size,
+            &mut cf as *mut _ as *mut c_void,
+        )
     };
     if status != 0 || cf.is_null() {
         return None;
@@ -347,13 +357,21 @@ fn channel_count(id: AudioDeviceID, scope: u32) -> u32 {
         mElement: kAudioObjectPropertyElementMaster,
     };
     let mut size = 0u32;
-    let status = unsafe { AudioObjectGetPropertyDataSize(id, &addr, 0, std::ptr::null(), &mut size) };
+    let status =
+        unsafe { AudioObjectGetPropertyDataSize(id, &addr, 0, std::ptr::null(), &mut size) };
     if status != 0 || size == 0 {
         return 0;
     }
     let mut buf = vec![0u8; size as usize];
     let status = unsafe {
-        AudioObjectGetPropertyData(id, &addr, 0, std::ptr::null(), &mut size, buf.as_mut_ptr() as *mut c_void)
+        AudioObjectGetPropertyData(
+            id,
+            &addr,
+            0,
+            std::ptr::null(),
+            &mut size,
+            buf.as_mut_ptr() as *mut c_void,
+        )
     };
     if status != 0 {
         return 0;
@@ -368,7 +386,10 @@ fn channel_count(id: AudioDeviceID, scope: u32) -> u32 {
     total
 }
 
-fn get_stream_format(device: AudioDeviceID, scope: u32) -> Result<AudioStreamBasicDescription, CaError> {
+fn get_stream_format(
+    device: AudioDeviceID,
+    scope: u32,
+) -> Result<AudioStreamBasicDescription, CaError> {
     let addr = AudioObjectPropertyAddress {
         mSelector: kAudioDevicePropertyStreamFormat,
         mScope: scope,
@@ -377,7 +398,14 @@ fn get_stream_format(device: AudioDeviceID, scope: u32) -> Result<AudioStreamBas
     let mut asbd: AudioStreamBasicDescription = unsafe { std::mem::zeroed() };
     let mut size = std::mem::size_of::<AudioStreamBasicDescription>() as u32;
     let status = unsafe {
-        AudioObjectGetPropertyData(device, &addr, 0, std::ptr::null(), &mut size, &mut asbd as *mut _ as *mut c_void)
+        AudioObjectGetPropertyData(
+            device,
+            &addr,
+            0,
+            std::ptr::null(),
+            &mut size,
+            &mut asbd as *mut _ as *mut c_void,
+        )
     };
     if status != 0 {
         return Err(CaError::Os(status));
@@ -394,7 +422,14 @@ fn set_buffer_frame_size(device: AudioDeviceID, frames: u32) -> Result<(), CaErr
     let mut f = frames;
     let size = std::mem::size_of::<u32>() as u32;
     let status = unsafe {
-        AudioObjectSetPropertyData(device, &addr, 0, std::ptr::null(), size, &mut f as *mut _ as *mut c_void)
+        AudioObjectSetPropertyData(
+            device,
+            &addr,
+            0,
+            std::ptr::null(),
+            size,
+            &mut f as *mut _ as *mut c_void,
+        )
     };
     if status != 0 {
         Err(CaError::Os(status))
@@ -412,7 +447,14 @@ fn get_buffer_frame_size(device: AudioDeviceID) -> Result<u32, CaError> {
     let mut f = 0u32;
     let mut size = std::mem::size_of::<u32>() as u32;
     let status = unsafe {
-        AudioObjectGetPropertyData(device, &addr, 0, std::ptr::null(), &mut size, &mut f as *mut _ as *mut c_void)
+        AudioObjectGetPropertyData(
+            device,
+            &addr,
+            0,
+            std::ptr::null(),
+            &mut size,
+            &mut f as *mut _ as *mut c_void,
+        )
     };
     if status != 0 {
         Err(CaError::Os(status))

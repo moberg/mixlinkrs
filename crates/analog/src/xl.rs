@@ -141,11 +141,7 @@ pub fn apply_xl(
         }
         Control::Focus(i) => {
             let prev = engine.surface.strips[i].assign;
-            let next = if prev == MixAssign::Bus1 {
-                MixAssign::Main
-            } else {
-                MixAssign::Bus1
-            };
+            let next = if prev == MixAssign::Bus1 { MixAssign::Main } else { MixAssign::Bus1 };
             engine.apply_assign(i, prev, next);
             XlEffect::None
         }
@@ -153,11 +149,8 @@ pub fn apply_xl(
             match engine.surface.track_control_mode {
                 TrackControlMode::BusAssign => {
                     let prev = engine.surface.strips[i].assign;
-                    let next = if prev == MixAssign::Bus2 {
-                        MixAssign::Main
-                    } else {
-                        MixAssign::Bus2
-                    };
+                    let next =
+                        if prev == MixAssign::Bus2 { MixAssign::Main } else { MixAssign::Bus2 };
                     engine.apply_assign(i, prev, next);
                 }
                 TrackControlMode::Mute => engine.toggle_mute(i),
@@ -233,7 +226,13 @@ mod tests {
         AnalogEngine::new(mixer, surface, config, OscSession::new())
     }
 
-    fn apply_raw(engine: &mut AnalogEngine, rt: &mut XlRuntime, status: u8, d1: u8, d2: u8) -> XlEffect {
+    fn apply_raw(
+        engine: &mut AnalogEngine,
+        rt: &mut XlRuntime,
+        status: u8,
+        d1: u8,
+        d2: u8,
+    ) -> XlEffect {
         let mut session = midi_xl::MidiSession::recording();
         let events = session.ingest(&[status, d1, d2]);
         assert!(
@@ -341,8 +340,14 @@ mod tests {
         for i in 0..8u8 {
             apply_raw(&mut engine, &mut rt, 0xB0, 13 + i, 64);
             apply_raw(&mut engine, &mut rt, 0xB0, 29 + i, 32);
-            assert!((engine.surface.strips[i as usize].aux(ReturnLane::SendA) - 64.0 / 127.0).abs() < 1e-5);
-            assert!((engine.surface.strips[i as usize].aux(ReturnLane::SendB) - 32.0 / 127.0).abs() < 1e-5);
+            assert!(
+                (engine.surface.strips[i as usize].aux(ReturnLane::SendA) - 64.0 / 127.0).abs()
+                    < 1e-5
+            );
+            assert!(
+                (engine.surface.strips[i as usize].aux(ReturnLane::SendB) - 32.0 / 127.0).abs()
+                    < 1e-5
+            );
         }
     }
 
@@ -417,8 +422,14 @@ mod tests {
             ..midi_xl::LedFrame::default()
         };
         let pairs = frame.pairs();
-        assert_eq!(pairs.iter().find(|(i, _)| *i == midi_xl::MUTE_LED_INDEX).unwrap().1, midi_xl::LED_YELLOW);
-        assert_eq!(pairs.iter().find(|(i, _)| *i == midi_xl::ARM_LED_INDEX).unwrap().1, midi_xl::LED_YELLOW);
+        assert_eq!(
+            pairs.iter().find(|(i, _)| *i == midi_xl::MUTE_LED_INDEX).unwrap().1,
+            midi_xl::LED_YELLOW
+        );
+        assert_eq!(
+            pairs.iter().find(|(i, _)| *i == midi_xl::ARM_LED_INDEX).unwrap().1,
+            midi_xl::LED_YELLOW
+        );
         assert_eq!(
             pairs.iter().find(|(i, _)| *i == midi_xl::SEND_SELECT_UP_LED_INDEX).unwrap().1,
             midi_xl::LED_RED

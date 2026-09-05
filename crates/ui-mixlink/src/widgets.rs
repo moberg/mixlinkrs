@@ -13,17 +13,8 @@ pub fn fader_cap(cmds: &mut Vec<DrawCmd>, rect: Rect, hardware: bool) {
         return;
     }
     // Stem sits under the cap and peeks out the bottom (MixLink offset y: 5).
-    let stem = Rect {
-        x: rect.x + rect.w * 0.5 - 2.5,
-        y: rect.y + rect.h - 2.0,
-        w: 5.0,
-        h: 7.0,
-    };
-    cmds.push(DrawCmd::RoundedRect {
-        rect: stem,
-        color: [0.62, 0.62, 0.60, 1.0],
-        radius: 2.5,
-    });
+    let stem = Rect { x: rect.x + rect.w * 0.5 - 2.5, y: rect.y + rect.h - 2.0, w: 5.0, h: 7.0 };
+    cmds.push(DrawCmd::RoundedRect { rect: stem, color: [0.62, 0.62, 0.60, 1.0], radius: 2.5 });
 
     // MixLink: `.shadow(color: .black.opacity(0.55), radius: 2, x: 1, y: 2)`
     soft_rect_shadow(cmds, rect, 0.70, 4.0, 1.5, 3.0, 3.0);
@@ -96,12 +87,7 @@ pub fn enable_toggle(cmds: &mut Vec<DrawCmd>, rect: Rect, on: bool) {
     let accent = theme::METER_GREEN;
     let r = Layout::BUTTON_RADIUS;
     // HardwarePadStyle shadows the composed control (face + mounting well).
-    let well = Rect {
-        x: rect.x - 1.35,
-        y: rect.y - 0.75,
-        w: rect.w + 2.7,
-        h: rect.h + 2.7,
-    };
+    let well = Rect { x: rect.x - 1.35, y: rect.y - 0.75, w: rect.w + 2.7, h: rect.h + 2.7 };
     if on {
         // MixLink HardwarePadStyle: `.shadow(color: accent.opacity(0.55), radius: 6)`.
         // wgpu additive rings read hotter than SwiftUI's Gaussian, so this is
@@ -114,12 +100,7 @@ pub fn enable_toggle(cmds: &mut Vec<DrawCmd>, rect: Rect, on: bool) {
     let cy = rect.y + rect.h * 0.5;
     let led_d = 5.5;
     if on {
-        let led = Rect {
-            x: cx - led_d * 0.5,
-            y: cy - led_d * 0.5,
-            w: led_d,
-            h: led_d,
-        };
+        let led = Rect { x: cx - led_d * 0.5, y: cy - led_d * 0.5, w: led_d, h: led_d };
         // HardwarePadStyle on the label: `.shadow(color: accent.opacity(0.9), radius: 2.4)`
         gaussian_tint_shadow(cmds, led, accent, 0.9, 2.4, led_d * 0.5);
         // ChannelOnToggle: `.shadow(color: meterGreen.opacity(0.7), radius: 1.6)`
@@ -156,13 +137,26 @@ pub fn hardware_module(cmds: &mut Vec<DrawCmd>, rect: Rect) {
     // MixLink: `strokeBorder(Color.white.opacity(0.05), lineWidth: 0.55)` inset 1
     stroke_border(
         cmds,
-        Rect { x: rect.x + 1.0, y: rect.y + 1.0, w: (rect.w - 2.0).max(0.0), h: (rect.h - 2.0).max(0.0) },
+        Rect {
+            x: rect.x + 1.0,
+            y: rect.y + 1.0,
+            w: (rect.w - 2.0).max(0.0),
+            h: (rect.h - 2.0).max(0.0),
+        },
         [1.0, 1.0, 1.0, 0.05],
     );
     theme::fill(cmds, Rect { x: rect.x, y: rect.y, w: rect.w, h: 1.0 }, [0.0, 0.0, 0.0, 0.55]);
-    theme::fill(cmds, Rect { x: rect.x, y: rect.y + rect.h - 1.0, w: rect.w, h: 1.0 }, [1.0, 1.0, 1.0, 0.045]);
+    theme::fill(
+        cmds,
+        Rect { x: rect.x, y: rect.y + rect.h - 1.0, w: rect.w, h: 1.0 },
+        [1.0, 1.0, 1.0, 0.045],
+    );
     theme::fill(cmds, Rect { x: rect.x, y: rect.y, w: 1.0, h: rect.h }, [0.0, 0.0, 0.0, 0.45]);
-    theme::fill(cmds, Rect { x: rect.x + rect.w - 1.0, y: rect.y, w: 1.0, h: rect.h }, [1.0, 1.0, 1.0, 0.04]);
+    theme::fill(
+        cmds,
+        Rect { x: rect.x + rect.w - 1.0, y: rect.y, w: 1.0, h: rect.h },
+        [1.0, 1.0, 1.0, 0.04],
+    );
 }
 
 /// MixLink `MenuLabel` / project-name well: recessed field, not a gray overlay.
@@ -173,7 +167,12 @@ pub fn recessed_field(cmds: &mut Vec<DrawCmd>, rect: Rect) {
     // MixLink: `strokeBorder(Color.white.opacity(0.045), lineWidth: 0.5)` inset 1
     stroke_border(
         cmds,
-        Rect { x: rect.x + 1.0, y: rect.y + 1.0, w: (rect.w - 2.0).max(0.0), h: (rect.h - 2.0).max(0.0) },
+        Rect {
+            x: rect.x + 1.0,
+            y: rect.y + 1.0,
+            w: (rect.w - 2.0).max(0.0),
+            h: (rect.h - 2.0).max(0.0),
+        },
         [1.0, 1.0, 1.0, 0.045],
     );
     theme::fill(cmds, Rect { x: rect.x, y: rect.y, w: rect.w, h: 1.0 }, [0.0, 0.0, 0.0, 0.48]);
@@ -198,12 +197,7 @@ fn pad_face(cmds: &mut Vec<DrawCmd>, rect: Rect, lit: bool, accent: Color) {
 fn pad_face_ex(cmds: &mut Vec<DrawCmd>, rect: Rect, lit: bool, accent: Color, generic_glow: bool) {
     let r = Layout::BUTTON_RADIUS;
     let sunken = lit;
-    let well = Rect {
-        x: rect.x - 1.35,
-        y: rect.y - 0.75,
-        w: rect.w + 2.7,
-        h: rect.h + 2.7,
-    };
+    let well = Rect { x: rect.x - 1.35, y: rect.y - 0.75, w: rect.w + 2.7, h: rect.h + 2.7 };
     // MixLink `HardwarePadStyle`:
     // `.shadow(color: .black.opacity(sunken ? 0.28 : 0.62), radius: sunken ? 0.4 : 1.1, x: sunken ? 0 : 0.8, y: sunken ? 0.3 : 1.6)`
     // SwiftUI applies this to the composed pad (face + mounting well).
@@ -223,22 +217,15 @@ fn pad_face_ex(cmds: &mut Vec<DrawCmd>, rect: Rect, lit: bool, accent: Color, ge
             radius: r + 3.0,
         });
     }
-    cmds.push(DrawCmd::RoundedRect {
-        rect: well,
-        color: [0.0, 0.0, 0.0, 0.78],
-        radius: r + 0.6,
-    });
+    cmds.push(DrawCmd::RoundedRect { rect: well, color: [0.0, 0.0, 0.0, 0.78], radius: r + 0.6 });
     theme::fill(
         cmds,
         Rect { x: well.x + 1.0, y: well.y + well.h - 0.6, w: well.w - 2.0, h: 0.6 },
         [1.0, 1.0, 1.0, 0.06],
     );
 
-    let face = if sunken {
-        Rect { x: rect.x, y: rect.y + 1.0, w: rect.w, h: rect.h }
-    } else {
-        rect
-    };
+    let face =
+        if sunken { Rect { x: rect.x, y: rect.y + 1.0, w: rect.w, h: rect.h } } else { rect };
     let mid_h = face.h * 0.45;
     cmds.push(DrawCmd::VertGradient {
         rect: Rect { x: face.x, y: face.y, w: face.w, h: mid_h },
@@ -294,7 +281,11 @@ fn pad_face_ex(cmds: &mut Vec<DrawCmd>, rect: Rect, lit: bool, accent: Color, ge
         Rect { x: face.x, y: face.y, w: 1.0, h: face.h },
         [1.0, 1.0, 1.0, if lit { PAD_BEVEL_LEFT_LIT } else { PAD_BEVEL_LEFT }],
     );
-    theme::fill(cmds, Rect { x: face.x + face.w - 1.0, y: face.y, w: 1.0, h: face.h }, [0.0, 0.0, 0.0, 0.40]);
+    theme::fill(
+        cmds,
+        Rect { x: face.x + face.w - 1.0, y: face.y, w: 1.0, h: face.h },
+        [0.0, 0.0, 0.0, 0.40],
+    );
 }
 
 /// MixLink `KnobStyle`: send has a colored 300° ring; pan is a silver-rimmed pot.
@@ -305,7 +296,15 @@ pub enum KnobKind {
 }
 
 /// MixLink `KnobView`. Send knobs show a dB label; pan knobs do not.
-pub fn knob(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, d: f32, value: f32, kind: KnobKind, label: Option<&str>) {
+pub fn knob(
+    cmds: &mut Vec<DrawCmd>,
+    x: f32,
+    y: f32,
+    d: f32,
+    value: f32,
+    kind: KnobKind,
+    label: Option<&str>,
+) {
     let cx = x + d * 0.5;
     let cy = y + d * 0.5;
     let value = value.clamp(0.0, 1.0);
@@ -517,7 +516,14 @@ fn soft_rect_shadow(
 /// Same 20-stop SDF as [`soft_rect_shadow`], but each ring is the *increment*
 /// of the Gaussian (not the absolute profile). Stacking the absolute profile
 /// in a bright tint reads as a neon plate; the increment stays a chassis haze.
-fn gaussian_tint_shadow(cmds: &mut Vec<DrawCmd>, rect: Rect, color: Color, opacity: f32, blur: f32, corner: f32) {
+fn gaussian_tint_shadow(
+    cmds: &mut Vec<DrawCmd>,
+    rect: Rect,
+    color: Color,
+    opacity: f32,
+    blur: f32,
+    corner: f32,
+) {
     sdf_shadow_rings(cmds, rect, color, opacity, blur, 0.0, 0.0, corner, true, true);
 }
 
@@ -580,7 +586,16 @@ fn sdf_shadow_rings(
     }
 }
 
-fn pointer(cmds: &mut Vec<DrawCmd>, cx: f32, cy: f32, value: f32, length: f32, offset: f32, width: f32, color: Color) {
+fn pointer(
+    cmds: &mut Vec<DrawCmd>,
+    cx: f32,
+    cy: f32,
+    value: f32,
+    length: f32,
+    offset: f32,
+    width: f32,
+    color: Color,
+) {
     // MixLink: capsule pointing up, then `value * 270 - 135`. Screen θ (0 = east, y-down).
     let theta = (value * 270.0 - 225.0).to_radians();
     let (ct, st) = (theta.cos(), theta.sin());
@@ -619,7 +634,15 @@ fn stroke_arc(
     }
 }
 
-fn rim_stroke(cmds: &mut Vec<DrawCmd>, cx: f32, cy: f32, r: f32, thickness: f32, hi: Color, lo: Color) {
+fn rim_stroke(
+    cmds: &mut Vec<DrawCmd>,
+    cx: f32,
+    cy: f32,
+    r: f32,
+    thickness: f32,
+    hi: Color,
+    lo: Color,
+) {
     let steps = ((r.abs() * 2.0).ceil() as i32).clamp(32, 72);
     let tau = std::f32::consts::TAU;
     for i in 0..steps {
@@ -646,9 +669,60 @@ fn rim_stroke(cmds: &mut Vec<DrawCmd>, cx: f32, cy: f32, r: f32, thickness: f32,
     }
 }
 
+/// Thin horizontal hardware scrollbar. Hidden when `max_scroll` is ~0.
+pub fn scrollbar_h(cmds: &mut Vec<DrawCmd>, track: Rect, scroll: f32, max_scroll: f32) {
+    if max_scroll < 0.5 || track.w < 16.0 {
+        return;
+    }
+    let pad = 2.0;
+    let inner_w = (track.w - pad * 2.0).max(8.0);
+    let view_ratio = track.w / (track.w + max_scroll);
+    let thumb_w = (inner_w * view_ratio).clamp(18.0, inner_w);
+    let t = (scroll / max_scroll).clamp(0.0, 1.0);
+    let thumb_x = track.x + pad + t * (inner_w - thumb_w);
+    theme::fill(cmds, track, [0.0, 0.0, 0.0, 0.28]);
+    cmds.push(DrawCmd::RoundedRect {
+        rect: Rect { x: thumb_x, y: track.y + 1.0, w: thumb_w, h: (track.h - 2.0).max(2.0) },
+        color: [0.42, 0.42, 0.40, 0.85],
+        radius: 2.0,
+    });
+}
+
+/// Thin hardware scrollbar. Hidden when `max_scroll` is ~0.
+pub fn scrollbar(cmds: &mut Vec<DrawCmd>, track: Rect, scroll: f32, max_scroll: f32) {
+    if max_scroll < 0.5 || track.h < 16.0 {
+        return;
+    }
+    let pad = 2.0;
+    let inner_h = (track.h - pad * 2.0).max(8.0);
+    let view_ratio = track.h / (track.h + max_scroll);
+    let thumb_h = (inner_h * view_ratio).clamp(18.0, inner_h);
+    let t = (scroll / max_scroll).clamp(0.0, 1.0);
+    let thumb_y = track.y + pad + t * (inner_h - thumb_h);
+    theme::fill(cmds, track, [0.0, 0.0, 0.0, 0.28]);
+    cmds.push(DrawCmd::RoundedRect {
+        rect: Rect { x: track.x + 1.0, y: thumb_y, w: (track.w - 2.0).max(2.0), h: thumb_h },
+        color: [0.42, 0.42, 0.40, 0.85],
+        radius: 2.0,
+    });
+}
+
 pub fn checkbox(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, on: bool, label: &str) {
-    hardware_pad(cmds, Rect { x, y, w: 14.0, h: 14.0 }, if on { "✓" } else { "" }, on, theme::METER_RED);
-    theme::text(cmds, Rect { x: x + 18.0, y: y - 1.0, w: 110.0, h: 16.0 }, label, 9.0, theme::TEXT_DIM, false);
+    hardware_pad(
+        cmds,
+        Rect { x, y, w: 14.0, h: 14.0 },
+        if on { "✓" } else { "" },
+        on,
+        theme::METER_RED,
+    );
+    theme::text(
+        cmds,
+        Rect { x: x + 18.0, y: y - 1.0, w: 110.0, h: 16.0 },
+        label,
+        9.0,
+        theme::TEXT_DIM,
+        false,
+    );
 }
 
 /// MixLink closed sidebar picker (`ChannelPicker` / `MenuLabel` as it paints on
@@ -693,22 +767,12 @@ pub fn channel_picker(cmds: &mut Vec<DrawCmd>, rect: Rect, text: &str, style: Ch
     const PAD_X: f32 = 6.0;
     const GAP: f32 = 3.0;
     const CHEVRON_W: f32 = 8.0;
-    let text_w = approx_ui_advance(text, style.size);
-    let cluster = CHEVRON_W + GAP + text_w;
     let inner = (rect.w - PAD_X * 2.0).max(0.0);
-    let x0 = if style.trailing {
-        rect.x + PAD_X + (inner - cluster).max(0.0)
-    } else {
-        rect.x + PAD_X
-    };
+    let x0 = rect.x + PAD_X;
     let chevron_box = Rect { x: x0, y: rect.y, w: CHEVRON_W, h: rect.h };
     chevron_up_chevron_down(cmds, chevron_box, style.color);
     let label_x = x0 + CHEVRON_W + GAP;
-    let label_w = if style.trailing {
-        text_w.max(1.0)
-    } else {
-        (rect.x + rect.w - PAD_X - label_x).max(0.0)
-    };
+    let label_w = (rect.x + PAD_X + inner - label_x).max(1.0);
     theme::text(
         cmds,
         Rect { x: label_x, y: rect.y, w: label_w, h: rect.h },
@@ -751,18 +815,8 @@ fn chevron_arm(
 ) {
     let peak_y = if up { cy - h * 0.5 } else { cy + h * 0.5 };
     let base_y = if up { cy + h * 0.5 } else { cy - h * 0.5 };
-    cmds.push(DrawCmd::Line {
-        a: (cx - w * 0.5, base_y),
-        b: (cx, peak_y),
-        color,
-        thickness,
-    });
-    cmds.push(DrawCmd::Line {
-        a: (cx, peak_y),
-        b: (cx + w * 0.5, base_y),
-        color,
-        thickness,
-    });
+    cmds.push(DrawCmd::Line { a: (cx - w * 0.5, base_y), b: (cx, peak_y), color, thickness });
+    cmds.push(DrawCmd::Line { a: (cx, peak_y), b: (cx + w * 0.5, base_y), color, thickness });
 }
 
 /// MixLink `StripNameLabel` — diamond + text on the fader bay, bottom hairline.
@@ -770,6 +824,7 @@ fn chevron_arm(
 pub struct StripNameStyle {
     pub diamond: bool,
     pub dim: bool,
+    pub color: Option<theme::Color>,
 }
 
 pub fn strip_name_label(cmds: &mut Vec<DrawCmd>, rect: Rect, text: &str, style: StripNameStyle) {
@@ -786,28 +841,26 @@ pub fn strip_name_label(cmds: &mut Vec<DrawCmd>, rect: Rect, text: &str, style: 
     let label = if style.dim {
         [theme::SECONDARY_TEXT[0], theme::SECONDARY_TEXT[1], theme::SECONDARY_TEXT[2], 0.42]
     } else {
-        theme::PRIMARY_TEXT
+        style.color.unwrap_or(theme::PRIMARY_TEXT)
     };
     let gem = if style.dim {
         [theme::SECONDARY_TEXT[0], theme::SECONDARY_TEXT[1], theme::SECONDARY_TEXT[2], 0.32]
     } else {
-        theme::SECONDARY_TEXT
+        style.color.unwrap_or(theme::SECONDARY_TEXT)
     };
     let font = 11.5;
-    // MixLink `StripNameLabel` is an HStack (diamond + text) with
-    // `.frame(maxWidth: .infinity)` — the pair is centered as a group.
-    // Main is Text only, still centered. Layout height is one line (~17pt)
-    // so cosmic-text cannot wrap inside the 42pt NAME_ROW.
+    // One-line NAME_ROW. Give the label the full remaining strip width so
+    // short names never ellipsize; cosmic-text only trims when it truly
+    // cannot fit.
     let line_h = 17.0;
     let text_y = rect.y + (rect.h - line_h) * 0.5;
     let dia = 6.5;
     let gap = 4.0;
-    // MixLink nameSlot `.padding(.horizontal, 2)`.
     let pad = 2.0;
     let inner_w = (rect.w - pad * 2.0).max(0.0);
-    let (group_x, text_w) = strip_name_group(inner_w, text, style.diamond);
-    let x0 = rect.x + pad + group_x;
+    let x0 = rect.x + pad;
     if style.diamond {
+        let text_w = (inner_w - dia - gap).max(1.0);
         hollow_diamond(cmds, x0 + dia * 0.5, rect.y + rect.h * 0.5, dia, gem);
         theme::text(
             cmds,
@@ -818,32 +871,14 @@ pub fn strip_name_label(cmds: &mut Vec<DrawCmd>, rect: Rect, text: &str, style: 
             false,
         );
     } else {
-        theme::text(
+        theme::text_center(
             cmds,
-            Rect { x: x0, y: text_y, w: text_w, h: line_h },
+            Rect { x: x0, y: text_y, w: inner_w.max(1.0), h: line_h },
             text,
             font,
             label,
             false,
         );
-    }
-}
-
-/// Origin of the diamond+text (or Main text) block inside the padded name row,
-/// plus the text box width. Short names sit as a centered group; long names
-/// fill the row and truncate.
-fn strip_name_group(inner_w: f32, text: &str, diamond: bool) -> (f32, f32) {
-    const FONT: f32 = 11.5;
-    const DIA: f32 = 6.5;
-    const GAP: f32 = 4.0;
-    let measured = approx_ui_advance(text, FONT);
-    if diamond {
-        let text_w = measured.min((inner_w - DIA - GAP).max(0.0)).max(1.0);
-        let cluster = DIA + GAP + text_w;
-        (((inner_w - cluster) * 0.5).max(0.0), text_w)
-    } else {
-        let text_w = measured.min(inner_w).max(1.0);
-        (((inner_w - text_w) * 0.5).max(0.0), text_w)
     }
 }
 
@@ -864,7 +899,13 @@ pub fn text_field(cmds: &mut Vec<DrawCmd>, rect: Rect, text: &str, focused: bool
 }
 
 /// MixLink tempo value: 13 semibold mono (`SessionHeaderView`).
-pub fn text_field_tempo(cmds: &mut Vec<DrawCmd>, rect: Rect, text: &str, focused: bool, caret: bool) {
+pub fn text_field_tempo(
+    cmds: &mut Vec<DrawCmd>,
+    rect: Rect,
+    text: &str,
+    focused: bool,
+    caret: bool,
+) {
     text_field_styled(cmds, rect, text, focused, caret, 13.0, true, true);
 }
 
@@ -880,17 +921,17 @@ fn text_field_styled(
 ) {
     theme::hardware_surface(cmds, rect, theme::SurfaceStyle::Recessed);
     theme::fill(cmds, Rect { x: rect.x, y: rect.y, w: rect.w, h: 1.0 }, [0.0, 0.0, 0.0, 0.55]);
-    theme::fill(cmds, Rect { x: rect.x, y: rect.y + rect.h - 1.0, w: rect.w, h: 1.0 }, [1.0, 1.0, 1.0, 0.05]);
+    theme::fill(
+        cmds,
+        Rect { x: rect.x, y: rect.y + rect.h - 1.0, w: rect.w, h: 1.0 },
+        [1.0, 1.0, 1.0, 0.05],
+    );
     cmds.push(DrawCmd::RoundedRect {
         rect,
         color: if focused { [1.0, 1.0, 1.0, 0.08] } else { [0.0, 0.0, 0.0, 0.0] },
         radius: 3.0,
     });
-    let shown = if caret && focused {
-        format!("{text}|")
-    } else {
-        text.to_string()
-    };
+    let shown = if caret && focused { format!("{text}|") } else { text.to_string() };
     let box_rect = Rect { x: rect.x + 6.0, y: rect.y, w: rect.w - 12.0, h: rect.h };
     if monospaced {
         theme::text_mono(cmds, box_rect, shown, size, theme::TEXT, bold);
@@ -929,20 +970,11 @@ const MENU_ITEM_SELECTED: Color = [1.0, 1.0, 1.0, 1.0];
 pub fn popup_menu(cmds: &mut Vec<DrawCmd>, rect: Rect, items: &[MenuItem], hover: Option<usize>) {
     menu_drop_shadow(cmds, rect);
     cmds.push(DrawCmd::RoundedRect {
-        rect: Rect {
-            x: rect.x - 1.0,
-            y: rect.y - 1.0,
-            w: rect.w + 2.0,
-            h: rect.h + 2.0,
-        },
+        rect: Rect { x: rect.x - 1.0, y: rect.y - 1.0, w: rect.w + 2.0, h: rect.h + 2.0 },
         color: MENU_BORDER,
         radius: MENU_RADIUS + 1.0,
     });
-    cmds.push(DrawCmd::RoundedRect {
-        rect,
-        color: MENU_FILL,
-        radius: MENU_RADIUS,
-    });
+    cmds.push(DrawCmd::RoundedRect { rect, color: MENU_FILL, radius: MENU_RADIUS });
 
     let clip = Rect {
         x: rect.x + 4.0,
@@ -988,12 +1020,7 @@ pub fn popup_menu(cmds: &mut Vec<DrawCmd>, rect: Rect, items: &[MenuItem], hover
         if item.checked {
             theme::text(
                 cmds,
-                Rect {
-                    x: rect.x + 8.0,
-                    y,
-                    w: MENU_CHECK_W,
-                    h: MENU_ITEM_H,
-                },
+                Rect { x: rect.x + 8.0, y, w: MENU_CHECK_W, h: MENU_ITEM_H },
                 "✓",
                 12.0,
                 MENU_ITEM_SELECTED,
@@ -1071,12 +1098,11 @@ pub fn menu_content_width(items: &[MenuItem]) -> f32 {
 fn approx_ui_advance(s: &str, size: f32) -> f32 {
     s.chars()
         .map(|ch| {
-            size
-                * match ch {
-                    ' ' | '.' | ',' | ':' | ';' | 'i' | 'l' | 'I' | 'j' | 't' | 'f' | '\'' => 0.30,
-                    'm' | 'M' | 'w' | 'W' => 0.90,
-                    _ => 0.62,
-                }
+            size * match ch {
+                ' ' | '.' | ',' | ':' | ';' | 'i' | 'l' | 'I' | 'j' | 't' | 'f' | '\'' => 0.36,
+                'm' | 'M' | 'w' | 'W' => 1.00,
+                _ => 0.74,
+            }
         })
         .sum()
 }
@@ -1123,11 +1149,7 @@ pub fn cap_center_y(lin: f32, height: f32, cap_h: f32) -> f32 {
 
 /// MixLink `LevelMeterView`: recessed housing, LED stack inset 2×3.
 pub fn level_meter(cmds: &mut Vec<DrawCmd>, rect: Rect, peak: f32) {
-    cmds.push(DrawCmd::RoundedRect {
-        rect,
-        color: [0.045, 0.045, 0.045, 1.0],
-        radius: 2.0,
-    });
+    cmds.push(DrawCmd::RoundedRect { rect, color: [0.045, 0.045, 0.045, 1.0], radius: 2.0 });
     theme::fill(cmds, Rect { x: rect.x, y: rect.y, w: rect.w, h: 1.0 }, [0.0, 0.0, 0.0, 0.82]);
     theme::fill(cmds, Rect { x: rect.x, y: rect.y, w: 1.0, h: rect.h }, [0.0, 0.0, 0.0, 0.72]);
     theme::fill(
@@ -1140,12 +1162,8 @@ pub fn level_meter(cmds: &mut Vec<DrawCmd>, rect: Rect, peak: f32) {
         Rect { x: rect.x + rect.w - 0.7, y: rect.y, w: 0.7, h: rect.h },
         [1.0, 1.0, 1.0, 0.04],
     );
-    let inner = Rect {
-        x: rect.x + 2.0,
-        y: rect.y + 3.0,
-        w: Layout::METER_W,
-        h: (rect.h - 6.0).max(1.0),
-    };
+    let inner =
+        Rect { x: rect.x + 2.0, y: rect.y + 3.0, w: Layout::METER_W, h: (rect.h - 6.0).max(1.0) };
     theme::fill(cmds, inner, [0.018, 0.018, 0.018, 1.0]);
     let segs = Layout::METER_SEGMENTS;
     let fill_n = (peak * segs as f32).round() as i32;
@@ -1225,21 +1243,5 @@ pub fn decibel_scale(cmds: &mut Vec<DrawCmd>, x: f32, top: f32, h: f32, placemen
                 );
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn strip_name_group_centers_short_names() {
-        let inner = 100.0 - 4.0;
-        let (x_emu, w_emu) = strip_name_group(inner, "EMU", true);
-        let (x_main, w_main) = strip_name_group(inner, "Main", false);
-        assert!(x_emu > 20.0, "diamond+EMU should sit inward, x={x_emu}");
-        assert!(x_main > 20.0, "Main should sit inward, x={x_main}");
-        assert!(x_emu + 6.5 + 4.0 + w_emu < inner);
-        assert!((x_main - (inner - w_main) * 0.5).abs() < 0.01);
     }
 }

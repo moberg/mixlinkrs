@@ -24,7 +24,8 @@ pub struct ProjectMeta {
     pub tempo: f64,
     #[serde(default)]
     pub mixes: Vec<MixListEntry>,
-    #[serde(default)]
+    /// MixLink writes `activeMixID` (capital ID), not camelCase `activeMixId`.
+    #[serde(default, rename = "activeMixID", alias = "activeMixId")]
     pub active_mix_id: Option<Uuid>,
     #[serde(default)]
     pub arrangement: Option<MixArrangement>,
@@ -83,14 +84,29 @@ impl ProjectMeta {
     }
 
     pub fn take_start_frame(&self, number: i32) -> i64 {
-        self.take_start_frames
-            .get(&number.to_string())
-            .copied()
-            .unwrap_or(0)
-            .max(0)
+        self.take_start_frames.get(&number.to_string()).copied().unwrap_or(0).max(0)
     }
 
     pub fn set_take_start_frame(&mut self, number: i32, frame: i64) {
         self.take_start_frames.insert(number.to_string(), frame.max(0));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::MixDocument;
+
+    #[test]
+    fn mix_start_copies_take_then_stays_independent() {
+        let mut meta = ProjectMeta::default();
+        meta.set_take_start_frame(7, 48_000);
+        let mut mix = MixDocument::empty("Mix 1", 2);
+        mix.start_frame = meta.take_start_frame(7);
+        assert_eq!(mix.start_frame, 48_000);
+        mix.start_frame = 96_000;
+        assert_eq!(meta.take_start_frame(7), 48_000);
+        meta.set_take_start_frame(7, 0);
+        assert_eq!(mix.start_frame, 96_000);
     }
 }

@@ -111,10 +111,7 @@ pub fn led_packet(template: u8, pairs: &[(u8, u8)]) -> Vec<u8> {
         bytes.push(velocity);
     }
     bytes.push(0xF7);
-    debug_assert!(
-        !is_template_select(&bytes),
-        "led_packet must never emit template-select 0x77"
-    );
+    debug_assert!(!is_template_select(&bytes), "led_packet must never emit template-select 0x77");
     bytes
 }
 
@@ -126,10 +123,7 @@ pub fn is_template_select(bytes: &[u8]) -> bool {
 /// Launchpad-protocol LED write for the currently selected template.
 /// `note` must be a Focus or Control pad — never 105–108.
 pub fn led_note_on(note: u8, velocity: u8) -> Vec<u8> {
-    debug_assert!(
-        !matches!(note, 105..=108),
-        "notes 105–108 are buttons, not LED addresses"
-    );
+    debug_assert!(!matches!(note, 105..=108), "notes 105–108 are buttons, not LED addresses");
     vec![0x90, note, velocity]
 }
 
@@ -294,8 +288,8 @@ pub fn assert_full_led_packet(bytes: &[u8]) {
 mod tests {
     use super::*;
     use crate::profile::{
-        identify, CONTROL_NOTES, FADER_CCS, FACTORY_KNOB_BOT_CCS, FACTORY_KNOB_MID_CCS,
-        FACTORY_KNOB_TOP_CCS, FOCUS_NOTES, PAN_CCS, SEND_A_CCS, SEND_B_CCS,
+        identify, CONTROL_NOTES, FACTORY_KNOB_BOT_CCS, FACTORY_KNOB_MID_CCS, FACTORY_KNOB_TOP_CCS,
+        FADER_CCS, FOCUS_NOTES, PAN_CCS, SEND_A_CCS, SEND_B_CCS,
     };
     use crate::Control;
 
@@ -319,10 +313,7 @@ mod tests {
     #[test]
     fn one_packet_per_template_is_full_no_77_no_side_note_ons() {
         let messages = led_messages(&sample_frame());
-        let sysex: Vec<_> = messages
-            .iter()
-            .filter(|m| m.first() == Some(&0xF0))
-            .collect();
+        let sysex: Vec<_> = messages.iter().filter(|m| m.first() == Some(&0xF0)).collect();
         assert_eq!(sysex.len(), 16, "one Set LEDs packet per template 0..15");
 
         let mut seen_templates = [false; 16];
@@ -376,19 +367,13 @@ mod tests {
         let full = led_packet(0, &sample_frame().pairs());
         assert_full_led_packet(&full);
 
-        let subset = led_packet(
-            0,
-            &[(MUTE_LED_INDEX, LED_YELLOW), (SOLO_LED_INDEX, LED_YELLOW)],
-        );
+        let subset = led_packet(0, &[(MUTE_LED_INDEX, LED_YELLOW), (SOLO_LED_INDEX, LED_YELLOW)]);
         assert!(
             check_full_led_packet(&subset).is_err(),
             "subset packet must not pass as a complete LED write"
         );
         assert_eq!(
-            led_messages(&LedFrame::default())
-                .iter()
-                .filter(|m| m.first() == Some(&0xF0))
-                .count(),
+            led_messages(&LedFrame::default()).iter().filter(|m| m.first() == Some(&0xF0)).count(),
             16,
             "send_leds / led_messages emits exactly one SysEx per template"
         );
@@ -421,11 +406,8 @@ mod tests {
         assert_full_led_packet(&full);
 
         for missing in ALL_LED_INDICES {
-            let pairs: Vec<(u8, u8)> = ALL_LED_INDICES
-                .iter()
-                .filter(|&&i| i != missing)
-                .map(|&i| (i, LED_OFF))
-                .collect();
+            let pairs: Vec<(u8, u8)> =
+                ALL_LED_INDICES.iter().filter(|&&i| i != missing).map(|&i| (i, LED_OFF)).collect();
             let pkt = led_packet(3, &pairs);
             let err = check_full_led_packet(&pkt).expect_err("missing index must fail");
             assert!(
@@ -459,7 +441,8 @@ mod tests {
 
     #[test]
     fn track_right_always_off() {
-        let pairs = build_led_pairs([true; 8], [LED_RED; 8], true, true, true, true, true, true, true);
+        let pairs =
+            build_led_pairs([true; 8], [LED_RED; 8], true, true, true, true, true, true, true);
         let right = pairs.iter().find(|(i, _)| *i == TRACK_SELECT_RIGHT_LED_INDEX);
         assert_eq!(right, Some(&(TRACK_SELECT_RIGHT_LED_INDEX, LED_OFF)));
     }

@@ -39,10 +39,8 @@ pub fn insert_state_url(
     insert_id: Uuid,
     bundle_path: &str,
 ) -> PathBuf {
-    let bundle_name = Path::new(bundle_path)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(bundle_path);
+    let bundle_name =
+        Path::new(bundle_path).file_name().and_then(|s| s.to_str()).unwrap_or(bundle_path);
     project.join(format!(
         "mix-{}-{}-{}.state",
         uuid_upper(&mix_id),
@@ -148,6 +146,12 @@ mod macos {
     }
 
     pub fn resolve_bookmark(data: &[u8]) -> Option<PathBuf> {
+        resolve_with_options(data, RESOLVE_SECURITY_SCOPE)
+            .or_else(|| resolve_with_options(data, 0))
+            .or_else(|| path_from_bookmark_data(data))
+    }
+
+    fn resolve_with_options(data: &[u8], options: usize) -> Option<PathBuf> {
         let ns_data = NSData::with_bytes(data);
         let mut stale = Bool::NO;
         let mut error: *mut AnyObject = std::ptr::null_mut();
@@ -155,16 +159,39 @@ mod macos {
             msg_send_id![
                 class!(NSURL),
                 URLByResolvingBookmarkData: &*ns_data,
-                options: RESOLVE_SECURITY_SCOPE,
+                options: options,
                 relativeToURL: std::ptr::null::<AnyObject>(),
                 bookmarkDataIsStale: &mut stale,
                 error: &mut error,
             ]
         };
         let url = url?;
-        let _: bool = unsafe { msg_send![&*url, startAccessingSecurityScopedResource] };
+        if options & RESOLVE_SECURITY_SCOPE != 0 {
+            let _: bool = unsafe { msg_send![&*url, startAccessingSecurityScopedResource] };
+        }
         let ns_path: Option<Id<NSString>> = unsafe { msg_send_id![&*url, path] };
         ns_path.map(|p| PathBuf::from(p.to_string()))
+    }
+
+    /// `+[NSURL resourceValuesForKeys:fromBookmarkData:]` — path without resolving
+    /// as the creating app. MixLink bookmarks often fail in an unsigned MixLinkRs.
+    fn path_from_bookmark_data(data: &[u8]) -> Option<PathBuf> {
+        use objc2_foundation::NSArray;
+        let ns_data = NSData::with_bytes(data);
+        let key = NSString::from_str("NSURLPathKey");
+        let keys: Id<NSArray<NSString>> = NSArray::from_vec(vec![key]);
+        let values: Option<Id<objc2_foundation::NSDictionary<NSString, AnyObject>>> = unsafe {
+            msg_send_id![
+                class!(NSURL),
+                resourceValuesForKeys: &*keys,
+                fromBookmarkData: &*ns_data
+            ]
+        };
+        let values = values?;
+        let path_key = NSString::from_str("NSURLPathKey");
+        let value: Option<Id<NSString>> =
+            unsafe { msg_send_id![&*values, objectForKey: &*path_key] };
+        value.map(|p| PathBuf::from(p.to_string())).filter(|p| !p.as_os_str().is_empty())
     }
 }
 
@@ -178,6 +205,22 @@ mod tests {
         let data = bookmark_from_path(path).unwrap();
         let resolved = resolve_bookmark(&data).unwrap();
         assert_eq!(resolved, path);
+    }
+
+    #[test]
+    fn mixlink_session_bookmark_resolves_current_project() {
+        let session = analog::SessionConfig::load();
+        let Some(data) = session.projects_root_bookmark.as_deref() else {
+            return;
+        };
+        let root = resolve_bookmark(data).expect("MixLink projects bookmark did not resolve");
+        let Some(rel) = session.current_project_relative.as_deref() else {
+            return;
+        };
+        let folder = root.join(rel);
+        assert!(folder.is_dir(), "expected current project at {}", folder.display());
+        let takes = crate::scan_take_infos(&folder, 48_000.0);
+        assert!(!takes.is_empty(), "expected at least one take in {}", folder.display());
     }
 
     #[test]

@@ -12,13 +12,13 @@ pub use engine::AnalogEngine;
 pub use mixer::{apply_inbound, MixerState};
 pub use osc::OscSession;
 pub use surface::{SurfaceState, TrackControlMode};
-pub use xl::{apply_xl, XlEffect, XlRuntime};
 pub use types::{
     ChannelID, EffectRef, HardwareEffect, MixAssign, MixEvent, MixLane, MixNode, MixerBus,
     MixerChannel, PluginSlot, ReturnLane, ReturnLaneConfig, ReturnStrip, RoutingSlot,
     SendDestination, StripBinding, StripName, SurfaceStrip, ALL_SEND_LANES, BUS_LANES,
     MAX_SEND_COUNT, SEND_LANES,
 };
+pub use xl::{apply_xl, XlEffect, XlRuntime};
 
 #[cfg(test)]
 mod tests {
@@ -126,10 +126,12 @@ mod tests {
         engine.apply_fader(0, 0.5);
         let sent = engine.osc.sent_messages();
         assert!(sent.iter().any(|m| m.address.ends_with("/faderlin")));
-        assert!(sent.iter().any(|m| m.address.ends_with("/fader") && !m.address.contains("faderlin")));
-        let off = sent.iter().find(|m| {
-            m.address == "/mix/in/0/12/fader" || m.address == "/mix/in/0/10/fader"
-        });
+        assert!(sent
+            .iter()
+            .any(|m| m.address.ends_with("/fader") && !m.address.contains("faderlin")));
+        let off = sent
+            .iter()
+            .find(|m| m.address == "/mix/in/0/12/fader" || m.address == "/mix/in/0/10/fader");
         if let Some(msg) = off {
             assert_eq!(msg.values[0].float_value(), DB_OFF);
         }
@@ -214,7 +216,9 @@ mod tests {
         let wire = serde_json::to_value(&SessionConfig::new()).unwrap();
         assert!(wire.get("oscHost").is_some());
         assert!(wire.get("mainOutput").is_some());
-        assert!(wire.get("projectsRootBookmark").is_none() || wire["projectsRootBookmark"].is_null());
+        assert!(
+            wire.get("projectsRootBookmark").is_none() || wire["projectsRootBookmark"].is_null()
+        );
     }
 
     #[test]

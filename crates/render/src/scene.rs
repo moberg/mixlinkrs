@@ -73,10 +73,25 @@ impl TextureId {
 
 #[derive(Clone, Debug)]
 pub enum DrawCmd {
-    Rect { rect: Rect, color: Color },
-    RoundedRect { rect: Rect, color: Color, radius: f32 },
-    VertGradient { rect: Rect, top: Color, bottom: Color },
-    HorzGradient { rect: Rect, left: Color, right: Color },
+    Rect {
+        rect: Rect,
+        color: Color,
+    },
+    RoundedRect {
+        rect: Rect,
+        color: Color,
+        radius: f32,
+    },
+    VertGradient {
+        rect: Rect,
+        top: Color,
+        bottom: Color,
+    },
+    HorzGradient {
+        rect: Rect,
+        left: Color,
+        right: Color,
+    },
     /// Circle with a top-leading → bottom-trailing gradient (MixLink knob wells).
     LitDisc {
         cx: f32,
@@ -97,19 +112,22 @@ pub enum DrawCmd {
         mid: Color,
         outer: Color,
     },
-    Line { a: (f32, f32), b: (f32, f32), color: Color, thickness: f32 },
+    Line {
+        a: (f32, f32),
+        b: (f32, f32),
+        color: Color,
+        thickness: f32,
+    },
     /// Textured quad. `uv` is the source rect in 0..1 texture space (aspect-fill crop).
     Image {
         rect: Rect,
         uv: Rect,
         texture: TextureId,
     },
-    /// A sequence of `(min, max)` pairs, each drawn as a vertical bar of width
-    /// `bar_w` starting at `x0 + i * bar_w`.
-    ///
-    /// MixLink waveforms use per-file `maxPeak` normalisation and
-    /// `pow(peak / maxPeak, 0.45)` gamma. Callers should apply that before
-    /// filling `bins` rather than relying on linear rustest scaling.
+    /// Bipolar `(min, max)` in −1…1. Consecutive pairs are joined as a strip
+    /// (trapezoids), so zooming in interpolates instead of repeating a column.
+    /// `bins[i]` sits at `x0 + i * bar_w`. Arrangement clips pass linear
+    /// min/max divided by the file peak so transients keep their true height.
     WaveformBins {
         x0: f32,
         y_center: f32,
@@ -125,6 +143,10 @@ pub enum DrawCmd {
     /// Each layer gets its own glyphon vertex buffer; do not share one
     /// `TextRenderer` across layers in a single encoder.
     Layer,
+    /// Clip this layer to `rect` (logical points). First `Clip` in a layer wins.
+    Clip {
+        rect: Rect,
+    },
 }
 
 #[repr(C)]
@@ -141,13 +163,13 @@ unsafe impl bytemuck::Zeroable for Vertex {}
 /// Text commands are skipped (they are drawn by the glyphon path).
 pub fn tessellate(scene: &[DrawCmd], viewport_size: (f32, f32)) -> Vec<Vertex> {
     let (vw, vh) = viewport_size;
-    let px_to_ndc = |x: f32, y: f32| -> [f32; 2] {
-        [2.0 * x / vw - 1.0, 1.0 - 2.0 * y / vh]
-    };
+    let px_to_ndc = |x: f32, y: f32| -> [f32; 2] { [2.0 * x / vw - 1.0, 1.0 - 2.0 * y / vh] };
     let mut out = Vec::with_capacity(scene.len() * 6);
     for cmd in scene {
         match cmd {
-            DrawCmd::Text(_) | DrawCmd::Image { .. } | DrawCmd::Layer => { /* other pipelines */ }
+            DrawCmd::Text(_) | DrawCmd::Image { .. } | DrawCmd::Layer | DrawCmd::Clip { .. } => {
+                /* other pipelines */
+            }
             DrawCmd::Rect { rect, color } => {
                 push_quad(&mut out, rect.x, rect.y, rect.w, rect.h, *color, px_to_ndc);
             }
@@ -161,7 +183,16 @@ pub fn tessellate(scene: &[DrawCmd], viewport_size: (f32, f32)) -> Vec<Vertex> {
                 push_horz_gradient(&mut out, rect, *left, *right, px_to_ndc);
             }
             DrawCmd::LitDisc { cx, cy, d, top_leading, middle, bottom_trailing } => {
-                push_lit_disc(&mut out, *cx, *cy, *d, *top_leading, *middle, *bottom_trailing, px_to_ndc);
+                push_lit_disc(
+                    &mut out,
+                    *cx,
+                    *cy,
+                    *d,
+                    *top_leading,
+                    *middle,
+                    *bottom_trailing,
+                    px_to_ndc,
+                );
             }
             DrawCmd::RadialDisc { cx, cy, d, center, inner, mid, outer } => {
                 push_radial_disc(&mut out, *cx, *cy, *d, *center, *inner, *mid, *outer, px_to_ndc);
@@ -181,33 +212,66 @@ pub fn tessellate(scene: &[DrawCmd], viewport_size: (f32, f32)) -> Vec<Vertex> {
                 push_tri(&mut out, p0, p1, p2, *color);
                 push_tri(&mut out, p0, p2, p3, *color);
             }
-            DrawCmd::WaveformBins {
-                x0,
-                y_center,
-                height,
-                bar_w,
-                color,
-                bins,
-            } => {
-                let h_half = *height * 0.5;
-                for (i, (mn, mx)) in bins.iter().enumerate() {
-                    let x = x0 + i as f32 * *bar_w;
-                    let y_top = y_center - mx * h_half;
-                    let y_bot = y_center - mn * h_half;
-                    push_quad(
-                        &mut out,
-                        x,
-                        y_top,
-                        *bar_w,
-                        (y_bot - y_top).max(1.0),
-                        *color,
-                        px_to_ndc,
-                    );
-                }
+            DrawCmd::WaveformBins { x0, y_center, height, bar_w, color, bins } => {
+                push_waveform_strip(
+                    &mut out, *x0, *y_center, *height, *bar_w, *color, bins, vw, px_to_ndc,
+                );
             }
         }
     }
     out
+}
+
+fn push_waveform_strip(
+    out: &mut Vec<Vertex>,
+    x0: f32,
+    y_center: f32,
+    height: f32,
+    bar_w: f32,
+    color: Color,
+    bins: &[(f32, f32)],
+    vw: f32,
+    map: impl Fn(f32, f32) -> [f32; 2],
+) {
+    if bins.is_empty() {
+        return;
+    }
+    let h_half = height * 0.5;
+    let y_of = |v: f32| y_center - v * h_half;
+    let edge = |mn: f32, mx: f32| -> (f32, f32) {
+        let mut top = y_of(mx);
+        let mut bot = y_of(mn);
+        if bot - top < 1.0 {
+            let mid = (top + bot) * 0.5;
+            top = mid - 0.5;
+            bot = mid + 0.5;
+        }
+        (top, bot)
+    };
+    if bins.len() == 1 {
+        let x = x0;
+        if x + bar_w.max(1.0) < 0.0 || x > vw {
+            return;
+        }
+        let (top, bot) = edge(bins[0].0, bins[0].1);
+        push_quad(out, x, top, bar_w.max(1.0), bot - top, color, map);
+        return;
+    }
+    for i in 0..bins.len() - 1 {
+        let xa = x0 + i as f32 * bar_w;
+        let xb = x0 + (i + 1) as f32 * bar_w;
+        if xb < 0.0 || xa > vw {
+            continue;
+        }
+        let (a_top, a_bot) = edge(bins[i].0, bins[i].1);
+        let (b_top, b_bot) = edge(bins[i + 1].0, bins[i + 1].1);
+        let p0 = map(xa, a_top);
+        let p1 = map(xb, b_top);
+        let p2 = map(xb, b_bot);
+        let p3 = map(xa, a_bot);
+        push_tri(out, p0, p1, p2, color);
+        push_tri(out, p0, p2, p3, color);
+    }
 }
 
 fn push_quad(
@@ -455,7 +519,44 @@ mod tests {
             }],
             (200.0, 100.0),
         );
-        assert_eq!(v.len(), 8 * 6);
+        assert_eq!(v.len(), 7 * 6);
+    }
+
+    #[test]
+    fn waveform_strip_slopes_between_bins() {
+        let v = tessellate(
+            &[DrawCmd::WaveformBins {
+                x0: 0.0,
+                y_center: 50.0,
+                height: 40.0,
+                bar_w: 20.0,
+                color: [1.0; 4],
+                bins: vec![(-0.2, 0.2), (-0.8, 0.8)],
+            }],
+            (200.0, 100.0),
+        );
+        assert_eq!(v.len(), 6);
+        let mut ys: Vec<i32> = v.iter().map(|p| (p.pos[1] * 1000.0).round() as i32).collect();
+        ys.sort_unstable();
+        ys.dedup();
+        assert!(ys.len() >= 4, "strip must use both bin amplitudes, got {ys:?}");
+    }
+
+    #[test]
+    fn waveform_bins_skip_offscreen() {
+        let v = tessellate(
+            &[DrawCmd::WaveformBins {
+                x0: -50.0,
+                y_center: 50.0,
+                height: 40.0,
+                bar_w: 10.0,
+                color: [1.0; 4],
+                bins: vec![(-0.5, 0.5); 20],
+            }],
+            (100.0, 100.0),
+        );
+        assert!(v.len() < 20 * 6);
+        assert!(!v.is_empty());
     }
 
     #[test]

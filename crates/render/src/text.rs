@@ -9,9 +9,8 @@
 use std::sync::Arc;
 
 use glyphon::{
-    Attrs, Buffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution,
-    Shaping, Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
-    Weight, Wrap,
+    Attrs, Buffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution, Shaping, Style,
+    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
 };
 
 use crate::scene::{Align, Color, Rect, TextCmd};
@@ -34,11 +33,7 @@ pub struct TextSystem {
 }
 
 impl TextSystem {
-    pub fn new(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        format: wgpu::TextureFormat,
-    ) -> Self {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         let mut font_system = FontSystem::new();
         configure_system_ui_font(&mut font_system);
         configure_system_mono_font(&mut font_system);
@@ -46,12 +41,8 @@ impl TextSystem {
         let cache = Cache::new(device);
         let viewport = Viewport::new(device, &cache);
         let mut atlas = TextAtlas::new(device, queue, &cache, format);
-        let renderer = TextRenderer::new(
-            &mut atlas,
-            device,
-            wgpu::MultisampleState::default(),
-            None,
-        );
+        let renderer =
+            TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
         Self {
             font_system,
             swash_cache,
@@ -93,10 +84,7 @@ impl TextSystem {
         texts: &[TextCmd],
         layer: usize,
     ) -> Result<(), glyphon::PrepareError> {
-        self.viewport.update(
-            queue,
-            Resolution { width: physical_size.0, height: physical_size.1 },
-        );
+        self.viewport.update(queue, Resolution { width: physical_size.0, height: physical_size.1 });
         self.ensure_layer_renderer(device, layer);
 
         self.frame_buffers.clear();
@@ -123,12 +111,7 @@ impl TextSystem {
                 buffer.set_wrap(&mut self.font_system, Wrap::None);
             }
             let attrs = ui_text_attrs(cmd.bold, cmd.monospaced);
-            buffer.set_text(
-                &mut self.font_system,
-                &cmd.text,
-                attrs,
-                Shaping::Advanced,
-            );
+            buffer.set_text(&mut self.font_system, &cmd.text, attrs, Shaping::Advanced);
             buffer.shape_until_scroll(&mut self.font_system, false);
             if single_line {
                 truncate_tail_ellipsis(&mut self.font_system, &mut buffer, &cmd.text, attrs, buf_w);
@@ -203,10 +186,7 @@ impl TextSystem {
         pass: &mut wgpu::RenderPass<'a>,
         layer: usize,
     ) -> Result<(), glyphon::RenderError> {
-        let renderer = self
-            .renderers
-            .get(layer)
-            .expect("text prepare must run before render_pass");
+        let renderer = self.renderers.get(layer).expect("text prepare must run before render_pass");
         renderer.render(&self.atlas, &self.viewport, pass)
     }
 
@@ -245,7 +225,11 @@ fn truncate_tail_ellipsis(
     attrs: Attrs<'static>,
     max_w: f32,
 ) {
-    if longest_line_w(buffer) <= max_w {
+    let shaped = longest_line_w(buffer);
+    // Hinting and underestimated boxes used to turn "XV" into "X…". Only
+    // ellipsize when the run clearly cannot fit on one line.
+    let slack = (max_w * 0.06).max(8.0);
+    if shaped <= max_w + slack {
         return;
     }
     const ELLIPSIS: &str = "…";
@@ -279,16 +263,8 @@ fn truncate_tail_ellipsis(
 /// via Monospace. Semibold (not extra-bold) when `bold` is set.
 fn ui_text_attrs(bold: bool, monospaced: bool) -> Attrs<'static> {
     Attrs::new()
-        .family(if monospaced {
-            Family::Monospace
-        } else {
-            Family::SansSerif
-        })
-        .weight(if bold {
-            Weight::SEMIBOLD
-        } else {
-            Weight::NORMAL
-        })
+        .family(if monospaced { Family::Monospace } else { Family::SansSerif })
+        .weight(if bold { Weight::SEMIBOLD } else { Weight::NORMAL })
 }
 
 /// cosmic-text defaults sans-serif to "Fira Sans". On macOS MixLink uses the
@@ -300,13 +276,8 @@ fn ui_text_attrs(bold: bool, monospaced: bool) -> Attrs<'static> {
 fn configure_system_ui_font(font_system: &mut FontSystem) {
     #[cfg(target_os = "macos")]
     {
-        const CANDIDATES: &[&str] = &[
-            ".AppleSystemUIFont",
-            "SF Pro Text",
-            "SF Pro Display",
-            "System Font",
-            ".SF NS",
-        ];
+        const CANDIDATES: &[&str] =
+            &[".AppleSystemUIFont", "SF Pro Text", "SF Pro Display", "System Font", ".SF NS"];
         let (family, regular_id) = {
             let db = font_system.db();
             let family = CANDIDATES
@@ -328,20 +299,20 @@ fn configure_system_ui_font(font_system: &mut FontSystem) {
 
         if let Some(ref family) = family {
             font_system.db_mut().set_sans_serif_family(family.clone());
-        } else if font_system
-            .db_mut()
-            .load_font_file("/System/Library/Fonts/SFNS.ttf")
-            .is_ok()
-        {
+        } else if font_system.db_mut().load_font_file("/System/Library/Fonts/SFNS.ttf").is_ok() {
             font_system.db_mut().set_sans_serif_family("System Font");
         }
 
         let id = regular_id.or_else(|| {
-            font_system.db().faces().find(|face| {
-                face.weight == Weight::NORMAL
-                    && face.style == Style::Normal
-                    && face.families.iter().any(|(n, _)| n == "System Font" || n == ".SF NS")
-            }).map(|face| face.id)
+            font_system
+                .db()
+                .faces()
+                .find(|face| {
+                    face.weight == Weight::NORMAL
+                        && face.style == Style::Normal
+                        && face.families.iter().any(|(n, _)| n == "System Font" || n == ".SF NS")
+                })
+                .map(|face| face.id)
         });
         if let Some(id) = id {
             if let Some(bytes) = font_system.db().with_face_data(id, |data, _| data.to_vec()) {
@@ -362,13 +333,8 @@ fn configure_system_ui_font(font_system: &mut FontSystem) {
 fn configure_system_mono_font(font_system: &mut FontSystem) {
     #[cfg(target_os = "macos")]
     {
-        const CANDIDATES: &[&str] = &[
-            "SF Mono",
-            "SFMono",
-            ".AppleSystemUIFontMonospaced",
-            ".SF NS Mono",
-            "Menlo",
-        ];
+        const CANDIDATES: &[&str] =
+            &["SF Mono", "SFMono", ".AppleSystemUIFontMonospaced", ".SF NS Mono", "Menlo"];
         let (family, source_id) = {
             let db = font_system.db();
             let family = CANDIDATES
@@ -398,23 +364,24 @@ fn configure_system_mono_font(font_system: &mut FontSystem) {
 
         if let Some(ref family) = family {
             font_system.db_mut().set_monospace_family(family.clone());
-        } else if font_system
-            .db_mut()
-            .load_font_file("/System/Library/Fonts/SFNSMono.ttf")
-            .is_ok()
+        } else if font_system.db_mut().load_font_file("/System/Library/Fonts/SFNSMono.ttf").is_ok()
         {
             font_system.db_mut().set_monospace_family(".SF NS Mono");
         }
 
         let id = source_id.or_else(|| {
-            font_system.db().faces().find(|face| {
-                face.style == Style::Normal
-                    && face.families.iter().any(|(n, _)| {
-                        n == ".SF NS Mono"
-                            || n == ".AppleSystemUIFontMonospaced"
-                            || n == "SF Mono"
-                    })
-            }).map(|face| face.id)
+            font_system
+                .db()
+                .faces()
+                .find(|face| {
+                    face.style == Style::Normal
+                        && face.families.iter().any(|(n, _)| {
+                            n == ".SF NS Mono"
+                                || n == ".AppleSystemUIFontMonospaced"
+                                || n == "SF Mono"
+                        })
+                })
+                .map(|face| face.id)
         });
         if let Some(id) = id {
             if let Some(bytes) = font_system.db().with_face_data(id, |data, _| data.to_vec()) {
@@ -467,12 +434,7 @@ pub fn measure_text(system: &mut TextSystem, text: &str, size: f32) -> f32 {
     let metrics = Metrics::new(size, size * 1.25);
     let mut buffer = Buffer::new(&mut system.font_system, metrics);
     buffer.set_size(&mut system.font_system, Some(10_000.0), Some(size * 2.0));
-    buffer.set_text(
-        &mut system.font_system,
-        text,
-        ui_text_attrs(false, false),
-        Shaping::Advanced,
-    );
+    buffer.set_text(&mut system.font_system, text, ui_text_attrs(false, false), Shaping::Advanced);
     buffer.shape_until_scroll(&mut system.font_system, false);
     longest_line_w(&buffer)
 }

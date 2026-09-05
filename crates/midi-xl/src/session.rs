@@ -8,8 +8,8 @@ use thiserror::Error;
 
 use crate::leds::{is_template_select, led_messages, LedFrame, SYSEX_PREFIX};
 use crate::profile::{
-    describe, identify, is_device_release, is_focus_or_control_note, is_pad_off, value_for, Control,
-    CONTROL_NOTES, FOCUS_NOTES,
+    describe, identify, is_device_release, is_focus_or_control_note, is_pad_off, value_for,
+    Control, CONTROL_NOTES, FOCUS_NOTES,
 };
 
 #[cfg(target_os = "macos")]
@@ -167,11 +167,7 @@ impl MidiSession<MidiEndpoint> {
     /// Connect class-compliant XL sources whose name contains `name_contains`
     /// (default [`DEVICE_NAME_NEEDLE`]). Skips HUI / MIDIIN2 / MIDIOUT2.
     pub fn connect(name_contains: &str) -> Result<Self, MidiError> {
-        let needle = if name_contains.is_empty() {
-            DEVICE_NAME_NEEDLE
-        } else {
-            name_contains
-        };
+        let needle = if name_contains.is_empty() { DEVICE_NAME_NEEDLE } else { name_contains };
         let endpoint = MidiEndpoint::open(needle)?;
         let dest_name = endpoint.dest_name().to_string();
         let connected = endpoint.connected_name().map(str::to_string);
@@ -198,11 +194,7 @@ impl MidiSession<MidiEndpoint> {
 
     /// Drain CoreMIDI input and parse MixLink events.
     pub fn drain_input(&mut self) -> Vec<SessionEvent> {
-        let packets = self
-            .sink
-            .as_mut()
-            .map(MidiEndpoint::take_packets)
-            .unwrap_or_default();
+        let packets = self.sink.as_mut().map(MidiEndpoint::take_packets).unwrap_or_default();
         let mut events = Vec::new();
         for bytes in packets {
             events.extend(self.ingest(&bytes));
@@ -290,18 +282,12 @@ impl<S: MidiSink> MidiSession<S> {
         for msg in led_messages(frame) {
             self.send_midi(&msg);
         }
-        let name = if self.dest_name.is_empty() {
-            None
-        } else {
-            Some(self.dest_name.as_str())
-        };
+        let name = if self.dest_name.is_empty() { None } else { Some(self.dest_name.as_str()) };
         self.led_status = format_led_status(name, self.current_template, self.last_send_failed);
     }
 
     fn is_led_note_echo(&self, note: u8) -> bool {
-        self.led_note_echo.iter().any(|(n, at)| {
-            *n == note && at.elapsed() < LED_REFRESH_DELAY
-        })
+        self.led_note_echo.iter().any(|(n, at)| *n == note && at.elapsed() < LED_REFRESH_DELAY)
     }
 
     /// Byte-wise ingest. Channel-status bytes abort an incomplete SysEx so
@@ -386,12 +372,7 @@ impl<S: MidiSink> MidiSession<S> {
         self.last_message = format!(
             "SysEx {}B {}",
             bytes.len(),
-            bytes
-                .iter()
-                .take(8)
-                .map(|b| format!("{b:02X}"))
-                .collect::<Vec<_>>()
-                .join(" ")
+            bytes.iter().take(8).map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ")
         );
         if bytes.len() >= 8 && bytes.starts_with(&SYSEX_PREFIX) && bytes[6] == 0x77 {
             self.current_template = bytes[7];
@@ -543,22 +524,14 @@ mod tests {
         session.send_leds(&LedFrame::default());
         assert_eq!(session.led_status, "LED → Launch Control XL t10");
         // Must not echo 0x77 back out.
-        assert!(session
-            .sink()
-            .unwrap()
-            .packets
-            .iter()
-            .all(|p| !is_template_select(p)));
+        assert!(session.sink().unwrap().packets.iter().all(|p| !is_template_select(p)));
     }
 
     #[test]
     fn ingest_user_fader_and_send_select_release() {
         let mut session = MidiSession::recording();
         let ev = session.ingest(&[0xB0, 77, 127]);
-        assert_eq!(
-            ev,
-            vec![SessionEvent::Control { control: Control::Fader(0), value: 1.0 }]
-        );
+        assert_eq!(ev, vec![SessionEvent::Control { control: Control::Fader(0), value: 1.0 }]);
         let ev = session.ingest(&[0xB0, 105, 0]);
         match ev.as_slice() {
             [SessionEvent::Control { control: Control::SendSelectDown, value }] => {

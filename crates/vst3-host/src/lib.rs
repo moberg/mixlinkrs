@@ -238,8 +238,10 @@ fn scan_plugins_nsarray() -> Vec<PluginInfo> {
             let Some(dict) = dict else {
                 continue;
             };
-            let path: Option<Id<NSString>> = unsafe { msg_send_id![&*dict, objectForKey: &*path_key] };
-            let name: Option<Id<NSString>> = unsafe { msg_send_id![&*dict, objectForKey: &*name_key] };
+            let path: Option<Id<NSString>> =
+                unsafe { msg_send_id![&*dict, objectForKey: &*path_key] };
+            let name: Option<Id<NSString>> =
+                unsafe { msg_send_id![&*dict, objectForKey: &*name_key] };
             let Some(path) = path else {
                 continue;
             };

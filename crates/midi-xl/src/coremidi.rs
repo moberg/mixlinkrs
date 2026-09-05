@@ -143,32 +143,16 @@ impl MidiEndpoint {
         }
 
         if names.is_empty() {
-            drop(RawHandles {
-                client,
-                input_port,
-                output_port,
-                connected_sources,
-                state,
-            });
+            drop(RawHandles { client, input_port, output_port, connected_sources, state });
             return Err(MidiError::NoSource(name_contains.to_string()));
         }
 
         let connected_name = Some(names.join(" + "));
         let dest = unsafe { pick_destination(name_contains) };
-        let dest_name = if dest == 0 {
-            String::new()
-        } else {
-            unsafe { endpoint_name(dest) }
-        };
+        let dest_name = if dest == 0 { String::new() } else { unsafe { endpoint_name(dest) } };
 
         Ok(Self {
-            _handles: RawHandles {
-                client,
-                input_port,
-                output_port,
-                connected_sources,
-                state,
-            },
+            _handles: RawHandles { client, input_port, output_port, connected_sources, state },
             dest,
             dest_name,
             connected_name,
@@ -217,15 +201,8 @@ fn send_packet(port: u32, dest: u32, bytes: &[u8]) -> bool {
     unsafe {
         let list = buf.as_mut_ptr().cast::<ffi::MIDIPacketList>();
         let pkt = ffi::MIDIPacketListInit(list);
-        if ffi::MIDIPacketListAdd(
-            list,
-            512,
-            pkt,
-            0,
-            bytes.len() as ffi::ByteCount,
-            bytes.as_ptr(),
-        )
-        .is_null()
+        if ffi::MIDIPacketListAdd(list, 512, pkt, 0, bytes.len() as ffi::ByteCount, bytes.as_ptr())
+            .is_null()
         {
             return false;
         }
@@ -261,17 +238,15 @@ unsafe fn pick_destination(needle: &str) -> u32 {
             primary.push((name.len(), ep));
         }
     }
-    primary
-        .into_iter()
-        .min_by_key(|(len, _)| *len)
-        .map(|(_, ep)| ep)
-        .unwrap_or(secondary)
+    primary.into_iter().min_by_key(|(len, _)| *len).map(|(_, ep)| ep).unwrap_or(secondary)
 }
 
 unsafe fn endpoint_name(endpoint: u32) -> String {
     let mut param: CFStringRef = std::ptr::null();
     // SAFETY: caller asserts `endpoint` is a live MIDIObjectRef.
-    let st = unsafe { ffi::MIDIObjectGetStringProperty(endpoint, ffi::kMIDIPropertyDisplayName, &mut param) };
+    let st = unsafe {
+        ffi::MIDIObjectGetStringProperty(endpoint, ffi::kMIDIPropertyDisplayName, &mut param)
+    };
     if st != 0 || param.is_null() {
         return "MIDI".into();
     }

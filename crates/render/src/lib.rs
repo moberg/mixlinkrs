@@ -4,7 +4,7 @@
 //! - `Scene`: a list of `DrawCmd`s the app builds each frame.
 //! - `DrawCmd::Rect { rect, color }`: solid rectangle.
 //! - `DrawCmd::Line { a, b, color }`: thin line (expanded to a triangle quad).
-//! - `DrawCmd::WaveformBins`: min/max vertical bars (used by the arrangement
+//! - `DrawCmd::WaveformBins`: min/max waveform strip (used by the arrangement
 //!   view for audio clip rendering).
 //! - `Renderer::render_scene`: uploads a vertex buffer for the scene and
 //!   submits a single draw call. Batching is by pipeline, not by material.
@@ -50,9 +50,7 @@ impl Renderer {
             backends: wgpu::Backends::METAL | wgpu::Backends::GL | wgpu::Backends::VULKAN,
             ..Default::default()
         });
-        let surface = instance
-            .create_surface(window.clone())
-            .expect("create surface");
+        let surface = instance.create_surface(window.clone()).expect("create surface");
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -79,12 +77,7 @@ impl Renderer {
             .expect("device");
 
         let caps = surface.get_capabilities(&adapter);
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| f.is_srgb())
-            .unwrap_or(caps.formats[0]);
+        let format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -195,10 +188,23 @@ impl Renderer {
             all_verts.extend(scene::tessellate(layer, (lw, lh)));
             let i0 = all_images.len() as u32;
             all_images.extend(self.images.tessellate(layer, (lw, lh)));
+            let clip = layer.iter().find_map(|c| match c {
+                DrawCmd::Clip { rect } => Some(*rect),
+                _ => None,
+            });
             let texts: Vec<TextCmd> = layer
                 .iter()
                 .filter_map(|c| match c {
-                    DrawCmd::Text(t) => Some(t.clone()),
+                    DrawCmd::Text(t) => {
+                        let mut t = t.clone();
+                        if let Some(layer_clip) = clip {
+                            t.clip = Some(match t.clip {
+                                Some(existing) => intersect_rect(existing, layer_clip),
+                                None => layer_clip,
+                            });
+                        }
+                        Some(t)
+                    }
                     _ => None,
                 })
                 .collect();
@@ -208,6 +214,7 @@ impl Renderer {
                 image_start: i0,
                 image_count: all_images.len() as u32 - i0,
                 texts,
+                clip,
             });
         }
 
@@ -230,9 +237,9 @@ impl Renderer {
 
         let frame = self.surface.get_current_texture()?;
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("frame"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
         let sf = self.effective_scale();
         let phys = (self.config.width, self.config.height);
         // Prepare every layer before encoding any pass. Glyphon's prepare
@@ -247,11 +254,8 @@ impl Renderer {
             }
         }
         for (i, layer) in packed.iter().enumerate() {
-            let load = if i == 0 {
-                wgpu::LoadOp::Clear(self.clear_color)
-            } else {
-                wgpu::LoadOp::Load
-            };
+            let load =
+                if i == 0 { wgpu::LoadOp::Clear(self.clear_color) } else { wgpu::LoadOp::Load };
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("layer"),
@@ -264,6 +268,11 @@ impl Renderer {
                     timestamp_writes: None,
                     occlusion_query_set: None,
                 });
+                if let Some(clip) = layer.clip {
+                    let (sx, sy, sw, sh) =
+                        scissor_rect(clip, sf, self.config.width, self.config.height);
+                    pass.set_scissor_rect(sx, sy, sw, sh);
+                }
                 if layer.vert_count > 0 {
                     pass.set_pipeline(&self.pipeline);
                     pass.set_vertex_buffer(0, self.vbo.slice(..));
@@ -296,10 +305,7 @@ impl Renderer {
     /// makes layouts fit fewer points — everything looks bigger on screen.
     pub fn logical_size(&self) -> (f32, f32) {
         let s = self.effective_scale();
-        (
-            (self.config.width as f32) / s,
-            (self.config.height as f32) / s,
-        )
+        ((self.config.width as f32) / s, (self.config.height as f32) / s)
     }
 
     /// OS DPR × user zoom. Used both to render text at the correct physical
@@ -324,7 +330,6 @@ impl Renderer {
         self.config.height = h.clamp(1, self.max_surface_dim);
         self.surface.configure(&self.device, &self.config);
     }
-
 }
 
 struct LayerBatch {
@@ -333,6 +338,25 @@ struct LayerBatch {
     image_start: u32,
     image_count: u32,
     texts: Vec<TextCmd>,
+    clip: Option<Rect>,
+}
+
+fn intersect_rect(a: Rect, b: Rect) -> Rect {
+    let x = a.x.max(b.x);
+    let y = a.y.max(b.y);
+    let r = (a.x + a.w).min(b.x + b.w);
+    let btm = (a.y + a.h).min(b.y + b.h);
+    Rect { x, y, w: (r - x).max(0.0), h: (btm - y).max(0.0) }
+}
+
+fn scissor_rect(clip: Rect, scale: f32, surf_w: u32, surf_h: u32) -> (u32, u32, u32, u32) {
+    let x = (clip.x * scale).floor().max(0.0) as u32;
+    let y = (clip.y * scale).floor().max(0.0) as u32;
+    let w = (clip.w * scale).ceil() as u32;
+    let h = (clip.h * scale).ceil() as u32;
+    let x = x.min(surf_w);
+    let y = y.min(surf_h);
+    (x, y, w.min(surf_w.saturating_sub(x)).max(1), h.min(surf_h.saturating_sub(y)).max(1))
 }
 
 fn split_layers(scene: &[DrawCmd]) -> Vec<&[DrawCmd]> {
@@ -361,12 +385,7 @@ mod tests {
 
     fn dummy_text(s: &str) -> DrawCmd {
         DrawCmd::Text(TextCmd {
-            rect: Rect {
-                x: 0.0,
-                y: 0.0,
-                w: 200.0,
-                h: 18.0,
-            },
+            rect: Rect { x: 0.0, y: 0.0, w: 200.0, h: 18.0 },
             text: s.into(),
             size: 12.0,
             color: [1.0; 4],
@@ -382,11 +401,7 @@ mod tests {
     fn overlay_layer_keeps_sidebar_text_cmds() {
         let mut scene = vec![dummy_text("Plugins"), dummy_text("SETTINGS"), DrawCmd::Layer];
         for i in 0..16 {
-            scene.push(dummy_text(&format!(
-                "ADAT {}/{} - Analog Heat",
-                i * 2 + 1,
-                i * 2 + 2
-            )));
+            scene.push(dummy_text(&format!("ADAT {}/{} - Analog Heat", i * 2 + 1, i * 2 + 2)));
         }
         let layers = split_layers(&scene);
         assert_eq!(layers.len(), 2);
@@ -398,13 +413,18 @@ mod tests {
             })
             .collect();
         assert_eq!(base, ["Plugins", "SETTINGS"]);
-        assert_eq!(
-            layers[1]
-                .iter()
-                .filter(|c| matches!(c, DrawCmd::Text(_)))
-                .count(),
-            16
-        );
+        assert_eq!(layers[1].iter().filter(|c| matches!(c, DrawCmd::Text(_))).count(), 16);
+    }
+
+    #[test]
+    fn intersect_rect_clips_to_overlap() {
+        let a = Rect { x: 0.0, y: 0.0, w: 100.0, h: 40.0 };
+        let b = Rect { x: 10.0, y: 20.0, w: 50.0, h: 80.0 };
+        let i = intersect_rect(a, b);
+        assert_eq!(i.x, 10.0);
+        assert_eq!(i.y, 20.0);
+        assert_eq!(i.w, 50.0);
+        assert_eq!(i.h, 20.0);
     }
 }
 

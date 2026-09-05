@@ -7,11 +7,11 @@ pub mod host_time;
 #[cfg(target_os = "macos")]
 pub mod coreaudio;
 #[cfg(target_os = "macos")]
-pub mod rt_thread;
+pub mod display_sleep;
 #[cfg(target_os = "macos")]
 pub mod permission;
 #[cfg(target_os = "macos")]
-pub mod display_sleep;
+pub mod rt_thread;
 
 #[cfg(not(target_os = "macos"))]
 pub mod coreaudio {
@@ -56,7 +56,8 @@ pub mod stub {
             128
         }
     }
-    pub type DuplexCb = Box<dyn FnMut(engine::BufferList, engine::BufferList, Timing) + Send + 'static>;
+    pub type DuplexCb =
+        Box<dyn FnMut(engine::BufferList, engine::BufferList, Timing) + Send + 'static>;
     #[derive(Clone, Copy, Debug)]
     pub struct Timing {
         pub host_time: u64,

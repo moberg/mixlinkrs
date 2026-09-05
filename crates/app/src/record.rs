@@ -1,56 +1,171 @@
-//! Take WAV writer. UI arms rings, then `recording = 1`. Stop flips the flag
-//! and drains rings after the IOProc has left them alone.
+//! MixLink-style take recorder: rings first, then a background writer that
+//! opens WAVs immediately and drains 4096-frame blocks until stop.
 
-use std::path::Path;
-use std::thread;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use analog::{AnalogEngine, ReturnLane};
 use engine::Engine;
 use engine_api::{MASTER_TAP, TAP_COUNT};
-use project::{take_wav_name, MixLane, ProjectStore};
+use project::{take_wav_name, MixLane, ProjectStore, TakeInfo};
 
-pub fn arm_and_start(engine: *mut Engine, analog: &AnalogEngine) {
-    unsafe {
-        let engine = &mut *engine;
-        for tap in 0..TAP_COUNT {
-            let on = tap_enabled(analog, tap);
-            engine.enable_ring(tap, on);
+const BLOCK: usize = 4096;
+
+pub struct Recorder {
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<bool>>,
+    take: i32,
+}
+
+impl Recorder {
+    /// Allocate rings, spawn the writer, then the caller flips the IOProc gate.
+    pub fn start(
+        engine: *mut Engine,
+        analog: &AnalogEngine,
+        folder: PathBuf,
+        take: i32,
+        sample_rate: u32,
+    ) -> Option<Self> {
+        if sample_rate == 0 {
+            return None;
+        }
+        let tracks = record_tracks(analog, take);
+        if tracks.is_empty() {
+            log::warn!("record: no enabled tracks");
+            return None;
+        }
+        unsafe {
+            let engine = &mut *engine;
+            for tap in 0..TAP_COUNT {
+                engine.enable_ring(tap, false);
+            }
+            for track in &tracks {
+                engine.enable_ring(track.tap, true);
+            }
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let engine_addr = engine as usize;
+        let thread = thread::Builder::new()
+            .name("mixlink.record".into())
+            .spawn(move || write_loop(engine_addr, folder, tracks, sample_rate, flag))
+            .ok()?;
+        Some(Self { stop, thread: Some(thread), take })
+    }
+
+    pub fn stop(mut self, engine: *mut Engine) -> bool {
+        self.stop.store(true, Ordering::Relaxed);
+        let ok = self.thread.take().and_then(|t| t.join().ok()).unwrap_or(false);
+        if ok {
+            log::info!("recorded take {}", self.take);
+        }
+        unsafe {
+            let engine = &mut *engine;
+            for tap in 0..TAP_COUNT {
+                engine.enable_ring(tap, false);
+            }
+        }
+        ok
+    }
+}
+
+impl Drop for Recorder {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
         }
     }
 }
 
-pub fn finish_take(engine: *mut Engine, analog: &AnalogEngine, take: i32) {
-    thread::sleep(Duration::from_millis(40));
-    let Some(folder) = ProjectStore::current_url(&analog.config) else {
-        log::warn!("record: no current project");
-        return;
-    };
-    unsafe {
-        let engine = &mut *engine;
-        for tap in 0..TAP_COUNT {
-            if !tap_enabled(analog, tap) {
-                continue;
+struct RecordTrack {
+    tap: usize,
+    filename: String,
+}
+
+fn record_tracks(analog: &AnalogEngine, take: i32) -> Vec<RecordTrack> {
+    (0..TAP_COUNT)
+        .filter(|&tap| tap_enabled(analog, tap))
+        .map(|tap| RecordTrack {
+            tap,
+            filename: take_wav_name(take, tap_lane(tap), &tap_name(analog, tap_lane(tap))),
+        })
+        .collect()
+}
+
+fn write_loop(
+    engine_addr: usize,
+    folder: PathBuf,
+    tracks: Vec<RecordTrack>,
+    sample_rate: u32,
+    stop: Arc<AtomicBool>,
+) -> bool {
+    let mut writers = Vec::with_capacity(tracks.len());
+    for track in &tracks {
+        let path = folder.join(&track.filename);
+        match asset::StreamingWav::create(&path, sample_rate) {
+            Ok(w) => {
+                log::info!("record open {}", path.display());
+                writers.push(w);
             }
-            let mut left = vec![0.0f32; 48_000 * 8];
-            let mut right = vec![0.0f32; 48_000 * 8];
-            let n = engine.copy_record_frames(tap, &mut left, &mut right);
-            if n <= 0 {
-                continue;
-            }
-            left.truncate(n as usize);
-            right.truncate(n as usize);
-            let lane = tap_lane(tap);
-            let name = tap_name(analog, lane);
-            let filename = take_wav_name(take, lane, &name);
-            let path = folder.join(&filename);
-            if let Err(e) = asset::write_bounce(&path, 48_000, &left, &right) {
-                log::error!("record {filename}: {e}");
-            } else {
-                log::info!("wrote {}", path.display());
+            Err(e) => {
+                log::error!("record {}: {e}", path.display());
+                return false;
             }
         }
     }
+
+    let mut left = vec![0.0f32; BLOCK];
+    let mut right = vec![0.0f32; BLOCK];
+    let engine = engine_addr as *mut Engine;
+
+    while !stop.load(Ordering::Relaxed) {
+        let mut idle = true;
+        for (i, track) in tracks.iter().enumerate() {
+            let n = unsafe { (*engine).copy_record_frames(track.tap, &mut left, &mut right) };
+            if n < 0 {
+                log::error!("record overrun on tap {}", track.tap);
+                continue;
+            }
+            if n == 0 {
+                continue;
+            }
+            idle = false;
+            if let Err(e) = writers[i].write_block(&left[..n as usize], &right[..n as usize]) {
+                log::error!("record write: {e}");
+            }
+        }
+        if idle {
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    loop {
+        let mut drained = false;
+        for (i, track) in tracks.iter().enumerate() {
+            let n = unsafe { (*engine).copy_record_frames(track.tap, &mut left, &mut right) };
+            if n <= 0 {
+                continue;
+            }
+            drained = true;
+            if let Err(e) = writers[i].write_block(&left[..n as usize], &right[..n as usize]) {
+                log::error!("record flush: {e}");
+            }
+        }
+        if !drained {
+            break;
+        }
+    }
+
+    for writer in writers {
+        if let Err(e) = writer.finalize() {
+            log::error!("record finalize: {e}");
+        }
+    }
+    true
 }
 
 fn tap_enabled(analog: &AnalogEngine, tap: usize) -> bool {
@@ -86,7 +201,9 @@ fn tap_name(analog: &AnalogEngine, lane: MixLane) -> String {
             .config
             .effect_ref(r)
             .map(|e| match e {
-                analog::EffectRef::Plugin(id) => analog.config.plugin(id).map(|p| p.title()).unwrap_or_default(),
+                analog::EffectRef::Plugin(id) => {
+                    analog.config.plugin(id).map(|p| p.title()).unwrap_or_default()
+                }
                 analog::EffectRef::Hardware(id) => {
                     analog.config.hardware_effect(id).map(|h| h.title()).unwrap_or_default()
                 }
@@ -98,18 +215,55 @@ fn tap_name(analog: &AnalogEngine, lane: MixLane) -> String {
 }
 
 pub fn list_takes(folder: &Path) -> Vec<i32> {
-    let mut takes = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(folder) {
-        for ent in rd.flatten() {
-            if let Some(name) = ent.file_name().to_str() {
-                if let Some((take, _, _)) = project::parse_take_wav(name) {
-                    if !takes.contains(&take) {
-                        takes.push(take);
-                    }
-                }
-            }
+    ProjectStore::new().scan_take_infos(folder, 48_000.0).into_iter().map(|t| t.number).collect()
+}
+
+pub fn list_take_infos(folder: &Path, sample_rate: f64) -> Vec<TakeInfo> {
+    let mut takes = ProjectStore::new().scan_take_infos(folder, sample_rate);
+    for take in &mut takes {
+        for file in &mut take.files {
+            let path = folder.join(&file.filename);
+            file.frame_count = asset::wav_frame_count(&path);
+            file.sample_rate = sample_rate;
         }
     }
-    takes.sort_unstable();
     takes
+}
+
+pub fn planned_filenames(analog: &AnalogEngine, take: i32) -> Vec<String> {
+    record_tracks(analog, take).into_iter().map(|t| t.filename).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use analog::{MixerState, OscSession, SessionConfig, SurfaceState};
+
+    fn test_analog() -> AnalogEngine {
+        AnalogEngine::new(
+            MixerState::new(),
+            SurfaceState::new(),
+            SessionConfig::new(),
+            OscSession::new(),
+        )
+    }
+
+    #[test]
+    fn planned_names_include_strips_and_mix() {
+        let analog = test_analog();
+        let names = planned_filenames(&analog, 3);
+        assert!(names.iter().any(|n| n.starts_with("3-ch-01-") && n.ends_with(".wav")));
+        assert!(names.iter().any(|n| n == "3-mix.wav"));
+    }
+
+    #[test]
+    fn list_takes_skips_mix_wav() {
+        let dir = std::env::temp_dir().join(format!("mixlink-rec-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("7-ch-01-Rytm.wav"), []).unwrap();
+        std::fs::write(dir.join("7-mix.wav"), []).unwrap();
+        std::fs::write(dir.join("notes.txt"), []).unwrap();
+        assert_eq!(list_takes(&dir), vec![7]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

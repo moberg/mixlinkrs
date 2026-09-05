@@ -4,7 +4,9 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use atomic_float::AtomicF32;
 use dsp_core::MAX_INTERNAL_BLOCK;
-use engine_api::{EngineEvent, UiCommand, MASTER_PLUGIN_SLOT, MASTER_TAP, MIX_PLAY_MAX_LANES, TAP_COUNT};
+use engine_api::{
+    EngineEvent, UiCommand, MASTER_PLUGIN_SLOT, MASTER_TAP, MIX_PLAY_MAX_LANES, TAP_COUNT,
+};
 use rt_utils::spsc::{spsc_bounded, Consumer, Producer};
 
 use crate::schedule::{RtControls, Schedule};
@@ -22,6 +24,8 @@ pub struct Engine {
     pos: Arc<AtomicI64>,
     xruns: Arc<AtomicU64>,
     peaks: Arc<[AtomicF32; TAP_COUNT]>,
+    lane_peaks: Arc<[AtomicF32; MIX_PLAY_MAX_LANES]>,
+    listen_peak: Arc<AtomicF32>,
     scratch_in_l: Vec<f32>,
     scratch_in_r: Vec<f32>,
     scratch_out_l: Vec<f32>,
@@ -51,6 +55,8 @@ pub struct EngineHandles {
     pub xruns: Arc<AtomicU64>,
     pub sample_position: Arc<AtomicI64>,
     pub peaks: Arc<[AtomicF32; TAP_COUNT]>,
+    pub lane_peaks: Arc<[AtomicF32; MIX_PLAY_MAX_LANES]>,
+    pub listen_peak: Arc<AtomicF32>,
 }
 
 impl Engine {
@@ -62,6 +68,8 @@ impl Engine {
         let xruns = Arc::new(AtomicU64::new(0));
         let pos = Arc::new(AtomicI64::new(0));
         let peaks = Arc::new(std::array::from_fn(|_| AtomicF32::new(0.0)));
+        let lane_peaks = Arc::new(std::array::from_fn(|_| AtomicF32::new(0.0)));
+        let listen_peak = Arc::new(AtomicF32::new(0.0));
         let ring_cap = ((sample_rate as f32 * RING_SECONDS) as usize).max(MAX_FRAMES * 2);
         let lane_cap = (sample_rate as usize * 2).max(MAX_FRAMES * 8);
 
@@ -74,6 +82,8 @@ impl Engine {
             pos: pos.clone(),
             xruns: xruns.clone(),
             peaks: peaks.clone(),
+            lane_peaks: lane_peaks.clone(),
+            listen_peak: listen_peak.clone(),
             scratch_in_l: vec![0.0; MAX_FRAMES],
             scratch_in_r: vec![0.0; MAX_FRAMES],
             scratch_out_l: vec![0.0; MAX_FRAMES],
@@ -95,8 +105,22 @@ impl Engine {
         };
         (
             engine,
-            EngineHandles { cmd_tx, ev_rx, schedule, controls, xruns, sample_position: pos, peaks },
+            EngineHandles {
+                cmd_tx,
+                ev_rx,
+                schedule,
+                controls,
+                xruns,
+                sample_position: pos,
+                peaks,
+                lane_peaks,
+                listen_peak,
+            },
         )
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
     }
 
     pub fn enable_ring(&mut self, tap: usize, on: bool) {
@@ -130,11 +154,11 @@ impl Engine {
         n as i32
     }
 
-    pub fn push_lane_frames(&mut self, lane: usize, l: &[f32], r: &[f32]) {
+    pub fn push_lane_frames(&mut self, lane: usize, l: &[f32], r: &[f32]) -> usize {
         if lane >= MIX_PLAY_MAX_LANES {
-            return;
+            return 0;
         }
-        let n = l.len().min(r.len());
+        let n = l.len().min(r.len()).min(self.lane_room(lane));
         let cap = self.lane_cap;
         for i in 0..n {
             let w = self.lane_write[lane];
@@ -142,6 +166,27 @@ impl Engine {
             self.lane_rings_r[lane][w] = r[i];
             self.lane_write[lane] = (w + 1) % cap;
         }
+        n
+    }
+
+    /// MixLink `mixPlayRoom` — frames the writer can still push.
+    pub fn lane_room(&self, lane: usize) -> usize {
+        if lane >= MIX_PLAY_MAX_LANES {
+            return 0;
+        }
+        let cap = self.lane_cap;
+        let used = (self.lane_write[lane] + cap - self.lane_read[lane]) % cap;
+        cap.saturating_sub(used).saturating_sub(1)
+    }
+
+    /// Reset mix-play rings before a new start (IOProc is not consuming yet).
+    pub fn reset_mix_lanes(&mut self) {
+        for i in 0..MIX_PLAY_MAX_LANES {
+            self.lane_read[i] = 0;
+            self.lane_write[i] = 0;
+            self.lane_peaks[i].store(0.0, Ordering::Relaxed);
+        }
+        self.listen_peak.store(0.0, Ordering::Relaxed);
     }
 
     /// CoreAudio IOProc entry. No alloc / lock / file I/O.
@@ -174,11 +219,12 @@ impl Engine {
             UiCommand::TransportPlay => self.controls.mix_playing.store(true, Ordering::Relaxed),
             UiCommand::TransportStop => {
                 self.controls.mix_playing.store(false, Ordering::Relaxed);
-                self.pos.store(0, Ordering::Relaxed);
             }
             UiCommand::TransportSeek { sample } => {
                 self.pos.store(sample.max(0), Ordering::Relaxed);
-                self.controls.flush.store(true, Ordering::Relaxed);
+                if self.controls.mix_playing.load(Ordering::Relaxed) {
+                    self.controls.flush.store(true, Ordering::Relaxed);
+                }
             }
             UiCommand::SetTempo { bpm } => {
                 self.controls.tempo_milli.store((bpm * 1000.0) as i32, Ordering::Relaxed);
@@ -220,7 +266,9 @@ impl Engine {
                 if !route.enabled {
                     if recording {
                         for tap in 0..TAP_COUNT {
-                            if self.ring_enabled[tap] && schedule.taps[tap].plugin_slot == slot as i32 {
+                            if self.ring_enabled[tap]
+                                && schedule.taps[tap].plugin_slot == slot as i32
+                            {
                                 write_silence_ring(self, tap, frames);
                             }
                         }
@@ -233,7 +281,15 @@ impl Engine {
                     if feed.gain <= 0.0001 || feed.channel < 0 {
                         continue;
                     }
-                    mix_input_channel(&input, feed.channel, feed.gain, feed.linked, frames, &mut self.scratch_in_l, &mut self.scratch_in_r);
+                    mix_input_channel(
+                        &input,
+                        feed.channel,
+                        feed.gain,
+                        feed.linked,
+                        frames,
+                        &mut self.scratch_in_l,
+                        &mut self.scratch_in_r,
+                    );
                 }
                 vst3_host::process_slot(
                     slot as u32,
@@ -243,7 +299,13 @@ impl Engine {
                     &mut self.scratch_out_r[..frames],
                 );
                 if route.return_channel >= 0 {
-                    write_output_pair(&output, route.return_channel, frames, &self.scratch_out_l, &self.scratch_out_r);
+                    write_output_pair(
+                        &output,
+                        route.return_channel,
+                        frames,
+                        &self.scratch_out_l,
+                        &self.scratch_out_r,
+                    );
                 }
                 hold_plugin_taps(self, &schedule, slot as i32, frames, recording);
             }
@@ -272,7 +334,10 @@ impl Engine {
             }
         }
 
-        hold_peak(&self.peaks[MASTER_TAP], peak_of(&self.master_l[..frames], &self.master_r[..frames]));
+        hold_peak(
+            &self.peaks[MASTER_TAP],
+            peak_of(&self.master_l[..frames], &self.master_r[..frames]),
+        );
         if recording && self.ring_enabled[MASTER_TAP] {
             write_ring_slices(
                 &mut self.rings_l,
@@ -286,16 +351,13 @@ impl Engine {
         }
 
         if mix_playing {
-            if self.controls.flush.swap(false, Ordering::Relaxed) {
-                for i in 0..MIX_PLAY_MAX_LANES {
-                    self.lane_read[i] = self.lane_write[i];
-                }
-            }
             mix_playback(self, &schedule, &output, frames);
         }
 
-        let pos = self.pos.load(Ordering::Relaxed);
-        self.pos.store(pos + frames as i64, Ordering::Relaxed);
+        if mix_playing {
+            let pos = self.pos.load(Ordering::Relaxed);
+            self.pos.store(pos + frames as i64, Ordering::Relaxed);
+        }
         let _ = MAX_INTERNAL_BLOCK;
     }
 
@@ -349,11 +411,7 @@ impl BufferList<'_> {
                 let stride = buf.channels as usize;
                 // Interleaved: sample = data[frame * stride + local]
                 // Non-interleaved: one channel per buffer (stride 1, local 0)
-                let idx = if buf.channels <= 1 {
-                    frame
-                } else {
-                    frame * stride + local
-                };
+                let idx = if buf.channels <= 1 { frame } else { frame * stride + local };
                 unsafe {
                     return *buf.data.add(idx);
                 }
@@ -389,7 +447,7 @@ fn zero_output(output: &BufferList<'_>, frames: usize) {
         if buf.data.is_null() {
             continue;
         }
-            let n = frames * buf.channels.max(1) as usize;
+        let n = frames * buf.channels.max(1) as usize;
         unsafe {
             std::ptr::write_bytes(buf.data as *mut u8, 0, n * std::mem::size_of::<f32>());
         }
@@ -416,14 +474,26 @@ fn mix_input_channel(
     }
 }
 
-fn copy_pair(input: &BufferList<'_>, output: &BufferList<'_>, left: i32, right: i32, frames: usize) {
+fn copy_pair(
+    input: &BufferList<'_>,
+    output: &BufferList<'_>,
+    left: i32,
+    right: i32,
+    frames: usize,
+) {
     for i in 0..frames {
         output.write_sample(left, i, input.locate_sample(left, i));
         output.write_sample(right, i, input.locate_sample(right, i));
     }
 }
 
-fn accumulate_master(engine: &mut Engine, input: &BufferList<'_>, left: i32, right: i32, frames: usize) {
+fn accumulate_master(
+    engine: &mut Engine,
+    input: &BufferList<'_>,
+    left: i32,
+    right: i32,
+    frames: usize,
+) {
     for i in 0..frames {
         engine.master_l[i] = input.locate_sample(left, i);
         engine.master_r[i] = input.locate_sample(right, i);
@@ -462,7 +532,13 @@ fn peak_from_input(input: &BufferList<'_>, l: i32, r: i32, frames: usize) -> f32
     p
 }
 
-fn hold_plugin_taps(engine: &mut Engine, schedule: &Schedule, slot: i32, frames: usize, recording: bool) {
+fn hold_plugin_taps(
+    engine: &mut Engine,
+    schedule: &Schedule,
+    slot: i32,
+    frames: usize,
+    recording: bool,
+) {
     for tap_i in 0..TAP_COUNT {
         if schedule.taps[tap_i].plugin_slot != slot {
             continue;
@@ -526,39 +602,68 @@ fn write_ring_from_ptrs(
 }
 
 fn mix_playback(engine: &mut Engine, schedule: &Schedule, output: &BufferList<'_>, frames: usize) {
+    if engine.controls.flush.swap(false, Ordering::Relaxed) {
+        for i in 0..MIX_PLAY_MAX_LANES {
+            engine.lane_read[i] = engine.lane_write[i];
+            engine.lane_peaks[i].store(0.0, Ordering::Relaxed);
+        }
+        engine.listen_peak.store(0.0, Ordering::Relaxed);
+    }
+    let mut main_dest = -1;
+    let mut main_silent = false;
+    let mut main_gain_l = 1.0f32;
+    let mut main_gain_r = 1.0f32;
+    for lane in &schedule.lanes {
+        if lane.active && lane.is_main {
+            main_dest = lane.dest;
+            main_silent = lane.muted;
+            main_gain_l = lane.gain_l;
+            main_gain_r = lane.gain_r;
+            break;
+        }
+    }
+    let listen = schedule.listen_amp;
     let any_solo = schedule.any_solo;
+    let cap = engine.lane_cap;
+    let mut listen_peak = 0.0f32;
     for (i, lane) in schedule.lanes.iter().enumerate() {
         if !lane.active {
             continue;
         }
-        let cap = engine.lane_cap;
         let avail = (engine.lane_write[i] + cap - engine.lane_read[i]) % cap;
         let n = frames.min(avail);
         if n < frames {
             let _ = engine.ev_tx.try_push(EngineEvent::Underrun { lane: i as u8 });
         }
-        let silent = lane.muted || (any_solo && !lane.is_main && !lane.soloed);
-        for f in 0..frames {
-            let (sl, sr) = if f < n {
-                let r = engine.lane_read[i];
-                let l = engine.lane_rings_l[i][r];
-                let rr = engine.lane_rings_r[i][r];
-                engine.lane_read[i] = (r + 1) % cap;
-                (l, rr)
-            } else {
-                (0.0, 0.0)
-            };
-            if silent || lane.is_main {
+        let silenced = lane.muted || (any_solo && !lane.is_main && !lane.soloed);
+        let mut peak = 0.0f32;
+        for f in 0..n {
+            let r = engine.lane_read[i];
+            let mut l = engine.lane_rings_l[i][r] * lane.gain_l;
+            let mut rr = engine.lane_rings_r[i][r] * lane.gain_r;
+            engine.lane_read[i] = (r + 1) % cap;
+            if silenced {
+                l = 0.0;
+                rr = 0.0;
+            }
+            peak = peak.max(l.abs()).max(rr.abs());
+            if lane.is_main {
                 continue;
             }
-            if lane.dest >= 0 {
-                let existing_l = output.locate_sample(lane.dest, f);
-                let existing_r = output.locate_sample(lane.dest + 1, f);
-                output.write_sample(lane.dest, f, existing_l + sl * lane.gain_l);
-                output.write_sample(lane.dest + 1, f, existing_r + sr * lane.gain_r);
+            if main_dest < 0 || main_silent {
+                continue;
             }
+            let out_l = l * main_gain_l * listen;
+            let out_r = rr * main_gain_r * listen;
+            listen_peak = listen_peak.max(out_l.abs()).max(out_r.abs());
+            let existing_l = output.locate_sample(main_dest, f);
+            let existing_r = output.locate_sample(main_dest + 1, f);
+            output.write_sample(main_dest, f, existing_l + out_l);
+            output.write_sample(main_dest + 1, f, existing_r + out_r);
         }
+        hold_peak(&engine.lane_peaks[i], peak);
     }
+    hold_peak(&engine.listen_peak, listen_peak);
 }
 
 #[cfg(test)]
@@ -585,6 +690,21 @@ mod tests {
         let buf = AudioBuf { data: std::ptr::null_mut(), channels: 2, frames: 64 };
         let list = BufferList { buffers: &[buf] };
         engine.process(list, list, 64, 0);
+    }
+
+    #[test]
+    fn playhead_advances_only_while_playing() {
+        let (mut engine, handles) = Engine::new(48_000);
+        let buf = AudioBuf { data: std::ptr::null_mut(), channels: 2, frames: 64 };
+        let list = BufferList { buffers: &[buf] };
+        engine.process(list, list, 64, 0);
+        assert_eq!(handles.sample_position.load(Ordering::Relaxed), 0);
+        handles.controls.mix_playing.store(true, Ordering::Relaxed);
+        engine.process(list, list, 64, 0);
+        assert_eq!(handles.sample_position.load(Ordering::Relaxed), 64);
+        handles.controls.mix_playing.store(false, Ordering::Relaxed);
+        engine.process(list, list, 64, 0);
+        assert_eq!(handles.sample_position.load(Ordering::Relaxed), 64);
     }
 
     #[test]
@@ -628,6 +748,64 @@ mod tests {
         let list = BufferList { buffers: &[buf] };
         engine.process(list, list, 8, 0);
         assert_eq!(engine.lane_read[0], engine.lane_write[0]);
+    }
+
+    #[test]
+    fn record_rings_hold_then_drain() {
+        let (mut engine, mut handles) = Engine::new(48_000);
+        engine.enable_ring(0, true);
+        let _ = handles.cmd_tx.try_push(UiCommand::SetRecording { on: true });
+        let (_keep, input) = interleaved(32, 0.25, -0.5);
+        let mut out = vec![0.0f32; 64];
+        let out_buf = AudioBuf { data: out.as_mut_ptr(), channels: 2, frames: 32 };
+        let output = BufferList { buffers: &[out_buf] };
+        engine.process(input, output, 32, 0);
+        let _ = handles.cmd_tx.try_push(UiCommand::SetRecording { on: false });
+        engine.process(output, output, 1, 0);
+        let mut left = [0.0f32; 64];
+        let mut right = [0.0f32; 64];
+        let n = engine.copy_record_frames(0, &mut left, &mut right);
+        assert_eq!(n, 32);
+        assert!((left[0] - 0.25).abs() < 1e-6);
+        assert!((right[0] + 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn mix_playback_writes_dest_and_main() {
+        let (mut engine, handles) = Engine::new(48_000);
+        let mut schedule = Schedule::empty();
+        schedule.lanes[0] = crate::schedule::LanePlayer {
+            active: true,
+            dest: 2,
+            gain_l: 1.0,
+            gain_r: 1.0,
+            ..crate::schedule::LanePlayer::default()
+        };
+        schedule.lanes[1] = crate::schedule::LanePlayer {
+            active: true,
+            is_main: true,
+            dest: 0,
+            gain_l: 0.5,
+            gain_r: 0.5,
+            ..crate::schedule::LanePlayer::default()
+        };
+        schedule.listen_amp = 0.5;
+        handles.schedule.store(std::sync::Arc::new(schedule));
+        let left = [0.8f32; 8];
+        let right = [-0.4f32; 8];
+        assert_eq!(engine.push_lane_frames(0, &left, &right), 8);
+        assert_eq!(engine.push_lane_frames(1, &[0.0; 8], &[0.0; 8]), 8);
+        handles.controls.mix_playing.store(true, Ordering::Relaxed);
+        let mut out = vec![0.0f32; 32];
+        let out_buf = AudioBuf { data: out.as_mut_ptr(), channels: 4, frames: 8 };
+        let output = BufferList { buffers: &[out_buf] };
+        engine.process(output, output, 8, 0);
+        assert_eq!(out[2], 0.0);
+        assert_eq!(out[3], 0.0);
+        assert!((out[0] - 0.2).abs() < 1e-6);
+        assert!((out[1] + 0.1).abs() < 1e-6);
+        assert!(handles.lane_peaks[0].load(Ordering::Relaxed) > 0.7);
+        assert!(handles.listen_peak.load(Ordering::Relaxed) > 0.15);
     }
 
     #[test]

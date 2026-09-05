@@ -27,15 +27,7 @@ pub struct SvfOut {
 
 impl Svf {
     pub fn new() -> Self {
-        Self {
-            ic1eq: 0.0,
-            ic2eq: 0.0,
-            g: 0.0,
-            k: 0.0,
-            a1: 0.0,
-            a2: 0.0,
-            a3: 0.0,
-        }
+        Self { ic1eq: 0.0, ic2eq: 0.0, g: 0.0, k: 0.0, a1: 0.0, a2: 0.0, a3: 0.0 }
     }
 
     /// Set cutoff Hz and resonance Q (> 0.5 typical).

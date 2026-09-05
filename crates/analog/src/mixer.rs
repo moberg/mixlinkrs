@@ -4,9 +4,7 @@ use std::collections::HashMap;
 
 use osc::{addresses, fader_lin_from_db, OscValue};
 
-use crate::types::{
-    ChannelID, MixEvent, MixNode, MixerBus, MixerChannel, StripName,
-};
+use crate::types::{ChannelID, MixEvent, MixNode, MixerBus, MixerChannel, StripName};
 
 #[derive(Clone, Debug)]
 pub struct MixerState {
@@ -68,12 +66,8 @@ impl MixerState {
         if let Some(i) = channels.iter().position(|ch| ch.id == id) {
             mutate(&mut channels[i]);
         } else {
-            let mut created = MixerChannel::placeholder(
-                id.bus,
-                id.index,
-                false,
-                default_name(id.bus, id.index),
-            );
+            let mut created =
+                MixerChannel::placeholder(id.bus, id.index, false, default_name(id.bus, id.index));
             mutate(&mut created);
             channels.push(created);
             channels.sort_by_key(|ch| ch.id.index);
@@ -200,7 +194,8 @@ pub fn apply_inbound(mixer: &mut MixerState, address: &str, value: &OscValue) ->
     }
 
     if parts.len() >= 3 {
-        if let (Some(bus), Ok(ch)) = (addresses::Bus::from_strip_token(parts[0]), parts[1].parse::<i32>())
+        if let (Some(bus), Ok(ch)) =
+            (addresses::Bus::from_strip_token(parts[0]), parts[1].parse::<i32>())
         {
             let bus = MixerBus::from(bus);
             let id = ChannelID::new(bus, ch);
@@ -272,7 +267,9 @@ pub fn apply_inbound(mixer: &mut MixerState, address: &str, value: &OscValue) ->
                     }));
                 }
                 "balpan" => {
-                    mixer.update_channel(id, |c| c.pan = osc::balpan_to_pan_unit(value.float_value()));
+                    mixer.update_channel(id, |c| {
+                        c.pan = osc::balpan_to_pan_unit(value.float_value())
+                    });
                     return Some(MixEvent::Mix(MixNode {
                         source_bus: src_bus,
                         source: src,
@@ -302,7 +299,12 @@ fn default_name(bus: MixerBus, index: i32) -> String {
 fn output_placeholders() -> Vec<MixerChannel> {
     let mut channels: Vec<MixerChannel> = (0..32)
         .map(|i| {
-            MixerChannel::placeholder(MixerBus::Output, i, i % 2 == 0, default_name(MixerBus::Output, i))
+            MixerChannel::placeholder(
+                MixerBus::Output,
+                i,
+                i % 2 == 0,
+                default_name(MixerBus::Output, i),
+            )
         })
         .collect();
     channels.push(MixerChannel::placeholder(MixerBus::Output, 32, true, "PH"));
@@ -310,7 +312,5 @@ fn output_placeholders() -> Vec<MixerChannel> {
 }
 
 fn adat_names(bus: MixerBus, count: i32) -> Vec<MixerChannel> {
-    (0..count)
-        .map(|i| MixerChannel::placeholder(bus, i, false, default_name(bus, i)))
-        .collect()
+    (0..count).map(|i| MixerChannel::placeholder(bus, i, false, default_name(bus, i))).collect()
 }
