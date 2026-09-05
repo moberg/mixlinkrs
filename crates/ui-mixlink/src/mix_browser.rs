@@ -6,6 +6,10 @@ use render::{DrawCmd, Rect};
 use crate::theme;
 
 pub const WIDTH: f32 = 148.0;
+const MIX_LIST_TOP: f32 = 28.0;
+const ROW_H: f32 = 24.0;
+const SECTION_GAP: f32 = 12.0;
+const TAKES_HEADER_H: f32 = 20.0;
 
 pub struct MixBrowserView<'a> {
     pub x: f32,
@@ -36,27 +40,16 @@ pub fn paint(view: &MixBrowserView<'_>) -> Vec<DrawCmd> {
         theme::TEXT_DIM,
         true,
     );
-    crate::widgets::icon_pad(
-        &mut cmds,
-        Rect { x: view.x + WIDTH - 52.0, y: view.y + 6.0, w: 20.0, h: 18.0 },
-        "+",
-        true,
-    );
-    crate::widgets::icon_pad(
-        &mut cmds,
-        Rect { x: view.x + WIDTH - 28.0, y: view.y + 6.0, w: 20.0, h: 18.0 },
-        "−",
-        true,
-    );
-    let mut y = view.y + 28.0;
+    let mut y = view.y + MIX_LIST_TOP;
     for mix in view.mixes {
         // Arrangement selection: a take and a mix are never both highlighted.
         let sel = view.selected_take.is_none() && view.selected_mix == Some(mix.id);
         paint_row(&mut cmds, view.x, y, &mix.name, sel);
-        y += 24.0;
+        y += ROW_H;
     }
 
-    y += 12.0;
+    theme::seam_h(&mut cmds, view.x + 8.0, y + SECTION_GAP * 0.5 - 1.0, WIDTH - 16.0, false);
+    y += SECTION_GAP;
     theme::text(
         &mut cmds,
         Rect { x: view.x + 10.0, y, w: 120.0, h: 16.0 },
@@ -65,7 +58,7 @@ pub fn paint(view: &MixBrowserView<'_>) -> Vec<DrawCmd> {
         theme::TEXT_DIM,
         true,
     );
-    y += 20.0;
+    y += TAKES_HEADER_H;
     for take in view.takes {
         let sel = view.selected_take == Some(*take);
         paint_row(&mut cmds, view.x, y, format!("Take {take}"), sel);
@@ -103,37 +96,52 @@ pub fn hit(view: &MixBrowserView<'_>, x: f32, y: f32) -> Option<BrowserHit> {
     if view.mixer_collapsed && y >= view.y + view.h - crate::mix_mixer::HANDLE_H {
         return Some(BrowserHit::Mixer);
     }
-    if y >= view.y + 6.0 && y < view.y + 24.0 {
-        if x >= view.x + WIDTH - 52.0 && x < view.x + WIDTH - 32.0 {
-            return Some(BrowserHit::NewMix);
-        }
-        if x >= view.x + WIDTH - 28.0 && x < view.x + WIDTH - 8.0 {
-            return Some(BrowserHit::DeleteMix);
-        }
-    }
-    let mut yy = view.y + 28.0;
+    let mut yy = view.y + MIX_LIST_TOP;
     for mix in view.mixes {
-        if y >= yy && y < yy + 24.0 {
+        if y >= yy && y < yy + ROW_H {
             return Some(BrowserHit::Mix(mix.id));
         }
-        yy += 24.0;
+        yy += ROW_H;
     }
-    yy += 32.0;
+    yy += SECTION_GAP + TAKES_HEADER_H;
     for take in view.takes {
-        if y >= yy && y < yy + 24.0 {
+        if y >= yy && y < yy + ROW_H {
             return Some(BrowserHit::Take(*take));
         }
-        yy += 24.0;
+        yy += ROW_H;
     }
     None
+}
+
+pub fn row_rect(view: &MixBrowserView<'_>, hit: BrowserHit) -> Option<Rect> {
+    match hit {
+        BrowserHit::Mix(id) => {
+            let i = view.mixes.iter().position(|m| m.id == id)?;
+            Some(Rect {
+                x: view.x,
+                y: view.y + MIX_LIST_TOP + i as f32 * ROW_H,
+                w: WIDTH,
+                h: 22.0,
+            })
+        }
+        BrowserHit::Take(number) => {
+            let i = view.takes.iter().position(|n| *n == number)?;
+            let y = view.y
+                + MIX_LIST_TOP
+                + view.mixes.len() as f32 * ROW_H
+                + SECTION_GAP
+                + TAKES_HEADER_H
+                + i as f32 * ROW_H;
+            Some(Rect { x: view.x, y, w: WIDTH, h: 22.0 })
+        }
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum BrowserHit {
     Mix(uuid::Uuid),
     Take(i32),
-    NewMix,
-    DeleteMix,
     Mixer,
 }
 
@@ -182,5 +190,47 @@ mod tests {
         assert!(matches!(hit(&view, 20.0, foot), Some(BrowserHit::Mixer)));
         let open = MixBrowserView { mixer_collapsed: false, ..view };
         assert!(hit(&open, 20.0, foot).is_none());
+    }
+
+    #[test]
+    fn row_rect_matches_hit() {
+        let mix = MixDocument::empty("Mix 1", 2);
+        let id = mix.id;
+        let view = MixBrowserView {
+            x: 0.0,
+            y: 40.0,
+            h: 400.0,
+            mixes: std::slice::from_ref(&mix),
+            selected_mix: Some(id),
+            takes: &[7, 20],
+            selected_take: None,
+            mixer_collapsed: false,
+        };
+        let mix_rect = row_rect(&view, BrowserHit::Mix(id)).unwrap();
+        assert!(matches!(hit(&view, 20.0, mix_rect.y + 4.0), Some(BrowserHit::Mix(found)) if found == id));
+        let take_rect = row_rect(&view, BrowserHit::Take(20)).unwrap();
+        assert!(matches!(hit(&view, 20.0, take_rect.y + 4.0), Some(BrowserHit::Take(20))));
+    }
+
+    #[test]
+    fn paints_seam_between_mixes_and_takes() {
+        let cmds = paint(&MixBrowserView {
+            x: 0.0,
+            y: 40.0,
+            h: 400.0,
+            mixes: &[],
+            selected_mix: None,
+            takes: &[20],
+            selected_take: Some(20),
+            mixer_collapsed: false,
+        });
+        let seam_y = 40.0 + MIX_LIST_TOP + SECTION_GAP * 0.5 - 1.0;
+        let has_seam = cmds.iter().any(|c| match c {
+            DrawCmd::Rect { rect, .. } => {
+                rect.h <= 1.5 && rect.w > 80.0 && (rect.y - seam_y).abs() < 1.0
+            }
+            _ => false,
+        });
+        assert!(has_seam, "expected a horizontal seam above TAKES");
     }
 }

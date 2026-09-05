@@ -41,6 +41,8 @@ pub enum MenuAction {
     PluginBundle { id: i32 },
     PluginPlayback { id: i32 },
     InsertBundle { insert: uuid::Uuid },
+    MixContext { id: uuid::Uuid },
+    TakeContext { number: i32 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

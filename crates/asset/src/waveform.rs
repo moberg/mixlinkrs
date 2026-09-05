@@ -21,6 +21,16 @@ pub const GAMMA: f32 = 0.45;
 /// MixLink 0.6 px floor on the half-height magnitude.
 pub const MIN_HALF_PX: f32 = 0.6;
 
+/// Do not expand a file to fill the clip below this peak (−40 dBFS).
+/// Analog returns (Heat, etc.) sit on a −60…−80 dB noise floor; per-file
+/// normalize would draw that hiss as a full take.
+pub const WAVEFORM_REF_PEAK: f32 = 0.01;
+
+/// Peak used to scale arrangement min/max. Quiet noise stays a hairline.
+pub fn waveform_display_peak(max_peak: f32) -> f32 {
+    max_peak.max(WAVEFORM_REF_PEAK)
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct WaveformLod {
     pub min: Vec<f32>,
@@ -232,9 +242,7 @@ pub fn load_waveform(path: &Path) -> WaveformLod {
 
 /// MixLink gamma: `pow(peak / maxPeak, 0.45)`, clamped 0…1.
 pub fn gamma_mag(peak: f32, max_peak: f32) -> f32 {
-    if max_peak <= 0.00001 {
-        return 0.0;
-    }
+    let max_peak = waveform_display_peak(max_peak);
     let n = (peak / max_peak).clamp(0.0, 1.0);
     n.powf(GAMMA)
 }
@@ -433,6 +441,16 @@ mod tests {
         let g: Vec<f32> = cols.iter().map(|p| gamma_mag(*p, 1.0)).collect();
         assert!((g[0] - 0.2f32.powf(0.45)).abs() < 1e-6);
         assert!((g[2] - 0.8f32.powf(0.45)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn analog_noise_floor_does_not_fill_the_clip() {
+        // Take 20 Heat: peak ≈ −67 dBFS, uncorrelated hiss.
+        let heat = 0.00045f32;
+        let scale = waveform_display_peak(heat);
+        assert!((scale - WAVEFORM_REF_PEAK).abs() < 1e-6);
+        assert!(heat / scale < 0.05);
+        assert!(gamma_mag(heat, heat) < 0.3);
     }
 
     #[test]

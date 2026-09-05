@@ -281,7 +281,7 @@ fn paint_clip_waveform(
     if bin_count == 0 {
         return;
     }
-    let peak = lod.max_peak.max(1e-5);
+    let peak = asset::waveform_display_peak(lod.max_peak);
     let scale = bin_count as f64 / full_width;
     let (x0, bar_w, mut bins) = if scale >= 1.0 {
         let cols = vis_w.ceil() as usize;

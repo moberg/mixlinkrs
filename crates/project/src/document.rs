@@ -478,16 +478,41 @@ impl MixDocument {
     }
 
     pub fn paste_clips(&mut self, board: &MixPasteboard, dest: MixLane, at: i64) {
-        let Some(track) = self.track_mut(dest) else {
-            return;
-        };
         let origin = board.clips.iter().map(|c| c.mix_start_frame).min().unwrap_or(0);
+        let multi = board.clips.iter().any(|c| c.source_lane != board.source_lane);
         for clip in &board.clips {
+            let lane = if multi { clip.source_lane } else { dest };
+            let i = self.ensure_track(lane, None);
             let mut next = clip.clone();
             next.id = Uuid::new_v4();
             next.mix_start_frame = at + (clip.mix_start_frame - origin);
-            track.clips.push(next);
+            self.tracks[i].clips.push(next);
         }
+    }
+
+    /// MixLink `startFromTake`: replace clips with the take, honoring START.
+    pub fn load_from_take(&mut self, take: &TakeInfo, origin: i64) {
+        self.ensure_main_bus();
+        self.start_frame = 0;
+        for track in &mut self.tracks {
+            track.clips.clear();
+        }
+        let origin = origin.max(0);
+        for file in take.files.iter().filter(|file| file.lane != MixLane::Main) {
+            let i = self.ensure_track(file.lane, Some(file.name.clone()));
+            self.tracks[i].name = file.name.clone();
+            let remaining = (file.frame_count - origin).max(0);
+            self.tracks[i].clips = vec![MixClip {
+                id: Uuid::new_v4(),
+                source_take: take.number,
+                source_lane: file.lane,
+                source_file: file.filename.clone(),
+                source_start_frame: origin,
+                source_frame_count: remaining,
+                mix_start_frame: 0,
+            }];
+        }
+        self.tracks.retain(|t| t.lane == MixLane::Main || !t.is_unused_template_strip());
     }
 
     pub fn export_file_name(&self) -> String {
@@ -1038,6 +1063,49 @@ mod tests {
         let channels = mix.channel_tracks();
         assert!(channels.iter().any(|t| t.name == "Rytm" && (t.fader - 0.4).abs() < 1e-6));
         assert_eq!(channels.iter().filter(|t| matches!(t.lane, MixLane::Strip(_))).count(), 1);
+    }
+
+    #[test]
+    fn load_from_take_replaces_clips_and_honors_start() {
+        let mut mix = MixDocument::empty("Mix 1", 2);
+        mix.start_frame = 99;
+        mix.tracks[0].clips.push(MixClip {
+            id: Uuid::from_u128(1),
+            source_take: 1,
+            source_lane: MixLane::Strip(0),
+            source_file: "old.wav".into(),
+            source_start_frame: 0,
+            source_frame_count: 10,
+            mix_start_frame: 0,
+        });
+        let take = TakeInfo {
+            number: 20,
+            files: vec![
+                TakeFile {
+                    lane: MixLane::Strip(7),
+                    name: "303".into(),
+                    filename: "20-ch-08-ADAT-4-303.wav".into(),
+                    frame_count: 1000,
+                    sample_rate: 48_000.0,
+                },
+                TakeFile {
+                    lane: MixLane::Main,
+                    name: "Mix".into(),
+                    filename: "20-mix.wav".into(),
+                    frame_count: 1000,
+                    sample_rate: 48_000.0,
+                },
+            ],
+        };
+        mix.load_from_take(&take, 200);
+        assert_eq!(mix.start_frame, 0);
+        let ch = mix.channel_tracks();
+        let strip = ch.iter().find(|t| matches!(t.lane, MixLane::Strip(_))).unwrap();
+        assert_eq!(strip.name, "303");
+        assert_eq!(strip.clips[0].source_take, 20);
+        assert_eq!(strip.clips[0].source_start_frame, 200);
+        assert_eq!(strip.clips[0].source_frame_count, 800);
+        assert_eq!(ch.iter().filter(|t| matches!(t.lane, MixLane::Strip(_))).count(), 1);
     }
 
     #[test]

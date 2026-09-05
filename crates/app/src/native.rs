@@ -73,7 +73,9 @@ pub fn alert(message: &str) {
 pub fn confirm_delete_mix() -> bool {
     #[cfg(target_os = "macos")]
     {
-        confirm_delete_macos()
+        // NSAlert runs from a winit mouseDown that cannot unwind.
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(confirm_delete_macos))
+            .unwrap_or(false)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -95,8 +97,9 @@ fn confirm_delete_macos() -> bool {
     let cancel = NSString::from_str("Cancel");
     let _: () = unsafe { msg_send![&*alert, setMessageText: &*title] };
     let _: () = unsafe { msg_send![&*alert, setInformativeText: &*info] };
-    let _: () = unsafe { msg_send![&*alert, addButtonWithTitle: &*delete] };
-    let _: () = unsafe { msg_send![&*alert, addButtonWithTitle: &*cancel] };
+    // addButtonWithTitle: returns NSButton*, not void.
+    let _: Id<AnyObject> = unsafe { msg_send_id![&*alert, addButtonWithTitle: &*delete] };
+    let _: Id<AnyObject> = unsafe { msg_send_id![&*alert, addButtonWithTitle: &*cancel] };
     let code: isize = unsafe { msg_send![&*alert, runModal] };
     code == 1000
 }

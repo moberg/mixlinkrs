@@ -436,7 +436,7 @@ impl ApplicationHandler for App {
             },
             WindowEvent::MouseInput { state: st, button: MouseButton::Right, .. } if is_main => {
                 if st == ElementState::Pressed {
-                    log::info!("context menu at {:?}", state.cursor);
+                    on_context_press(state);
                 }
             }
             WindowEvent::Focused(true) if is_main => {
@@ -1027,20 +1027,11 @@ fn on_press(state: &mut AppState, event_loop: &ActiveEventLoop) {
     state.last_click = Some((now, x, y));
 
     if state.page == Page::Mix {
-        if let Some(hit) = ui_mixlink::mix_browser::hit(
-            &ui_mixlink::mix_browser::MixBrowserView {
-                x: bx,
-                y: by,
-                h: bh,
-                mixes: &state.mixes,
-                selected_mix: state.mix.as_ref().map(|m| m.id),
-                takes: &state.takes,
-                selected_take: state.viewing_take,
-                mixer_collapsed: !state.show_mixer,
-            },
-            x,
-            y,
-        ) {
+        if let Some(hit) = ui_mixlink::mix_browser::hit(&mix_browser_view(state), x, y) {
+            if state.modifiers.control_key() {
+                on_browser_context(state, hit);
+                return;
+            }
             match hit {
                 ui_mixlink::mix_browser::BrowserHit::Mix(id) => {
                     select_mix(state, id);
@@ -1048,8 +1039,6 @@ fn on_press(state: &mut AppState, event_loop: &ActiveEventLoop) {
                 ui_mixlink::mix_browser::BrowserHit::Take(n) => {
                     select_take(state, n);
                 }
-                ui_mixlink::mix_browser::BrowserHit::NewMix => new_mix(state),
-                ui_mixlink::mix_browser::BrowserHit::DeleteMix => delete_mix(state),
                 ui_mixlink::mix_browser::BrowserHit::Mixer => {
                     state.show_mixer = true;
                 }
@@ -2354,6 +2343,19 @@ fn apply_menu(state: &mut AppState, action: MenuAction, item: &MenuItem) {
         MenuAction::InsertBundle { insert } => {
             set_insert_bundle(state, insert, &item.id, &item.label);
         }
+        MenuAction::MixContext { id } => {
+            if item.id == "delete" {
+                delete_mix_id(state, id);
+            } else if let Some(n) = item.id.strip_prefix("take:").and_then(|s| s.parse().ok()) {
+                select_mix(state, id);
+                start_from_take(state, n);
+            }
+        }
+        MenuAction::TakeContext { number } => match item.id.as_str() {
+            "start" => start_from_take(state, number),
+            "copy" => copy_take_to_clipboard(state, number),
+            _ => {}
+        },
     }
 }
 
@@ -2611,17 +2613,141 @@ fn new_mix(state: &mut AppState) {
     select_mix(state, id);
 }
 
-fn delete_mix(state: &mut AppState) {
+fn mix_browser_view(state: &AppState) -> ui_mixlink::mix_browser::MixBrowserView<'_> {
+    let (_, by, _, bh) = body_rect(state);
+    ui_mixlink::mix_browser::MixBrowserView {
+        x: 0.0,
+        y: by,
+        h: bh,
+        mixes: &state.mixes,
+        selected_mix: state.mix.as_ref().map(|m| m.id),
+        takes: &state.takes,
+        selected_take: state.viewing_take,
+        mixer_collapsed: !state.show_mixer,
+    }
+}
+
+fn on_context_press(state: &mut AppState) {
+    let (x, y) = state.cursor;
+    let (w, h) = state.renderer.logical_size();
+    if let Some(overlay) = state.overlay.clone() {
+        if handle_overlay_press(state, &overlay, x, y, w, h) {
+            return;
+        }
+    }
+    if state.page != Page::Mix {
+        return;
+    }
+    if let Some(hit) = ui_mixlink::mix_browser::hit(&mix_browser_view(state), x, y) {
+        on_browser_context(state, hit);
+    }
+}
+
+fn on_browser_context(state: &mut AppState, hit: ui_mixlink::mix_browser::BrowserHit) {
+    let Some(anchor) = ui_mixlink::mix_browser::row_rect(&mix_browser_view(state), hit) else {
+        return;
+    };
+    match hit {
+        ui_mixlink::mix_browser::BrowserHit::Mix(id) => {
+            let mut items: Vec<MenuItem> = state
+                .takes
+                .iter()
+                .map(|n| MenuItem {
+                    id: format!("take:{n}"),
+                    label: format!("Start from take {n}"),
+                    checked: false,
+                    section: None,
+                })
+                .collect();
+            items.push(MenuItem {
+                id: "delete".into(),
+                label: "Delete Mix…".into(),
+                checked: false,
+                section: Some(" ".into()),
+            });
+            place_menu(state, anchor, items, MenuAction::MixContext { id });
+        }
+        ui_mixlink::mix_browser::BrowserHit::Take(number) => {
+            place_menu(
+                state,
+                anchor,
+                vec![
+                    MenuItem {
+                        id: "start".into(),
+                        label: "Start mix from this take".into(),
+                        checked: false,
+                        section: None,
+                    },
+                    MenuItem {
+                        id: "copy".into(),
+                        label: "Copy take to clipboard".into(),
+                        checked: false,
+                        section: None,
+                    },
+                ],
+                MenuAction::TakeContext { number },
+            );
+        }
+        _ => {}
+    }
+}
+
+fn start_from_take(state: &mut AppState, number: i32) {
+    let Some(info) = state.take_infos.iter().find(|t| t.number == number).cloned() else {
+        return;
+    };
+    if state.mix.is_none() {
+        if let Some(id) = state.mixes.first().map(|m| m.id) {
+            select_mix(state, id);
+        } else {
+            new_mix(state);
+        }
+    }
+    let origin = take_start_from_store(state, number);
+    let Some(mut mix) = state.mix.take() else { return };
+    state.undo.mutate("Start from take", false, &mut mix, |doc| {
+        doc.load_from_take(&info, origin);
+    });
+    let id = mix.id;
+    state.mix = Some(mix);
+    persist_mix(state);
+    select_mix(state, id);
+}
+
+fn copy_take_to_clipboard(state: &mut AppState, number: i32) {
+    select_take(state, number);
+    let Some(info) = state.take_infos.iter().find(|t| t.number == number) else {
+        return;
+    };
+    let clips: Vec<_> = info
+        .arrangement_tracks()
+        .into_iter()
+        .filter(|track| record::lane_on_record_list(&state.analog, track.lane))
+        .flat_map(|track| track.clips)
+        .collect();
+    let Some(source_lane) = clips.first().map(|c| c.source_lane) else {
+        return;
+    };
+    state.pasteboard = Some(MixPasteboard { clips, source_lane });
+}
+
+fn delete_mix_id(state: &mut AppState, id: uuid::Uuid) {
     if !native::confirm_delete_mix() {
         return;
     }
-    let Some(mix) = state.mix.take() else { return };
     if let Some(folder) = ProjectStore::current_url(&state.analog.config) {
-        let path = state.project.mix_url(mix.id, &folder);
+        let path = state.project.mix_url(id, &folder);
         let _ = std::fs::remove_file(path);
     }
-    state.mixes.retain(|m| m.id != mix.id);
-    state.mix = state.mixes.first().cloned();
+    state.mixes.retain(|m| m.id != id);
+    if state.mix.as_ref().is_some_and(|m| m.id == id) {
+        state.mix = None;
+    }
+    if state.mix.is_none() && state.viewing_take.is_none() {
+        if let Some(first) = state.mixes.first().map(|m| m.id) {
+            select_mix(state, first);
+        }
+    }
     persist_project_meta(state);
 }
 
@@ -2771,7 +2897,7 @@ fn persist_project_meta(state: &mut AppState) {
     let _ = state.project.save_meta(&meta, &folder);
 }
 
-/// MixLink `MixStore.load`: sidecar + filesystem takes + default Mix 1.
+/// MixLink `MixStore.load`: sidecar + filesystem takes. No default mix.
 fn reload_mix(state: &mut AppState) {
     if state.playing {
         halt_mix_play(state);
@@ -2794,7 +2920,7 @@ fn reload_mix(state: &mut AppState) {
         log::warn!("project: folder missing {}", folder.display());
     }
     let sr = state._stream.as_ref().map(|s| s.sample_rate() as f64).unwrap_or(48_000.0);
-    let mut meta = state.project.load_meta(&folder);
+    let meta = state.project.load_meta(&folder);
     state.tempo = meta.tempo;
     state.grid = meta.grid;
     state.grid_enabled = meta.grid_enabled;
@@ -2827,20 +2953,6 @@ fn reload_mix(state: &mut AppState) {
                 }
             }
         }
-    }
-    if state.mixes.is_empty() {
-        let mut mix = MixDocument::empty("Mix 1", state.analog.config.effect_return_count);
-        if let Some(&n) = state.takes.last() {
-            mix.start_frame = meta.take_start_frame(n);
-        }
-        if let Err(e) = state.project.save_mix(&mix, &folder) {
-            log::warn!("save mix: {e}");
-        }
-        meta.mixes = vec![MixListEntry { id: mix.id, name: mix.name.clone() }];
-        meta.active_mix_id = Some(mix.id);
-        meta.arrangement = Some(MixArrangement::Mix(mix.id));
-        let _ = state.project.save_meta(&meta, &folder);
-        state.mixes.push(mix);
     }
     let active = meta
         .active_mix_id
