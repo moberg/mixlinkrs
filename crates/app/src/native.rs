@@ -2,7 +2,8 @@
 
 #![allow(dead_code)]
 
-use winit::window::WindowAttributes;
+use winit::dpi::LogicalSize;
+use winit::window::{Window, WindowAttributes};
 
 /// Merge the wgpu content view under a transparent titlebar so the dark header
 /// paints to the top edge. Traffic lights stay; the system title string is hidden.
@@ -22,6 +23,16 @@ pub fn merge_titlebar(attrs: WindowAttributes) -> WindowAttributes {
     {
         attrs
     }
+}
+
+/// Extra document window (Channels, Settings, …) — same merged titlebar as main.
+pub fn extra_window_attrs(title: &str, width: f64, height: f64) -> WindowAttributes {
+    merge_titlebar(
+        Window::default_attributes()
+            .with_title(title)
+            .with_inner_size(LogicalSize::new(width, height))
+            .with_min_inner_size(LogicalSize::new(width, height)),
+    )
 }
 
 /// Dock / Cmd-Tab icon. `cargo run` is a bare binary, so the bundle icon never

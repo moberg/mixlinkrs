@@ -3,6 +3,7 @@
 use analog::{AnalogEngine, ChannelID, MixerBus, RoutingSlot};
 use render::{DrawCmd, Rect};
 
+use crate::chrome::{HEADER_H, HEADER_TRAFFIC_INSET};
 use crate::theme::{self, Layout};
 use crate::widgets::{self, MenuItem};
 
@@ -233,13 +234,23 @@ fn channels_list_bottom(h: f32) -> f32 {
 /// Main Out picker in the Channels header (label + dropdown, same row metrics as aliases).
 pub fn channels_mix_out_rect(w: f32) -> Rect {
     let (left, _) = channels_columns(w, 0.0);
-    let field_x = CHANNELS_PAD_X + CHANNELS_LABEL_W + CHANNELS_LABEL_GAP;
+    let field_x = channels_mix_out_label_x() + CHANNELS_LABEL_W + CHANNELS_LABEL_GAP;
     Rect {
         x: field_x,
         y: CHANNELS_MIX_OUT_Y,
         w: (left.w - CHANNELS_PAD_X - field_x).max(0.0),
         h: CHANNELS_MIX_OUT_H,
     }
+}
+
+fn channels_mix_out_label_x() -> f32 {
+    HEADER_TRAFFIC_INSET
+}
+
+/// Empty band under the transparent titlebar — `Window::drag_window` from the shell.
+/// Control hits (Mix Out, fields, Close) must be tested first.
+pub fn document_chrome_drag(x: f32, y: f32) -> bool {
+    x >= 0.0 && y >= 0.0 && y < HEADER_H
 }
 
 pub fn hit_channels(hits: &[(Rect, ChannelsHit)], x: f32, y: f32) -> Option<ChannelsHit> {
@@ -255,7 +266,7 @@ fn paint_mix_out(
     theme::text(
         cmds,
         Rect {
-            x: CHANNELS_PAD_X,
+            x: channels_mix_out_label_x(),
             y: CHANNELS_MIX_OUT_Y,
             w: CHANNELS_LABEL_W,
             h: CHANNELS_MIX_OUT_H,
@@ -411,12 +422,13 @@ pub fn clamp_to_window(rect: Rect, window_w: f32, window_h: f32) -> Rect {
 
 pub fn settings_panel(window_w: f32, window_h: f32) -> Rect {
     let inset = 18.0;
+    let top = HEADER_H.max(inset);
     let close_reserve = WINDOW_CLOSE_PAD + WINDOW_CLOSE_H + 10.0;
     Rect {
         x: inset,
-        y: inset,
+        y: top,
         w: (window_w - inset * 2.0).max(0.0),
-        h: (window_h - inset - close_reserve).max(0.0),
+        h: (window_h - top - close_reserve).max(0.0),
     }
 }
 
@@ -538,7 +550,7 @@ mod tests {
             let s = settings_panel(w, h);
             assert!(s.x >= 0.0, "settings x {s:?} in {w}x{h}");
             assert!(s.x + s.w <= w + 0.5);
-            assert!(s.y >= 0.0);
+            assert!(s.y >= HEADER_H, "settings title/card clear the traffic-light band");
             assert!(s.y + s.h <= h + 0.5);
             let close = window_close_rect(w, h);
             assert!(s.y + s.h <= close.y + 0.5, "panel should sit above Close");
@@ -649,6 +661,7 @@ mod tests {
         );
         let picker = channels_mix_out_rect(CHANNELS_WINDOW_W);
         let (left, _) = channels_columns(CHANNELS_WINDOW_W, CHANNELS_WINDOW_H);
+        assert!(picker.x >= HEADER_TRAFFIC_INSET);
         assert!(picker.y + picker.h <= CHANNELS_LIST_Y);
         assert!(picker.x + picker.w <= left.w + 0.5);
         assert_eq!(
@@ -664,6 +677,20 @@ mod tests {
             hit_channels(&hits, close.x + close.w * 0.5, close.y + close.h * 0.5),
             Some(ChannelsHit::Close)
         );
+        assert!(document_chrome_drag(HEADER_TRAFFIC_INSET * 0.5, 12.0));
+        assert_eq!(hit_channels(&hits, HEADER_TRAFFIC_INSET * 0.5, 12.0), None);
+        assert!(!document_chrome_drag(close.x + 4.0, close.y + 4.0));
+    }
+
+    #[test]
+    fn settings_content_clears_titlebar_and_empty_chrome_drags() {
+        let hits = settings_hits(SETTINGS_WINDOW_W, SETTINGS_WINDOW_H);
+        assert!(hits.panel.y >= HEADER_H);
+        assert!(hits.post_fader.y >= HEADER_H);
+        assert!(hits.close.y > HEADER_H);
+        assert!(document_chrome_drag(12.0, 12.0));
+        assert!(!document_chrome_drag(hits.osc_host.x + 4.0, hits.osc_host.y + 4.0));
+        assert!(!document_chrome_drag(hits.close.x + 4.0, hits.close.y + 4.0));
     }
 
     #[test]

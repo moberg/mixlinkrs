@@ -766,6 +766,7 @@ pub fn checkbox(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, on: bool, label: &str) 
 }
 
 /// Charcoal brushed window + inset recessed card (MixLink Settings / Channels).
+/// Fills to `(0, 0)` so dark chrome paints under a transparent macOS titlebar.
 pub fn document_window(cmds: &mut Vec<DrawCmd>, w: f32, h: f32, panel: Rect) {
     theme::hardware_surface(cmds, Rect { x: 0.0, y: 0.0, w, h }, theme::SurfaceStyle::Sidebar);
     hardware_module(cmds, panel);
@@ -1352,6 +1353,25 @@ mod tests {
 
     fn col_mid(col_w: f32) -> f32 {
         STRIP_NAME_PAD + (col_w - STRIP_NAME_PAD * 2.0) * 0.5
+    }
+
+    #[test]
+    fn document_window_paints_under_the_titlebar() {
+        let mut cmds = Vec::new();
+        document_window(
+            &mut cmds,
+            400.0,
+            300.0,
+            Rect { x: 18.0, y: 36.0, w: 364.0, h: 200.0 },
+        );
+        let covers_top = cmds.iter().any(|c| match c {
+            DrawCmd::VertGradient { rect, .. } => {
+                rect.x == 0.0 && rect.y == 0.0 && rect.w >= 399.0
+            }
+            DrawCmd::Rect { rect, .. } => rect.x == 0.0 && rect.y == 0.0 && rect.w >= 399.0,
+            _ => false,
+        });
+        assert!(covers_top, "document chrome must fill from the top edge");
     }
 
     #[test]

@@ -4,10 +4,8 @@ use std::sync::Arc;
 
 use project::ProjectStore;
 use ui_mixlink::overlay::{self, TextFocus};
-use winit::dpi::LogicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
-use winit::window::Window;
 
 use analog::AnalogEngine;
 
@@ -21,18 +19,11 @@ impl Chrome {
             win.window.request_redraw();
             return;
         }
-        let window = match event_loop.create_window(
-            Window::default_attributes()
-                .with_title("Settings")
-                .with_inner_size(LogicalSize::new(
-                    overlay::SETTINGS_WINDOW_W,
-                    overlay::SETTINGS_WINDOW_H,
-                ))
-                .with_min_inner_size(LogicalSize::new(
-                    overlay::SETTINGS_WINDOW_W,
-                    overlay::SETTINGS_WINDOW_H,
-                )),
-        ) {
+        let window = match event_loop.create_window(crate::native::extra_window_attrs(
+            "Settings",
+            overlay::SETTINGS_WINDOW_W as f64,
+            overlay::SETTINGS_WINDOW_H as f64,
+        )) {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 log::error!("settings window: {e}");
@@ -102,6 +93,10 @@ impl AppState {
             self.choose_projects_root();
         } else if overlay::contains(hits.apply, x, y) {
             self.apply_settings();
+        } else if overlay::document_chrome_drag(x, y) {
+            if let Some(win) = self.chrome.settings.as_ref() {
+                let _ = win.window.drag_window();
+            }
         } else if overlay::settings_text_focus(&self.chrome.text_focus) {
             self.chrome.text_focus = TextFocus::None;
         }

@@ -3,10 +3,8 @@
 use std::sync::Arc;
 
 use ui_mixlink::overlay::{self, ChannelsHit, Overlay, TextFocus};
-use winit::dpi::LogicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
-use winit::window::Window;
 
 use analog::AnalogEngine;
 
@@ -20,18 +18,11 @@ impl Chrome {
             ch.window.request_redraw();
             return;
         }
-        let window = match event_loop.create_window(
-            Window::default_attributes()
-                .with_title("Channels")
-                .with_inner_size(LogicalSize::new(
-                    overlay::CHANNELS_WINDOW_W,
-                    overlay::CHANNELS_WINDOW_H,
-                ))
-                .with_min_inner_size(LogicalSize::new(
-                    overlay::CHANNELS_WINDOW_W,
-                    overlay::CHANNELS_WINDOW_H,
-                )),
-        ) {
+        let window = match event_loop.create_window(crate::native::extra_window_attrs(
+            "Channels",
+            overlay::CHANNELS_WINDOW_W as f64,
+            overlay::CHANNELS_WINDOW_H as f64,
+        )) {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 log::error!("channels window: {e}");
@@ -137,6 +128,10 @@ impl AppState {
                     self.chrome.close_channels();
                     return;
                 }
+            }
+        } else if overlay::document_chrome_drag(x, y) {
+            if let Some(ch) = self.chrome.channels.as_ref() {
+                let _ = ch.window.drag_window();
             }
         } else if matches!(self.chrome.text_focus, TextFocus::GearAlias(_)) {
             self.chrome.text_focus = TextFocus::None;
