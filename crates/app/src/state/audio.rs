@@ -1,6 +1,7 @@
 //! Real-time audio engine, device stream, recorder, and mix player.
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use engine::{Engine, EngineHandles};
 
@@ -11,6 +12,7 @@ pub(crate) struct Audio {
     pub recorder: Option<crate::record::Recorder>,
     pub mix_player: Option<crate::mix_play::MixPlayer>,
     pub recording: bool,
+    pub record_started: Option<Instant>,
     pub playing: bool,
     pub plugin_refs: HashMap<i32, vst3_host::MixLinkVST3Ref>,
     pub insert_refs: HashMap<uuid::Uuid, vst3_host::MixLinkVST3Ref>,

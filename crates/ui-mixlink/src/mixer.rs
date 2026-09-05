@@ -59,6 +59,7 @@ pub struct MixerView<'a> {
     pub engine: &'a AnalogEngine,
     pub peaks: &'a [f32],
     pub layout: MixerLayout,
+    pub deck: crate::deck::DeckView,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -66,6 +67,7 @@ pub enum MixerExtraHit {
     AddReturn,
     RemoveReturn,
     ControlWithPan,
+    Record,
 }
 
 pub fn paint(view: &MixerView<'_>) -> (Vec<DrawCmd>, Vec<(Rect, MixerExtraHit)>) {
@@ -149,6 +151,11 @@ pub fn paint(view: &MixerView<'_>) -> (Vec<DrawCmd>, Vec<(Rect, MixerExtraHit)>)
     );
     paint_section_title(&mut cmds, bus_x, pan_bar_y, l.ch_w * 2.0, "Bus returns", None, &mut extras);
     paint_section_title(&mut cmds, main_x, pan_bar_y, l.main_w, "Main", None, &mut extras);
+    if let Some(hit) =
+        crate::deck::paint(&mut cmds, crate::deck::recorder_bay(&l, sends.len()), &view.deck)
+    {
+        extras.push(hit);
+    }
     extras.retain(|(r, _)| {
         r.x < clip.x + clip.w && r.x + r.w > clip.x && r.y < clip.y + clip.h && r.y + r.h > clip.y
     });
@@ -518,12 +525,30 @@ fn paint_control_with_pan(
     let Some(hit) = control_with_pan_rect(&view.layout, sends.len()) else {
         return;
     };
-    widgets::checkbox(
+    let box_r = Rect {
+        x: hit.x + hit.w - CONTROL_WITH_PAN_BOX,
+        y: hit.y + (hit.h - CONTROL_WITH_PAN_BOX) * 0.5,
+        w: CONTROL_WITH_PAN_BOX,
+        h: CONTROL_WITH_PAN_BOX,
+    };
+    widgets::checkbox_box(
         cmds,
-        hit.x,
-        hit.y + (hit.h - CONTROL_WITH_PAN_BOX) * 0.5,
+        box_r,
         view.engine.config.pan_knobs_control_send_c,
+        8.0,
+    );
+    theme::text_end(
+        cmds,
+        Rect {
+            x: hit.x,
+            y: hit.y,
+            w: (box_r.x - hit.x - 3.0).max(1.0),
+            h: hit.h,
+        },
         CONTROL_WITH_PAN_LABEL,
+        CONTROL_WITH_PAN_LABEL_SIZE,
+        theme::SECONDARY_TEXT,
+        false,
     );
     extras.push((hit, MixerExtraHit::ControlWithPan));
 }
@@ -817,9 +842,10 @@ pub fn strip_at(layout: &MixerLayout, send_count: usize, x: f32, _y: f32) -> Opt
 }
 
 const CONTROL_WITH_PAN_LABEL: &str = "Control with Pan";
-const CONTROL_WITH_PAN_BOX: f32 = 14.0;
-/// Checkbox (14) + gap to label (6) + `widgets::checkbox` label width (110).
-const CONTROL_WITH_PAN_HIT_W: f32 = 130.0;
+const CONTROL_WITH_PAN_BOX: f32 = 10.0;
+const CONTROL_WITH_PAN_LABEL_SIZE: f32 = 8.0;
+/// Compact label + gap + trailing checkbox, right-aligned to channel 8.
+const CONTROL_WITH_PAN_HIT_W: f32 = 90.0;
 const SEND_TITLE_SIZE: f32 = 11.0;
 
 /// Hit rect on the Send C name bar, right-aligned to input channel 8.
@@ -952,7 +978,12 @@ mod tests {
         let send_count = engine.config.visible_send_lanes().len();
         let layout = MixerLayout::new(0.0, 0.0, 1800.0, 900.0, send_count);
         let peaks = [0.0f32; 17];
-        let (cmds, extras) = paint(&MixerView { engine: &engine, peaks: &peaks, layout });
+        let (cmds, extras) = paint(&MixerView {
+            engine: &engine,
+            peaks: &peaks,
+            layout,
+            deck: crate::deck::DeckView::default(),
+        });
         let texts: Vec<&str> = cmds
             .iter()
             .filter_map(|c| match c {

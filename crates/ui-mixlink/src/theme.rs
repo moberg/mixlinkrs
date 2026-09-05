@@ -565,6 +565,17 @@ pub fn text_center(
     emit_text(cmds, rect, s, size, color, bold, false, false, Align::Center, None);
 }
 
+pub fn text_end(
+    cmds: &mut Vec<DrawCmd>,
+    rect: Rect,
+    s: impl Into<String>,
+    size: f32,
+    color: Color,
+    bold: bool,
+) {
+    emit_text(cmds, rect, s, size, color, bold, false, false, Align::End, None);
+}
+
 pub fn text_center_mono(
     cmds: &mut Vec<DrawCmd>,
     rect: Rect,

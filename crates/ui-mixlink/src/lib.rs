@@ -2,6 +2,7 @@
 
 pub mod arrangement;
 pub mod chrome;
+pub mod deck;
 pub mod hit;
 pub mod mix_browser;
 pub mod mix_mixer;

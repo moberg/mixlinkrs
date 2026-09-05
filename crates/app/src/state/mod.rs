@@ -123,6 +123,7 @@ impl AppState {
                 recorder: None,
                 mix_player: None,
                 recording: false,
+                record_started: None,
                 playing: false,
                 plugin_refs: HashMap::new(),
                 insert_refs: HashMap::new(),

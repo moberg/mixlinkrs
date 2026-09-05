@@ -168,6 +168,10 @@ fn write_loop(
     true
 }
 
+pub fn armed_track_count(analog: &AnalogEngine) -> usize {
+    (0..TAP_COUNT).filter(|&tap| tap_on_record_list(analog, tap)).count()
+}
+
 pub fn lane_on_record_list(analog: &AnalogEngine, lane: MixLane) -> bool {
     tap_on_record_list(analog, lane_tap(lane))
 }

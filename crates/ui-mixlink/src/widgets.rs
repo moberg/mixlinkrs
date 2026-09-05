@@ -746,16 +746,7 @@ pub fn scrollbar(cmds: &mut Vec<DrawCmd>, track: Rect, scroll: f32, max_scroll: 
 /// MixLink Settings checkbox: dark square, red border + check when on, “On”/“Off”.
 pub fn checkbox(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, on: bool, label: &str) {
     let box_r = Rect { x, y, w: 14.0, h: 14.0 };
-    theme::fill(cmds, box_r, theme::DEEP_SLOT);
-    theme::stroke_rect(
-        cmds,
-        box_r,
-        if on { theme::METER_RED } else { [0.22, 0.22, 0.24, 1.0] },
-        1.0,
-    );
-    if on {
-        theme::text_center(cmds, box_r, "✓", 11.0, [1.0, 1.0, 1.0, 0.95], true);
-    }
+    checkbox_box(cmds, box_r, on, 11.0);
     theme::text(
         cmds,
         Rect { x: x + 20.0, y: y - 1.0, w: 110.0, h: 16.0 },
@@ -764,6 +755,19 @@ pub fn checkbox(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, on: bool, label: &str) 
         theme::TEXT,
         false,
     );
+}
+
+pub fn checkbox_box(cmds: &mut Vec<DrawCmd>, rect: Rect, on: bool, check_size: f32) {
+    theme::fill(cmds, rect, theme::DEEP_SLOT);
+    theme::stroke_rect(
+        cmds,
+        rect,
+        if on { theme::METER_RED } else { [0.22, 0.22, 0.24, 1.0] },
+        1.0,
+    );
+    if on {
+        theme::text_center(cmds, rect, "✓", check_size, [1.0, 1.0, 1.0, 0.95], true);
+    }
 }
 
 /// Charcoal brushed window + inset recessed card (MixLink Settings / Channels).

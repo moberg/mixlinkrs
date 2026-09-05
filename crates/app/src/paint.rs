@@ -77,10 +77,29 @@ impl AppState {
                 let mixer_max = layout.max_scroll_x(send_count);
                 self.chrome.mixer_scroll = self.chrome.mixer_scroll.clamp(0.0, mixer_max);
                 layout.scroll_x = self.chrome.mixer_scroll;
+                let take = self.session.take_number;
+                let take_title = project::ProjectMeta::take_title(
+                    take,
+                    self.session.take_names.get(&take).map(String::as_str),
+                );
                 let (cmds, extras) = ui_mixlink::mixer::paint(&ui_mixlink::mixer::MixerView {
                     engine: &self.surface.analog,
                     peaks: &peaks,
                     layout,
+                    deck: ui_mixlink::deck::DeckView {
+                        recording: self.audio.recording,
+                        take_number: take,
+                        take_title,
+                        elapsed: self
+                            .audio
+                            .record_started
+                            .map(|t| t.elapsed().as_secs_f32())
+                            .unwrap_or(0.0),
+                        tracks: crate::record::armed_track_count(&self.surface.analog),
+                        sample_rate: sr as u32,
+                        ready: ProjectStore::resolve_root(&self.surface.analog.config).is_some()
+                            && self.audio._stream.is_some(),
+                    },
                 });
                 scene.extend(cmds);
                 self.chrome.mixer_extras = extras;

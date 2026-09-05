@@ -14,6 +14,7 @@ impl AppState {
     pub(crate) fn toggle_record(&mut self) {
         if self.audio.recording {
             self.audio.recording = false;
+            self.audio.record_started = None;
             let _ =
                 self.audio.engine_handles.cmd_tx.try_push(UiCommand::SetRecording { on: false });
             if let Some(rec) = self.audio.recorder.take() {
@@ -70,6 +71,7 @@ impl AppState {
         let _ = self.audio.engine_handles.cmd_tx.try_push(UiCommand::ArmRings);
         self.audio.recorder = Some(rec);
         self.audio.recording = true;
+        self.audio.record_started = Some(std::time::Instant::now());
         let _ = self.audio.engine_handles.cmd_tx.try_push(UiCommand::SetRecording { on: true });
     }
 

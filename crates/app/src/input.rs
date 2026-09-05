@@ -211,6 +211,7 @@ impl AppState {
                     self.surface.analog.set_pan_knobs_control_send_c(on);
                     self.sync_xl_leds(true);
                 }
+                MixerExtraHit::Record => self.toggle_record(),
             }
             return;
         }
