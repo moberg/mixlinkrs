@@ -14,7 +14,7 @@ pub enum Page {
 
 pub struct ChromeState<'a> {
     pub page: Page,
-    pub tempo: f64,
+    pub tempo_text: String,
     pub playing: bool,
     pub recording: bool,
     pub position: String,
@@ -49,21 +49,27 @@ fn paint_header(cmds: &mut Vec<DrawCmd>, state: &ChromeState<'_>, w: f32) {
         theme::SurfaceStyle::Sidebar,
     );
     theme::seam_h(cmds, 0.0, HEADER_H - 2.0, w, true);
+    widgets::recessed_field(cmds, tempo_well_rect());
     theme::text(
         cmds,
-        Rect { x: 10.0, y: 8.0, w: 48.0, h: 20.0 },
+        Rect { x: 14.0, y: 8.0, w: 42.0, h: 20.0 },
         "TEMPO",
         9.0,
         theme::SECONDARY_TEXT,
         true,
     );
-    widgets::text_field_tempo(
-        cmds,
-        Rect { x: 58.0, y: 6.0, w: 52.0, h: 24.0 },
-        &format!("{:.1}", state.tempo),
-        *state.focus == TextFocus::Tempo,
-        state.caret,
-    );
+    let tempo_val = tempo_value_rect();
+    let tempo_focus = *state.focus == TextFocus::Tempo;
+    if tempo_focus {
+        cmds.push(DrawCmd::RoundedRect {
+            rect: tempo_val,
+            color: [1.0, 1.0, 1.0, 0.08],
+            radius: 3.0,
+        });
+    }
+    let tempo_shown =
+        if tempo_focus && state.caret { format!("{}|", state.tempo_text) } else { state.tempo_text.clone() };
+    theme::text_mono(cmds, tempo_val, tempo_shown, 13.0, theme::TEXT, true);
     theme::text(
         cmds,
         Rect { x: 114.0, y: 8.0, w: 28.0, h: 20.0 },
@@ -98,16 +104,10 @@ fn paint_header(cmds: &mut Vec<DrawCmd>, state: &ChromeState<'_>, w: f32) {
             state.grid_on,
             theme::BLUE,
         );
-        x += 60.0;
-        theme::text_center_mono(
-            cmds,
-            Rect { x, y: 6.0, w: 56.0, h: 24.0 },
-            &state.grid_title,
-            11.0,
-            theme::TEXT,
-            true,
-        );
-        x += 62.0;
+        let step = grid_step_rect();
+        widgets::recessed_field(cmds, step);
+        theme::text_center_mono(cmds, step, &state.grid_title, 11.0, theme::TEXT, true);
+        x = step.x + MIX_STEP_GAP;
         widgets::hardware_pad(
             cmds,
             Rect { x, y: 6.0, w: 64.0, h: 24.0 },
@@ -143,6 +143,25 @@ fn paint_header(cmds: &mut Vec<DrawCmd>, state: &ChromeState<'_>, w: f32) {
     let (record, mix) = page_tab_rects(w);
     widgets::hardware_pad(cmds, record, "Record", state.page == Page::Record, theme::PRIMARY_TEXT);
     widgets::hardware_pad(cmds, mix, "Mix", state.page == Page::Mix, theme::PRIMARY_TEXT);
+}
+
+const MIX_PLAY_X: f32 = 150.0;
+const MIX_GRID_X: f32 = MIX_PLAY_X + 78.0 + 86.0;
+const MIX_STEP_X: f32 = MIX_GRID_X + 60.0;
+const MIX_STEP_GAP: f32 = 62.0;
+
+/// MixLink grid-resolution well next to the Grid pad.
+pub fn grid_step_rect() -> Rect {
+    Rect { x: MIX_STEP_X, y: 6.0, w: 56.0, h: 24.0 }
+}
+
+/// MixLink tempo well: label + value + BPM. Drag or click anywhere on it.
+pub fn tempo_well_rect() -> Rect {
+    Rect { x: 8.0, y: 6.0, w: 136.0, h: 24.0 }
+}
+
+fn tempo_value_rect() -> Rect {
+    Rect { x: 56.0, y: 6.0, w: 56.0, h: 24.0 }
 }
 
 fn page_tab_rects(w: f32) -> (Rect, Rect) {
@@ -215,7 +234,8 @@ fn paint_footer(cmds: &mut Vec<DrawCmd>, state: &ChromeState<'_>, w: f32, h: f32
 
 pub fn hit_chrome(page: Page, w: f32, h: f32, x: f32, y: f32) -> Option<ChromeHit> {
     if y < HEADER_H {
-        if x >= 58.0 && x < 122.0 {
+        let tempo = tempo_well_rect();
+        if x >= tempo.x && x < tempo.x + tempo.w {
             return Some(ChromeHit::Tempo);
         }
         let (record, mix) = page_tab_rects(w);
@@ -226,15 +246,19 @@ pub fn hit_chrome(page: Page, w: f32, h: f32, x: f32, y: f32) -> Option<ChromeHi
             return Some(ChromeHit::Page(Page::Mix));
         }
         if page == Page::Mix {
-            let mut bx = 150.0;
+            let mut bx = MIX_PLAY_X;
             if x >= bx && x < bx + 72.0 {
                 return Some(ChromeHit::Play);
             }
-            bx += 78.0 + 86.0;
+            bx = MIX_GRID_X;
             if x >= bx && x < bx + 56.0 {
                 return Some(ChromeHit::Grid);
             }
-            bx += 60.0 + 62.0;
+            let step = grid_step_rect();
+            if x >= step.x && x < step.x + step.w {
+                return Some(ChromeHit::GridStep);
+            }
+            bx = step.x + MIX_STEP_GAP;
             if x >= bx && x < bx + 64.0 {
                 return Some(ChromeHit::Auto);
             }
@@ -274,6 +298,7 @@ pub enum ChromeHit {
     Page(Page),
     Play,
     Grid,
+    GridStep,
     Auto,
     Knobs,
     Inserts,
@@ -316,5 +341,29 @@ mod tests {
         let hit = hit_chrome(Page::Mix, w, 900.0, x + 4.0, 10.0);
         assert!(matches!(hit, Some(ChromeHit::Inserts)), "{hit:?}");
         assert!(hit_chrome(Page::Record, w, 900.0, x + 4.0, 10.0).is_none());
+    }
+
+    #[test]
+    fn tempo_well_is_draggable() {
+        let well = tempo_well_rect();
+        assert!(matches!(
+            hit_chrome(Page::Mix, 1400.0, 900.0, well.x + 4.0, 12.0),
+            Some(ChromeHit::Tempo)
+        ));
+        assert!(matches!(
+            hit_chrome(Page::Mix, 1400.0, 900.0, well.x + well.w - 4.0, 12.0),
+            Some(ChromeHit::Tempo)
+        ));
+    }
+
+    #[test]
+    fn grid_step_well_opens_the_resolution_menu() {
+        let step = grid_step_rect();
+        let hit = hit_chrome(Page::Mix, 1400.0, 900.0, step.x + 8.0, 12.0);
+        assert!(matches!(hit, Some(ChromeHit::GridStep)), "{hit:?}");
+        assert!(matches!(
+            hit_chrome(Page::Mix, 1400.0, 900.0, MIX_GRID_X + 8.0, 12.0),
+            Some(ChromeHit::Grid)
+        ));
     }
 }

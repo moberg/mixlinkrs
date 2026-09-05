@@ -13,11 +13,11 @@ pub mod undo;
 
 pub use analog::ReturnLane;
 pub use document::{
-    parse_take_wav, sanitize_take_name, strip_adat_channel, take_clip_id, take_wav_name,
-    MixArrangement,
+    copy_clip_ids, copy_time_range, last_clip_end, parse_take_wav, sanitize_take_name,
+    strip_adat_channel, take_clip_id, take_wav_name, ArrSelection, MixArrangement,
     MixAutomationLane, MixAutomationPoint, MixAutomationTarget, MixClip, MixDocument, MixGrid,
-    MixInsert, MixKnobMap, MixLane, MixPasteboard, MixTime, MixTrack, TakeFile, TakeInfo,
-    FADER_LIN_0DB, KNOB_COUNT,
+    MixInsert, MixKnobMap, MixLane, MixPasteEntry, MixPasteboard, MixTime, MixTrack, TakeFile,
+    TakeInfo, FADER_LIN_0DB, KNOB_COUNT, MIN_CLIP_FRAMES,
 };
 pub use meta::{MixListEntry, ProjectMeta};
 pub use session::{

@@ -121,7 +121,10 @@ impl<'de> Deserialize<'de> for MixLane {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Shortest clip the editor will leave after a trim or split.
+pub const MIN_CLIP_FRAMES: i64 = 32;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MixClip {
     pub id: Uuid,
@@ -131,24 +134,154 @@ pub struct MixClip {
     pub source_start_frame: i64,
     pub source_frame_count: i64,
     pub mix_start_frame: i64,
+    /// WAV length. `0` means unknown — trim does not clamp.
+    #[serde(default)]
+    pub source_total_frames: i64,
+    #[serde(default)]
+    pub fade_in_frames: i64,
+    #[serde(default)]
+    pub fade_out_frames: i64,
+    /// When set, `loop_frames` is the repeating source window.
+    #[serde(default)]
+    pub looped: bool,
+    #[serde(default)]
+    pub loop_frames: i64,
 }
 
 impl MixClip {
+    pub fn new(
+        source_take: i32,
+        source_lane: MixLane,
+        source_file: impl Into<String>,
+        source_start_frame: i64,
+        source_frame_count: i64,
+        mix_start_frame: i64,
+        source_total_frames: i64,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            source_take,
+            source_lane,
+            source_file: source_file.into(),
+            source_start_frame,
+            source_frame_count,
+            mix_start_frame,
+            source_total_frames,
+            fade_in_frames: 0,
+            fade_out_frames: 0,
+            looped: false,
+            loop_frames: 0,
+        }
+    }
+
     pub fn mix_end_frame(&self) -> i64 {
         self.mix_start_frame + self.source_frame_count
     }
 
+    /// Gear name only (`Kick`), not the recorder filename.
+    pub fn display_name(&self) -> String {
+        if let Some((_, _, name)) = parse_take_wav(&self.source_file) {
+            let short = strip_adat_channel(&name);
+            if !short.is_empty() {
+                return short;
+            }
+            if !name.is_empty() {
+                return name;
+            }
+        }
+        std::path::Path::new(&self.source_file)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.source_file.clone())
+    }
+
+    /// `21 Kick` when the clip is from another take; otherwise just `Kick`.
+    pub fn title(&self, home_take: Option<i32>) -> String {
+        let name = self.display_name();
+        if home_take.is_some_and(|home| home != self.source_take) {
+            format!("{} {name}", self.source_take)
+        } else {
+            name
+        }
+    }
+
+    /// Window into this clip. `start` is frames from the clip's mix start.
     pub fn slice(&self, start: i64, count: i64) -> Self {
         let offset = start.max(0);
-        Self {
-            id: Uuid::new_v4(),
-            source_take: self.source_take,
-            source_lane: self.source_lane,
-            source_file: self.source_file.clone(),
-            source_start_frame: self.source_start_frame + offset,
-            source_frame_count: (self.source_frame_count - offset).min(count).max(0),
-            mix_start_frame: self.mix_start_frame,
+        let remaining = (self.source_frame_count - offset).max(0);
+        let count = count.max(0).min(remaining);
+        let mut next = self.clone();
+        next.id = Uuid::new_v4();
+        next.source_start_frame = self.source_start_frame + offset;
+        next.source_frame_count = count;
+        next.mix_start_frame = self.mix_start_frame + offset;
+        if offset > 0 {
+            next.fade_in_frames = 0;
         }
+        if count < remaining {
+            next.fade_out_frames = 0;
+        }
+        next
+    }
+
+    pub fn remaining_source(&self) -> Option<i64> {
+        if self.source_total_frames <= 0 {
+            return None;
+        }
+        Some((self.source_total_frames - self.source_start_frame).max(0))
+    }
+
+    pub fn trim_right(&mut self, new_end: i64) {
+        let min_end = self.mix_start_frame + MIN_CLIP_FRAMES;
+        let mut end = new_end.max(min_end);
+        if !self.looped {
+            if let Some(remain) = self.remaining_source() {
+                end = end.min(self.mix_start_frame + remain);
+            }
+        }
+        self.source_frame_count = (end - self.mix_start_frame).max(MIN_CLIP_FRAMES);
+        self.fade_out_frames = self.fade_out_frames.min(self.source_frame_count / 2);
+    }
+
+    pub fn trim_left(&mut self, new_start: i64) {
+        let old_start = self.mix_start_frame;
+        let old_end = self.mix_end_frame();
+        let min_start = (old_start - self.source_start_frame).max(0);
+        let start = new_start.max(min_start).min(old_end - MIN_CLIP_FRAMES);
+        let d = start - old_start;
+        self.mix_start_frame = start;
+        self.source_start_frame += d;
+        self.source_frame_count -= d;
+        self.fade_in_frames = self.fade_in_frames.min(self.source_frame_count / 2);
+    }
+
+    pub fn slip(&mut self, delta: i64) {
+        if self.source_frame_count <= 0 {
+            return;
+        }
+        let mut next = self.source_start_frame + delta;
+        next = next.max(0);
+        if self.source_total_frames > 0 {
+            let max_start = (self.source_total_frames - self.source_frame_count).max(0);
+            next = next.min(max_start);
+        }
+        self.source_start_frame = next;
+    }
+
+    pub fn set_fade_in(&mut self, frames: i64) {
+        self.fade_in_frames = frames.max(0).min(self.source_frame_count / 2);
+    }
+
+    pub fn set_fade_out(&mut self, frames: i64) {
+        self.fade_out_frames = frames.max(0).min(self.source_frame_count / 2);
+    }
+
+    pub fn enable_loop(&mut self) {
+        if self.looped {
+            return;
+        }
+        self.looped = true;
+        self.loop_frames = self.source_frame_count.max(MIN_CLIP_FRAMES);
     }
 }
 
@@ -405,6 +538,9 @@ pub struct MixDocument {
     pub tracks: Vec<MixTrack>,
     #[serde(default)]
     pub start_frame: i64,
+    /// Take this mix was started from. Clip titles omit this number.
+    #[serde(default)]
+    pub origin_take: Option<i32>,
 }
 
 impl MixDocument {
@@ -417,7 +553,20 @@ impl MixDocument {
                 .map(|lane| MixTrack::empty(lane, None))
                 .collect(),
             start_frame: 0,
+            origin_take: None,
         }
+    }
+
+    pub fn home_take(&self) -> Option<i32> {
+        if self.origin_take.is_some() {
+            return self.origin_take;
+        }
+        let mut counts = std::collections::HashMap::<i32, usize>::new();
+        for clip in self.tracks.iter().filter(|t| t.lane != MixLane::Main).flat_map(|t| t.clips.iter())
+        {
+            *counts.entry(clip.source_take).or_default() += 1;
+        }
+        counts.into_iter().max_by_key(|(take, n)| (*n, -take)).map(|(take, _)| take)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -457,36 +606,244 @@ impl MixDocument {
     }
 
     pub fn last_clip_end(&self) -> i64 {
-        self.tracks
-            .iter()
-            .filter(|t| t.lane != MixLane::Main)
-            .flat_map(|t| t.clips.iter())
-            .map(MixClip::mix_end_frame)
-            .max()
-            .unwrap_or(0)
+        last_clip_end(&self.tracks)
     }
 
     pub fn copy_clips(&self, ids: &[Uuid]) -> Option<MixPasteboard> {
-        for track in &self.tracks {
-            let clips: Vec<MixClip> =
-                track.clips.iter().filter(|c| ids.contains(&c.id)).cloned().collect();
-            if !clips.is_empty() {
-                return Some(MixPasteboard { clips, source_lane: track.lane });
-            }
-        }
-        None
+        copy_clip_ids(&self.tracks, ids)
+    }
+
+    pub fn copy_time_range(
+        &self,
+        lanes: &[MixLane],
+        start: i64,
+        end: i64,
+    ) -> Option<MixPasteboard> {
+        copy_time_range(&self.tracks, lanes, start, end)
     }
 
     pub fn paste_clips(&mut self, board: &MixPasteboard, dest: MixLane, at: i64) {
-        let origin = board.clips.iter().map(|c| c.mix_start_frame).min().unwrap_or(0);
-        let multi = board.clips.iter().any(|c| c.source_lane != board.source_lane);
-        for clip in &board.clips {
-            let lane = if multi { clip.source_lane } else { dest };
-            let i = self.ensure_track(lane, None);
+        if dest == MixLane::Main || board.entries.is_empty() {
+            return;
+        }
+        let origin = board.origin;
+        let single = board.single_lane();
+        let mut placements = Vec::new();
+        for entry in &board.entries {
+            let lane = if single { dest } else { entry.from_lane };
+            if lane == MixLane::Main {
+                continue;
+            }
+            let mut clip = entry.clip.clone();
+            clip.mix_start_frame = at + (entry.clip.mix_start_frame - origin);
+            placements.push((lane, clip));
+        }
+        self.insert_clips(&placements);
+    }
+
+    /// Live's monophonic arrangement track: drop, trim, or split anything in `[start, end)`.
+    pub fn clear_range(&mut self, lane: MixLane, start: i64, end: i64) {
+        if start >= end || lane == MixLane::Main {
+            return;
+        }
+        let Some(track) = self.track_mut(lane) else {
+            return;
+        };
+        let mut next = Vec::new();
+        for clip in std::mem::take(&mut track.clips) {
+            let c0 = clip.mix_start_frame;
+            let c1 = clip.mix_end_frame();
+            if c1 <= start || c0 >= end {
+                next.push(clip);
+                continue;
+            }
+            if c0 >= start && c1 <= end {
+                continue;
+            }
+            if c0 < start && c1 > end {
+                let mut left = clip.clone();
+                left.id = Uuid::new_v4();
+                left.source_frame_count = start - c0;
+                left.fade_out_frames = 0;
+                if left.source_frame_count >= MIN_CLIP_FRAMES {
+                    next.push(left);
+                }
+                let right = clip.slice(end - c0, c1 - end);
+                if right.source_frame_count >= MIN_CLIP_FRAMES {
+                    next.push(right);
+                }
+                continue;
+            }
+            if c0 < start {
+                let mut kept = clip;
+                kept.source_frame_count = start - c0;
+                kept.fade_out_frames = 0;
+                if kept.source_frame_count >= MIN_CLIP_FRAMES {
+                    next.push(kept);
+                }
+                continue;
+            }
+            let trimmed = clip.slice(end - c0, c1 - end);
+            if trimmed.source_frame_count >= MIN_CLIP_FRAMES {
+                next.push(trimmed);
+            }
+        }
+        track.clips = next;
+    }
+
+    /// Place clips after clearing each clip's span on its destination lane. Always new UUIDs.
+    pub fn insert_clips(&mut self, items: &[(MixLane, MixClip)]) {
+        for (lane, clip) in items {
+            if *lane == MixLane::Main || clip.source_frame_count <= 0 {
+                continue;
+            }
+            self.clear_range(*lane, clip.mix_start_frame, clip.mix_end_frame());
+            let i = self.ensure_track(*lane, None);
             let mut next = clip.clone();
             next.id = Uuid::new_v4();
-            next.mix_start_frame = at + (clip.mix_start_frame - origin);
             self.tracks[i].clips.push(next);
+        }
+    }
+
+    pub fn remove_clips(&mut self, ids: &[Uuid]) {
+        for track in &mut self.tracks {
+            track.clips.retain(|c| !ids.contains(&c.id));
+        }
+    }
+
+    /// Drop arrangement/mixer channels from this mix. Main always stays.
+    pub fn remove_lanes(&mut self, lanes: &[MixLane]) {
+        self.tracks.retain(|t| t.lane == MixLane::Main || !lanes.contains(&t.lane));
+        self.ensure_main_bus();
+    }
+
+    pub fn split_at(&mut self, frame: i64, lanes: &[MixLane]) {
+        for lane in lanes {
+            if *lane == MixLane::Main {
+                continue;
+            }
+            let Some(track) = self.track_mut(*lane) else {
+                continue;
+            };
+            let mut next = Vec::new();
+            for clip in std::mem::take(&mut track.clips) {
+                if frame > clip.mix_start_frame && frame < clip.mix_end_frame() {
+                    let offset = frame - clip.mix_start_frame;
+                    if offset < MIN_CLIP_FRAMES
+                        || clip.source_frame_count - offset < MIN_CLIP_FRAMES
+                    {
+                        next.push(clip);
+                        continue;
+                    }
+                    let mut left = clip.clone();
+                    left.id = Uuid::new_v4();
+                    left.source_frame_count = offset;
+                    left.fade_out_frames = 0;
+                    let right = clip.slice(offset, clip.source_frame_count - offset);
+                    next.push(left);
+                    next.push(right);
+                } else {
+                    next.push(clip);
+                }
+            }
+            track.clips = next;
+        }
+    }
+
+    pub fn delete_time(&mut self, lanes: &[MixLane], start: i64, end: i64) {
+        let len = end - start;
+        if len <= 0 {
+            return;
+        }
+        for lane in lanes {
+            self.clear_range(*lane, start, end);
+            if let Some(track) = self.track_mut(*lane) {
+                for clip in &mut track.clips {
+                    if clip.mix_start_frame >= end {
+                        clip.mix_start_frame -= len;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Open a hole of `len` frames at `at` on each lane. Clips that straddle `at`
+    /// are split so the right-hand side can shift.
+    pub fn insert_time(&mut self, lanes: &[MixLane], at: i64, len: i64) {
+        if len <= 0 || at < 0 {
+            return;
+        }
+        self.split_at(at, lanes);
+        for lane in lanes {
+            if *lane == MixLane::Main {
+                continue;
+            }
+            if let Some(track) = self.track_mut(*lane) {
+                for clip in &mut track.clips {
+                    if clip.mix_start_frame >= at {
+                        clip.mix_start_frame += len;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Duplicate the selected time `[start, end)` as a block: insert that much
+    /// time at `end`, then paste the sliced clips with the same offsets so the
+    /// copy starts on `end` (bar 1 if you selected 0–1). Empty padding in the
+    /// box is part of the area. Material stays on the lane it was copied from.
+    ///
+    /// Returns the mix range of the new copies and the lanes they landed on.
+    pub fn duplicate_range(
+        &mut self,
+        lanes: &[MixLane],
+        start: i64,
+        end: i64,
+    ) -> Option<(i64, i64, Vec<MixLane>)> {
+        let (start, end) = if start <= end { (start, end) } else { (end, start) };
+        let span = end - start;
+        if span <= 0 || lanes.is_empty() {
+            return None;
+        }
+        let board = copy_time_range(&self.tracks, lanes, start, end)?;
+        let mut dest_lanes = Vec::new();
+        for entry in &board.entries {
+            if entry.from_lane != MixLane::Main && !dest_lanes.contains(&entry.from_lane) {
+                dest_lanes.push(entry.from_lane);
+            }
+        }
+        if dest_lanes.is_empty() {
+            return None;
+        }
+        self.insert_time(&dest_lanes, end, span);
+        let mut placements = Vec::new();
+        for entry in &board.entries {
+            if entry.from_lane == MixLane::Main {
+                continue;
+            }
+            let mut clip = entry.clip.clone();
+            clip.mix_start_frame = end + (entry.clip.mix_start_frame - start);
+            placements.push((entry.from_lane, clip));
+        }
+        self.insert_clips(&placements);
+        for lane in &dest_lanes {
+            if let Some(track) = self.track_mut(*lane) {
+                track.clips.sort_by_key(|c| c.mix_start_frame);
+            }
+        }
+        Some((end, end + span, dest_lanes))
+    }
+
+    pub fn backfill_source_totals(&mut self, takes: &[TakeInfo]) {
+        for track in &mut self.tracks {
+            for clip in &mut track.clips {
+                if clip.source_total_frames > 0 {
+                    continue;
+                }
+                if let Some(n) = take_file_frames(takes, clip) {
+                    clip.source_total_frames = n;
+                }
+            }
         }
     }
 
@@ -494,6 +851,7 @@ impl MixDocument {
     pub fn load_from_take(&mut self, take: &TakeInfo, origin: i64) {
         self.ensure_main_bus();
         self.start_frame = 0;
+        self.origin_take = Some(take.number);
         for track in &mut self.tracks {
             track.clips.clear();
         }
@@ -502,15 +860,15 @@ impl MixDocument {
             let i = self.ensure_track(file.lane, Some(file.name.clone()));
             self.tracks[i].name = file.name.clone();
             let remaining = (file.frame_count - origin).max(0);
-            self.tracks[i].clips = vec![MixClip {
-                id: Uuid::new_v4(),
-                source_take: take.number,
-                source_lane: file.lane,
-                source_file: file.filename.clone(),
-                source_start_frame: origin,
-                source_frame_count: remaining,
-                mix_start_frame: 0,
-            }];
+            self.tracks[i].clips = vec![MixClip::new(
+                take.number,
+                file.lane,
+                file.filename.clone(),
+                origin,
+                remaining,
+                0,
+                file.frame_count,
+            )];
         }
         self.tracks.retain(|t| t.lane == MixLane::Main || !t.is_unused_template_strip());
     }
@@ -532,9 +890,140 @@ impl MixDocument {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct MixPasteEntry {
+    pub clip: MixClip,
+    pub from_lane: MixLane,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct MixPasteboard {
-    pub clips: Vec<MixClip>,
-    pub source_lane: MixLane,
+    pub entries: Vec<MixPasteEntry>,
+    pub origin: i64,
+}
+
+impl MixPasteboard {
+    pub fn from_entries(entries: Vec<MixPasteEntry>) -> Option<Self> {
+        if entries.is_empty() {
+            return None;
+        }
+        let origin = entries.iter().map(|e| e.clip.mix_start_frame).min().unwrap_or(0);
+        Some(Self { entries, origin })
+    }
+
+    pub fn single_lane(&self) -> bool {
+        let Some(first) = self.entries.first() else {
+            return true;
+        };
+        self.entries.iter().all(|e| e.from_lane == first.from_lane)
+    }
+
+    pub fn lanes(&self) -> Vec<MixLane> {
+        let mut lanes = Vec::new();
+        for entry in &self.entries {
+            if !lanes.contains(&entry.from_lane) {
+                lanes.push(entry.from_lane);
+            }
+        }
+        lanes
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ArrSelection {
+    pub lanes: Vec<MixLane>,
+    pub start: i64,
+    pub end: i64,
+    pub clips: Vec<Uuid>,
+}
+
+impl ArrSelection {
+    pub fn range(&self) -> (i64, i64) {
+        (self.start.min(self.end), self.start.max(self.end))
+    }
+
+    pub fn has_range(&self) -> bool {
+        self.start != self.end
+    }
+
+    pub fn length(&self) -> i64 {
+        let (a, b) = self.range();
+        b - a
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    pub fn select_clip(&mut self, lane: MixLane, clip: &MixClip) {
+        self.lanes = vec![lane];
+        self.start = clip.mix_start_frame;
+        self.end = clip.mix_end_frame();
+        self.clips = vec![clip.id];
+    }
+}
+
+pub fn last_clip_end(tracks: &[MixTrack]) -> i64 {
+    tracks
+        .iter()
+        .filter(|t| t.lane != MixLane::Main)
+        .flat_map(|t| t.clips.iter())
+        .map(MixClip::mix_end_frame)
+        .max()
+        .unwrap_or(0)
+}
+
+pub fn copy_time_range(
+    tracks: &[MixTrack],
+    lanes: &[MixLane],
+    start: i64,
+    end: i64,
+) -> Option<MixPasteboard> {
+    let (start, end) = if start <= end { (start, end) } else { (end, start) };
+    if end <= start {
+        return None;
+    }
+    let mut entries = Vec::new();
+    for track in tracks {
+        if !lanes.contains(&track.lane) {
+            continue;
+        }
+        for clip in &track.clips {
+            let overlap_start = clip.mix_start_frame.max(start);
+            let overlap_end = clip.mix_end_frame().min(end);
+            if overlap_end <= overlap_start {
+                continue;
+            }
+            let slice =
+                clip.slice(overlap_start - clip.mix_start_frame, overlap_end - overlap_start);
+            if slice.source_frame_count <= 0 {
+                continue;
+            }
+            entries.push(MixPasteEntry { clip: slice, from_lane: track.lane });
+        }
+    }
+    MixPasteboard::from_entries(entries)
+}
+
+pub fn copy_clip_ids(tracks: &[MixTrack], ids: &[Uuid]) -> Option<MixPasteboard> {
+    let mut entries = Vec::new();
+    for track in tracks {
+        for clip in &track.clips {
+            if ids.contains(&clip.id) {
+                entries.push(MixPasteEntry { clip: clip.clone(), from_lane: track.lane });
+            }
+        }
+    }
+    MixPasteboard::from_entries(entries)
+}
+
+fn take_file_frames(takes: &[TakeInfo], clip: &MixClip) -> Option<i64> {
+    takes.iter().find(|t| t.number == clip.source_take).and_then(|t| {
+        t.files
+            .iter()
+            .find(|f| f.filename == clip.source_file)
+            .or_else(|| t.files.iter().find(|f| f.lane == clip.source_lane))
+            .map(|f| f.frame_count)
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -686,7 +1175,7 @@ impl MixTime {
     pub fn snap(frame: i64, step_bars: f64, tempo: f64, sample_rate: f64, origin: i64) -> i64 {
         let step = Self::frames_per_bar(tempo, sample_rate) * step_bars.max(1.0 / 64.0);
         let relative = (frame - origin) as f64;
-        origin + ((relative / step).round() * step) as i64
+        origin + ((relative / step).round() * step).round() as i64
     }
 
     /// `bar.beat.tick` (1-based beat/tick). Negative frames keep a leading `-`.
@@ -767,15 +1256,17 @@ impl TakeInfo {
             .map(|file| {
                 let mut track = MixTrack::empty(file.lane, Some(file.name.clone()));
                 track.id = take_clip_id(0, &format!("lane.{}", file.lane.id()));
-                track.clips = vec![MixClip {
-                    id: take_clip_id(self.number, &file.filename),
-                    source_take: self.number,
-                    source_lane: file.lane,
-                    source_file: file.filename.clone(),
-                    source_start_frame: 0,
-                    source_frame_count: file.frame_count,
-                    mix_start_frame: 0,
-                }];
+                let mut clip = MixClip::new(
+                    self.number,
+                    file.lane,
+                    file.filename.clone(),
+                    0,
+                    file.frame_count,
+                    0,
+                    file.frame_count,
+                );
+                clip.id = take_clip_id(self.number, &file.filename);
+                track.clips = vec![clip];
                 track
             })
             .collect()
@@ -801,7 +1292,11 @@ pub fn strip_adat_channel(name: &str) -> String {
             None => after_slash,
         }
     } else if let Some((n2, after)) = take_leading_int(rest) {
-        if n2 == n1 + 1 && (1..=32).contains(&n2) { after } else { rest }
+        if n2 == n1 + 1 && (1..=32).contains(&n2) {
+            after
+        } else {
+            rest
+        }
     } else {
         rest
     };
@@ -1010,6 +1505,19 @@ mod tests {
         assert_eq!((take, lane, name.as_str()), (3, MixLane::ReturnLane(ReturnLane::Bus1), "x"));
         let (take, lane, name) = parse_take_wav("3-mix.wav").unwrap();
         assert_eq!((take, lane, name.as_str()), (3, MixLane::Main, "Mix"));
+        let (take, _, name) = parse_take_wav("21-ch-02-ADAT-3-Kick.wav").unwrap();
+        assert_eq!(take, 21);
+        assert_eq!(strip_adat_channel(&name), "Kick");
+    }
+
+    #[test]
+    fn clip_title_is_name_unless_take_differs() {
+        let clip = MixClip::new(21, MixLane::Strip(1), "21-ch-02-ADAT-3-Kick.wav", 0, 100, 0, 100);
+        assert_eq!(clip.display_name(), "Kick");
+        assert_eq!(clip.title(Some(21)), "Kick");
+        assert_eq!(clip.title(Some(7)), "21 Kick");
+        let ret = MixClip::new(21, MixLane::ReturnLane(ReturnLane::SendA), "21-ret-A-BigSky.wav", 0, 100, 0, 100);
+        assert_eq!(ret.title(Some(21)), "BigSky");
     }
 
     #[test]
@@ -1069,15 +1577,9 @@ mod tests {
     fn load_from_take_replaces_clips_and_honors_start() {
         let mut mix = MixDocument::empty("Mix 1", 2);
         mix.start_frame = 99;
-        mix.tracks[0].clips.push(MixClip {
-            id: Uuid::from_u128(1),
-            source_take: 1,
-            source_lane: MixLane::Strip(0),
-            source_file: "old.wav".into(),
-            source_start_frame: 0,
-            source_frame_count: 10,
-            mix_start_frame: 0,
-        });
+        let mut old = MixClip::new(1, MixLane::Strip(0), "old.wav", 0, 10, 0, 10);
+        old.id = Uuid::from_u128(1);
+        mix.tracks[0].clips.push(old);
         let take = TakeInfo {
             number: 20,
             files: vec![
@@ -1099,6 +1601,8 @@ mod tests {
         };
         mix.load_from_take(&take, 200);
         assert_eq!(mix.start_frame, 0);
+        assert_eq!(mix.origin_take, Some(20));
+        assert_eq!(mix.home_take(), Some(20));
         let ch = mix.channel_tracks();
         let strip = ch.iter().find(|t| matches!(t.lane, MixLane::Strip(_))).unwrap();
         assert_eq!(strip.name, "303");
@@ -1113,15 +1617,9 @@ mod tests {
         let mut mix = MixDocument::empty("Mix 1", 2);
         mix.start_frame = 48000;
         let insert_id = Uuid::from_u128(0x1111);
-        mix.tracks[0].clips.push(MixClip {
-            id: Uuid::from_u128(0xaaaa),
-            source_take: 3,
-            source_lane: MixLane::Strip(0),
-            source_file: "3-ch-01-Rytm.wav".into(),
-            source_start_frame: 0,
-            source_frame_count: 96_000,
-            mix_start_frame: 0,
-        });
+        let mut clip = MixClip::new(3, MixLane::Strip(0), "3-ch-01-Rytm.wav", 0, 96_000, 0, 96_000);
+        clip.id = Uuid::from_u128(0xaaaa);
+        mix.tracks[0].clips.push(clip);
         mix.tracks[0].inserts.push(MixInsert {
             id: insert_id,
             name: "BigSky".into(),
@@ -1168,5 +1666,220 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(decoded, MixLane::ReturnLane(ReturnLane::SendA));
+    }
+
+    fn clip_on(lane: MixLane, start: i64, count: i64, mix: i64, total: i64) -> MixClip {
+        MixClip::new(1, lane, "a.wav", start, count, mix, total)
+    }
+
+    #[test]
+    fn slice_moves_mix_start_and_source_in_point() {
+        let clip = clip_on(MixLane::Strip(0), 100, 400, 50, 1000);
+        let slice = clip.slice(80, 120);
+        assert_eq!(slice.source_start_frame, 180);
+        assert_eq!(slice.source_frame_count, 120);
+        assert_eq!(slice.mix_start_frame, 130);
+        assert_ne!(slice.id, clip.id);
+    }
+
+    #[test]
+    fn clear_range_covers_keep_drop_trim_and_split() {
+        let mut mix = MixDocument::empty("Mix 1", 2);
+        mix.tracks[0].name = "Rytm".into();
+        mix.tracks[0].clips = vec![
+            clip_on(MixLane::Strip(0), 0, 100, 0, 1000),
+            clip_on(MixLane::Strip(0), 0, 100, 200, 1000),
+            clip_on(MixLane::Strip(0), 0, 200, 400, 1000),
+            clip_on(MixLane::Strip(0), 0, 400, 800, 1000),
+        ];
+        mix.clear_range(MixLane::Strip(0), 450, 950);
+        let starts: Vec<(i64, i64)> =
+            mix.tracks[0].clips.iter().map(|c| (c.mix_start_frame, c.source_frame_count)).collect();
+        assert_eq!(starts, vec![(0, 100), (200, 100), (400, 50), (950, 250)]);
+        assert_eq!(mix.tracks[0].clips[3].source_start_frame, 150);
+    }
+
+    #[test]
+    fn insert_overwrites_and_never_coalesces() {
+        let mut mix = MixDocument::empty("Mix 1", 2);
+        mix.tracks[0].name = "Rytm".into();
+        let origin = clip_on(MixLane::Strip(0), 0, 400, 0, 1000);
+        mix.tracks[0].clips.push(origin.clone());
+        let slice = origin.slice(100, 100);
+        mix.insert_clips(&[(MixLane::Strip(0), slice)]);
+        assert_eq!(mix.tracks[0].clips.len(), 3);
+        let ids: Vec<_> = mix.tracks[0].clips.iter().map(|c| c.id).collect();
+        assert_eq!(ids.len(), 3);
+        assert_eq!(ids.iter().collect::<std::collections::HashSet<_>>().len(), 3);
+        let span = mix.tracks[0]
+            .clips
+            .iter()
+            .filter(|c| c.mix_start_frame < 200 && c.mix_end_frame() > 100)
+            .count();
+        assert_eq!(span, 1);
+    }
+
+    #[test]
+    fn identity_paste_uses_from_lane_not_source_lane() {
+        let mut mix = MixDocument::empty("Mix 1", 2);
+        mix.tracks[0].name = "Rytm".into();
+        mix.tracks[2].name = "Ch 3".into();
+        let virus = MixClip::new(7, MixLane::Strip(5), "7-ch-06-Virus.wav", 0, 200, 0, 200);
+        let drums = MixClip::new(7, MixLane::Strip(0), "7-ch-01-Rytm.wav", 0, 200, 0, 200);
+        let board = MixPasteboard::from_entries(vec![
+            MixPasteEntry { clip: drums, from_lane: MixLane::Strip(0) },
+            MixPasteEntry { clip: virus, from_lane: MixLane::Strip(2) },
+        ])
+        .unwrap();
+        mix.paste_clips(&board, MixLane::Strip(4), 480);
+        assert_eq!(mix.track(MixLane::Strip(2)).unwrap().clips.len(), 1);
+        assert_eq!(mix.track(MixLane::Strip(2)).unwrap().clips[0].mix_start_frame, 480);
+        assert_eq!(mix.track(MixLane::Strip(2)).unwrap().clips[0].source_lane, MixLane::Strip(5));
+        assert!(mix.track(MixLane::Strip(5)).unwrap().clips.is_empty());
+        assert_eq!(mix.track(MixLane::Strip(0)).unwrap().clips.len(), 1);
+    }
+
+    #[test]
+    fn paste_keeps_take_file_start_and_does_not_apply_start() {
+        let mut mix = MixDocument::empty("Mix 1", 2);
+        mix.start_frame = 0;
+        let clip = MixClip::new(7, MixLane::Strip(0), "7-ch-01-Rytm.wav", 0, 1000, 0, 1000);
+        let board =
+            MixPasteboard::from_entries(vec![MixPasteEntry { clip, from_lane: MixLane::Strip(0) }])
+                .unwrap();
+        mix.paste_clips(&board, MixLane::Strip(0), 0);
+        let clip = &mix.track(MixLane::Strip(0)).unwrap().clips[0];
+        assert_eq!(clip.mix_start_frame, 0);
+        assert_eq!(clip.source_start_frame, 0);
+        assert_eq!(clip.source_frame_count, 1000);
+    }
+
+    #[test]
+    fn single_lane_paste_follows_selected_lane() {
+        let mut mix = MixDocument::empty("Mix 1", 2);
+        mix.tracks[7].name = "303".into();
+        let clip = MixClip::new(18, MixLane::Strip(7), "18-ch-08.wav", 0, 100, 40, 100);
+        let board =
+            MixPasteboard::from_entries(vec![MixPasteEntry { clip, from_lane: MixLane::Strip(7) }])
+                .unwrap();
+        mix.paste_clips(&board, MixLane::Strip(0), 0);
+        assert_eq!(mix.track(MixLane::Strip(0)).unwrap().clips.len(), 1);
+        assert!(mix.track(MixLane::Strip(7)).map(|t| t.clips.is_empty()).unwrap_or(true));
+    }
+
+    #[test]
+    fn time_range_copy_from_take_shaped_tracks() {
+        let take = TakeInfo {
+            number: 20,
+            files: vec![TakeFile {
+                lane: MixLane::Strip(7),
+                name: "303".into(),
+                filename: "20-ch-08-ADAT-4-303.wav".into(),
+                frame_count: 1000,
+                sample_rate: 48_000.0,
+            }],
+        };
+        let tracks = take.arrangement_tracks();
+        let board = copy_time_range(&tracks, &[MixLane::Strip(7)], 200, 500).unwrap();
+        assert_eq!(board.entries.len(), 1);
+        assert_eq!(board.entries[0].clip.source_start_frame, 200);
+        assert_eq!(board.entries[0].clip.source_frame_count, 300);
+        assert_eq!(board.entries[0].from_lane, MixLane::Strip(7));
+    }
+
+    #[test]
+    fn duplicate_range_inserts_time_instead_of_overwriting() {
+        let mut mix = MixDocument::empty("Mix 1", 2);
+        mix.tracks[0].name = "Kick".into();
+        mix.tracks[0].clips = vec![clip_on(MixLane::Strip(0), 0, 1000, 0, 1000)];
+        mix.duplicate_range(&[MixLane::Strip(0)], 200, 400);
+        let got: Vec<(i64, i64, i64)> = mix.tracks[0]
+            .clips
+            .iter()
+            .map(|c| (c.mix_start_frame, c.source_frame_count, c.source_start_frame))
+            .collect();
+        assert_eq!(got, vec![(0, 400, 0), (400, 200, 200), (600, 600, 400)]);
+    }
+
+    #[test]
+    fn duplicate_range_keeps_selection_padding() {
+        let mut mix = MixDocument::empty("Mix 1", 2);
+        mix.tracks[0].name = "Kick".into();
+        mix.tracks[0].clips = vec![clip_on(MixLane::Strip(0), 0, 200, 200, 1000)];
+        let placed = mix.duplicate_range(&[MixLane::Strip(0)], 0, 1000);
+        assert_eq!(placed, Some((1000, 2000, vec![MixLane::Strip(0)])));
+        let got: Vec<(i64, i64, i64)> = mix.tracks[0]
+            .clips
+            .iter()
+            .map(|c| (c.mix_start_frame, c.source_frame_count, c.source_start_frame))
+            .collect();
+        assert_eq!(got, vec![(200, 200, 0), (1200, 200, 0)]);
+    }
+
+    #[test]
+    fn remove_lanes_drops_the_channel_and_keeps_main() {
+        let mut mix = MixDocument::empty("Mix 1", 2);
+        mix.tracks[0].name = "Kick".into();
+        mix.tracks[0].clips = vec![clip_on(MixLane::Strip(0), 0, 100, 0, 1000)];
+        mix.tracks[1].name = "Pro3".into();
+        mix.tracks[1].clips = vec![clip_on(MixLane::Strip(1), 0, 100, 0, 1000)];
+        mix.remove_lanes(&[MixLane::Strip(0), MixLane::Main]);
+        let names: Vec<String> = mix
+            .channel_tracks()
+            .into_iter()
+            .filter(|t| matches!(t.lane, MixLane::Strip(_)))
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(names, vec!["Pro3".to_string()]);
+        assert!(mix.track(MixLane::Main).is_some());
+        assert!(mix.track(MixLane::Strip(0)).is_none());
+    }
+
+    #[test]
+    fn delete_time_ripples_later_clips() {
+        let mut mix = MixDocument::empty("Mix 1", 2);
+        mix.tracks[0].name = "Rytm".into();
+        mix.tracks[0].clips = vec![
+            clip_on(MixLane::Strip(0), 0, 100, 0, 1000),
+            clip_on(MixLane::Strip(0), 0, 100, 400, 1000),
+        ];
+        mix.delete_time(&[MixLane::Strip(0)], 0, 100);
+        assert_eq!(mix.tracks[0].clips.len(), 1);
+        assert_eq!(mix.tracks[0].clips[0].mix_start_frame, 300);
+    }
+
+    #[test]
+    fn trim_clamps_to_source_and_zero() {
+        let mut clip = clip_on(MixLane::Strip(0), 100, 200, 50, 400);
+        clip.trim_right(10_000);
+        assert_eq!(clip.source_frame_count, 300);
+        clip.trim_left(0);
+        assert_eq!(clip.mix_start_frame, 0);
+        assert_eq!(clip.source_start_frame, 50);
+        clip.slip(-10_000);
+        assert_eq!(clip.source_start_frame, 0);
+    }
+
+    #[test]
+    fn snap_delta_keeps_off_grid_offset() {
+        let sr = 48_000.0;
+        let tempo = 120.0;
+        let bar = MixTime::frame_from_bar(1.0, tempo, sr);
+        let origin = bar / 4;
+        let delta = MixTime::snap(bar, 1.0, tempo, sr, 0);
+        assert_eq!(origin + delta, origin + bar);
+    }
+
+    #[test]
+    fn split_at_keeps_source_offsets() {
+        let mut mix = MixDocument::empty("Mix 1", 2);
+        mix.tracks[0].name = "Rytm".into();
+        mix.tracks[0].clips = vec![clip_on(MixLane::Strip(0), 40, 400, 100, 1000)];
+        mix.split_at(300, &[MixLane::Strip(0)]);
+        assert_eq!(mix.tracks[0].clips.len(), 2);
+        assert_eq!(mix.tracks[0].clips[0].source_start_frame, 40);
+        assert_eq!(mix.tracks[0].clips[0].source_frame_count, 200);
+        assert_eq!(mix.tracks[0].clips[1].source_start_frame, 240);
+        assert_eq!(mix.tracks[0].clips[1].mix_start_frame, 300);
     }
 }

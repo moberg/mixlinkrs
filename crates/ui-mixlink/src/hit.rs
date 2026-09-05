@@ -12,7 +12,11 @@ pub enum Hit {
     Pad { kind: StripKind, which: Pad },
     Enable { kind: StripKind },
     Name { kind: StripKind },
-    Clip { track: usize, clip: usize },
+    Clip { lane: project::MixLane, id: uuid::Uuid },
+    ClipEdge { id: uuid::Uuid, left: bool },
+    ClipFade { id: uuid::Uuid, left: bool },
+    ClipLoop { id: uuid::Uuid },
+    ClipSlip { id: uuid::Uuid },
     Lane { track: usize },
     Ruler { viewport_anchored: bool },
     TimeRuler,
@@ -193,20 +197,105 @@ mod tests {
         };
         let origin = 0;
         let mx = arrangement::x_of_frame(&layout, origin, 120.0, 48_000.0);
-        match hit_arrangement(&layout, 1, origin, 120.0, 48_000.0, mx, layout.y + 8.0) {
+        match hit_arrangement(&layout, &[], false, origin, 120.0, 48_000.0, mx, layout.y + 8.0) {
             Some(Hit::StartMarker) => {}
             other => panic!("START badge, got {other:?}"),
         }
-        match hit_arrangement(&layout, 1, origin, 120.0, 48_000.0, mx + 80.0, layout.y + 8.0) {
+        match hit_arrangement(
+            &layout,
+            &[],
+            false,
+            origin,
+            120.0,
+            48_000.0,
+            mx + 80.0,
+            layout.y + 8.0,
+        ) {
             Some(Hit::Ruler { .. }) => {}
             other => panic!("empty ruler, got {other:?}"),
+        }
+        let line_y = layout.y + arrangement::RULER_H + 20.0;
+        match hit_arrangement(&layout, &[], false, origin, 120.0, 48_000.0, mx + 4.0, line_y) {
+            Some(Hit::StartMarker) => {}
+            other => panic!("START line in the lane body should drag, got {other:?}"),
+        }
+        match hit_arrangement(&layout, &[], false, origin, 120.0, 48_000.0, mx + 30.0, line_y) {
+            Some(Hit::Locate) => {}
+            other => panic!("beside START should time-select, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clip_body_and_edge_hits() {
+        let layout = ArrangementLayout {
+            x: 0.0,
+            y: 0.0,
+            w: 800.0,
+            h: 400.0,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            pixels_per_bar: 48.0,
+        };
+        let mut track = project::MixTrack::empty(project::MixLane::Strip(0), Some("Ch 1".into()));
+        let mut clip =
+            project::MixClip::new(1, project::MixLane::Strip(0), "clip.wav", 0, 96_000, 0, 96_000);
+        clip.id = uuid::Uuid::from_u128(7);
+        track.clips.push(clip);
+        let tracks = [track];
+        let left = arrangement::x_of_frame(&layout, 0, 120.0, 48_000.0);
+        let right = arrangement::x_of_frame(&layout, 96_000, 120.0, 48_000.0);
+        let y = layout.y + arrangement::RULER_H + arrangement::TRACK_H * 0.5;
+        let title_y = layout.y + arrangement::RULER_H + 8.0;
+        match hit_arrangement(&layout, &tracks, false, 0, 120.0, 48_000.0, left + 20.0, title_y) {
+            Some(Hit::Clip { id, .. }) => assert_eq!(id, uuid::Uuid::from_u128(7)),
+            other => panic!("clip title bar, got {other:?}"),
+        }
+        match hit_arrangement(&layout, &tracks, false, 0, 120.0, 48_000.0, left + 20.0, y) {
+            Some(Hit::Locate) => {}
+            other => panic!("clip waveform should time-select, got {other:?}"),
+        }
+        match hit_arrangement(&layout, &tracks, false, 0, 120.0, 48_000.0, right - 2.0, y) {
+            Some(Hit::ClipEdge { id, left: false }) => assert_eq!(id, uuid::Uuid::from_u128(7)),
+            other => panic!("right edge, got {other:?}"),
+        }
+        match hit_arrangement(&layout, &tracks, false, 0, 120.0, 48_000.0, right - 8.0, title_y)
+        {
+            Some(Hit::ClipEdge { id, left: false }) => assert_eq!(id, uuid::Uuid::from_u128(7)),
+            other => panic!("title-bar ] mark should trim, got {other:?}"),
+        }
+        match hit_arrangement(&layout, &tracks, false, 0, 120.0, 48_000.0, left + 8.0, title_y)
+        {
+            Some(Hit::ClipEdge { id, left: true }) => assert_eq!(id, uuid::Uuid::from_u128(7)),
+            other => panic!("title-bar [ mark should trim, got {other:?}"),
+        }
+        match hit_arrangement(
+            &layout,
+            &tracks,
+            false,
+            0,
+            120.0,
+            48_000.0,
+            left + 80.0,
+            layout.y + arrangement::RULER_H + arrangement::TRACK_H + 10.0,
+        ) {
+            Some(Hit::Locate) => {}
+            other => panic!("empty timeline, got {other:?}"),
+        }
+        match hit_arrangement(&layout, &tracks, false, 0, 120.0, 48_000.0, 10.0, y) {
+            Some(Hit::Lane { track: 0 }) => {}
+            other => panic!("header, got {other:?}"),
+        }
+        match hit_arrangement(&layout, &tracks, true, 0, 120.0, 48_000.0, left + 20.0, title_y) {
+            Some(Hit::Clip { id, .. }) => assert_eq!(id, uuid::Uuid::from_u128(7)),
+            other => panic!("take view clip title, got {other:?}"),
         }
     }
 }
 
 pub fn hit_arrangement(
     layout: &ArrangementLayout,
-    track_count: usize,
+    tracks: &[project::MixTrack],
+    viewing_take: bool,
     origin: i64,
     tempo: f64,
     rate: f64,
@@ -223,11 +312,19 @@ pub fn hit_arrangement(
         return Some(Hit::Ruler { viewport_anchored: false });
     }
     if x < layout.x + HEADER_W {
-        let idx = ((y - layout.y - RULER_H + layout.scroll_y) / TRACK_H) as i32;
-        if idx >= 0 && (idx as usize) < track_count {
-            return Some(Hit::Lane { track: idx as usize });
+        if let Some(idx) = arrangement::track_index_at(layout, y, tracks.len()) {
+            return Some(Hit::Lane { track: idx });
         }
         return None;
+    }
+    if let Some(hit) = arrangement::hit_clip(layout, tracks, viewing_take, tempo, rate, x, y) {
+        return Some(match hit {
+            arrangement::ClipHit::Body { lane, id } => Hit::Clip { lane, id },
+            arrangement::ClipHit::Edge { id, left } => Hit::ClipEdge { id, left },
+            arrangement::ClipHit::Fade { id, left } => Hit::ClipFade { id, left },
+            arrangement::ClipHit::Loop { id } => Hit::ClipLoop { id },
+            arrangement::ClipHit::Slip { id } => Hit::ClipSlip { id },
+        });
     }
     Some(Hit::Locate)
 }

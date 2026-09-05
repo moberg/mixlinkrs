@@ -15,8 +15,9 @@ use midi_xl::{
     describe, schedule_refresh, LedFrame, MidiSession, SessionEvent, TrackControlMode as XlMode,
 };
 use project::{
-    MixArrangement, MixAutomationTarget, MixDocument, MixGrid, MixInsert, MixLane, MixListEntry,
-    MixPasteboard, MixTime, MixTrack, ProjectStore, TakeInfo, UndoStack,
+    copy_clip_ids, copy_time_range, ArrSelection, MixArrangement, MixAutomationTarget, MixClip,
+    MixDocument, MixGrid, MixInsert, MixLane, MixListEntry, MixPasteboard, MixTime, MixTrack,
+    ProjectStore, TakeInfo, UndoStack,
 };
 use render::Rect;
 use ui_mixlink::arrangement::ArrangementLayout;
@@ -35,6 +36,8 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 mod alloc;
+mod arrange;
+mod cursors;
 mod display_sleep;
 mod mix_play;
 mod native;
@@ -88,7 +91,7 @@ struct AppState {
     pasteboard: Option<MixPasteboard>,
     undo: UndoStack<MixDocument>,
     selected_lane: Option<MixLane>,
-    selected_clips: Vec<uuid::Uuid>,
+    selection: ArrSelection,
     pixels_per_bar: f32,
     scroll_x: f32,
     scroll_y: f32,
@@ -97,13 +100,16 @@ struct AppState {
     tempo: f64,
     locate_frame: i64,
     arrangement_origin: i64,
-    bar_selection: Option<(MixLane, i64, i64)>,
+    clip_preview: Option<Vec<(MixLane, MixClip)>>,
+    clip_readout: Option<String>,
     mixer_scroll: f32,
     sidebar_scroll: f32,
     overlay: Option<Overlay>,
     channels: Option<ChannelsWindow>,
     modifiers: ModifiersState,
     text_focus: TextFocus,
+    edit_buf: String,
+    edit_replace: bool,
     caret_on: bool,
     caret_at: Instant,
     last_midi: String,
@@ -113,6 +119,8 @@ struct AppState {
     plugin_refs: HashMap<i32, vst3_host::MixLinkVST3Ref>,
     insert_refs: HashMap<uuid::Uuid, vst3_host::MixLinkVST3Ref>,
     take_number: i32,
+    trim_cursors: Option<cursors::TrimCursors>,
+    last_cursor: cursors::ArrCursor,
 }
 
 /// MixLink `Window("Channels")` — dedicated wgpu window, not a mixer overlay.
@@ -163,7 +171,7 @@ impl MidiIo {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum Drag {
     Fader {
         kind: StripKind,
@@ -176,19 +184,50 @@ enum Drag {
         start_y: f32,
         start: f32,
     },
-    Clip {
-        lane: MixLane,
-        clip: usize,
+    ClipMove {
+        ids: Vec<uuid::Uuid>,
+        anchor: uuid::Uuid,
+        start_x: f32,
+        start_y: f32,
+        origins: Vec<(uuid::Uuid, MixLane, i64)>,
+        copy: bool,
+    },
+    ClipEdge {
+        id: uuid::Uuid,
+        left: bool,
         start_x: f32,
         start_frame: i64,
+        start_source: i64,
+        start_count: i64,
+    },
+    ClipFade {
+        id: uuid::Uuid,
+        left: bool,
+        start_x: f32,
+        start_frames: i64,
+    },
+    ClipLoop {
+        id: uuid::Uuid,
+        start_x: f32,
+        start_count: i64,
+    },
+    ClipSlip {
+        id: uuid::Uuid,
+        start_x: f32,
+        start_source: i64,
     },
     Select {
-        lane: MixLane,
+        start_lane: MixLane,
         start: i64,
+        all_lanes: bool,
+        start_x: f32,
+        start_y: f32,
+        live: bool,
     },
     Start {
         origin: i64,
         start_x: f32,
+        live: bool,
     },
     Zoom {
         start_ppb: f32,
@@ -217,6 +256,11 @@ enum Drag {
         knob: usize,
         start_y: f32,
         start: f32,
+    },
+    Tempo {
+        start_y: f32,
+        start_bpm: f64,
+        live: bool,
     },
 }
 
@@ -328,7 +372,7 @@ impl ApplicationHandler for App {
             pasteboard: None,
             undo: UndoStack::new(),
             selected_lane: None,
-            selected_clips: Vec::new(),
+            selection: ArrSelection::default(),
             pixels_per_bar: 48.0,
             scroll_x: 0.0,
             scroll_y: 0.0,
@@ -337,13 +381,16 @@ impl ApplicationHandler for App {
             tempo: 120.0,
             locate_frame: 0,
             arrangement_origin: 0,
-            bar_selection: None,
+            clip_preview: None,
+            clip_readout: None,
             mixer_scroll: 0.0,
             sidebar_scroll: 0.0,
             overlay: None,
             channels: None,
             modifiers: ModifiersState::empty(),
             text_focus: TextFocus::None,
+            edit_buf: String::new(),
+            edit_replace: false,
             caret_on: true,
             caret_at: Instant::now(),
             last_midi: String::new(),
@@ -353,6 +400,8 @@ impl ApplicationHandler for App {
             plugin_refs: HashMap::new(),
             insert_refs: HashMap::new(),
             take_number: 1,
+            trim_cursors: cursors::TrimCursors::create(event_loop),
+            last_cursor: cursors::ArrCursor::Default,
         };
         boot.xl.clear_on_connect();
         publish_schedule(&boot);
@@ -408,6 +457,7 @@ impl ApplicationHandler for App {
                 let y = position.y as f32 / s;
                 state.cursor = (x, y);
                 apply_drag(state, x, y);
+                update_cursor(state);
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let scale = if is_channels {
@@ -431,8 +481,14 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseInput { state: st, button: MouseButton::Left, .. } => match st {
-                ElementState::Pressed => on_press(state, event_loop),
-                ElementState::Released => on_release(state),
+                ElementState::Pressed => {
+                    on_press(state, event_loop);
+                    update_cursor(state);
+                }
+                ElementState::Released => {
+                    on_release(state);
+                    update_cursor(state);
+                }
             },
             WindowEvent::MouseInput { state: st, button: MouseButton::Right, .. } if is_main => {
                 if st == ElementState::Pressed {
@@ -465,13 +521,23 @@ impl ApplicationHandler for App {
                     Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace)
                         if state.page == Page::Mix =>
                     {
-                        delete_clips(state);
+                        if state.modifiers.super_key() && state.modifiers.shift_key() {
+                            delete_time(state);
+                        } else {
+                            delete_clips(state);
+                        }
                     }
                     Key::Named(NamedKey::ArrowLeft) if state.page == Page::Mix => {
-                        select_lane(state, -1)
+                        nudge_locate(state, -1);
                     }
                     Key::Named(NamedKey::ArrowRight) if state.page == Page::Mix => {
-                        select_lane(state, 1)
+                        nudge_locate(state, 1);
+                    }
+                    Key::Named(NamedKey::ArrowUp) if state.page == Page::Mix => {
+                        select_lane(state, -1);
+                    }
+                    Key::Named(NamedKey::ArrowDown) if state.page == Page::Mix => {
+                        select_lane(state, 1);
                     }
                     Key::Character(c) if c.eq_ignore_ascii_case("z") => {
                         if state.modifiers.super_key() || state.modifiers.control_key() {
@@ -482,12 +548,24 @@ impl ApplicationHandler for App {
                             apply_undo(state, false);
                         }
                     }
-                    Key::Character(c) if c.eq_ignore_ascii_case("c") => {
-                        if let Some(mix) = &state.mix {
-                            state.pasteboard = mix.copy_clips(&state.selected_clips);
-                        }
+                    Key::Character(c) if c.eq_ignore_ascii_case("c") && state.page == Page::Mix => {
+                        copy_selection(state);
                     }
-                    Key::Character(c) if c.eq_ignore_ascii_case("v") => paste_clips(state),
+                    Key::Character(c) if c.eq_ignore_ascii_case("v") && state.page == Page::Mix => {
+                        paste_clips(state);
+                    }
+                    Key::Character(c) if c.eq_ignore_ascii_case("x") && state.page == Page::Mix => {
+                        cut_clips(state);
+                    }
+                    Key::Character(c) if c.eq_ignore_ascii_case("d") && state.page == Page::Mix => {
+                        duplicate_clips(state);
+                    }
+                    Key::Character(c)
+                        if c.eq_ignore_ascii_case("e")
+                            && (state.modifiers.super_key() || state.modifiers.control_key()) =>
+                    {
+                        split_clips(state);
+                    }
                     Key::Character(c) if c.eq_ignore_ascii_case("i") && state.page == Page::Mix => {
                         state.show_inserts = !state.show_inserts;
                     }
@@ -800,18 +878,11 @@ fn toggle_play(state: &mut AppState) {
         log::warn!("play: audio is not running");
         return;
     }
-    let Some(folder) = ProjectStore::current_url(&state.analog.config) else {
+    let Some(graph) = build_play_graph(state) else {
         log::warn!("play: set a projects folder first");
         return;
     };
-    let tracks = mixer_tracks(state);
-    let end = tracks
-        .iter()
-        .filter(|t| t.lane != MixLane::Main)
-        .flat_map(|t| t.clips.iter())
-        .map(project::MixClip::mix_end_frame)
-        .max()
-        .unwrap_or(0);
+    let end = graph.end_frame;
     if end <= 0 {
         log::warn!("play: nothing to play");
         return;
@@ -824,18 +895,7 @@ fn toggle_play(state: &mut AppState) {
         .engine_handles
         .cmd_tx
         .try_push(UiCommand::TransportSeek { sample: state.locate_frame });
-    let graph = mix_play::MixPlayGraph {
-        folder,
-        tracks: tracks
-            .into_iter()
-            .take(MIX_PLAY_MAX_LANES)
-            .map(|t| mix_play::MixPlayTrack {
-                clips: if t.lane == MixLane::Main { Vec::new() } else { t.clips },
-                is_main: t.lane == MixLane::Main,
-            })
-            .collect(),
-        end_frame: end,
-    };
+    state.engine_handles.sample_position.store(state.locate_frame, Ordering::Relaxed);
     let io_block = state._stream.as_ref().map(|s| s.buffer_frames() as usize).unwrap_or(128);
     state.playing = true;
     publish_schedule(state);
@@ -846,6 +906,13 @@ fn toggle_play(state: &mut AppState) {
         state.locate_frame,
         io_block,
     ));
+}
+
+fn audition_from_origin(state: &mut AppState) {
+    locate_to(state, state.arrangement_origin.max(0));
+    if !state.playing {
+        toggle_play(state);
+    }
 }
 
 /// MixLinkRs: Tab swaps `Page::Record` ↔ `Page::Mix` (header RECORD/MIX). MixLink has no Tab binding.
@@ -859,18 +926,180 @@ fn cycle_page(state: &mut AppState, _reverse: bool) {
     };
 }
 
+fn is_editing_mix(state: &AppState) -> bool {
+    state.viewing_take.is_none() && state.mix.is_some()
+}
+
+fn sample_rate(state: &AppState) -> f64 {
+    state._stream.as_ref().map(|s| s.sample_rate() as f64).unwrap_or(48_000.0)
+}
+
+fn mutate_mix(state: &mut AppState, title: &str, coalesce: bool, f: impl FnOnce(&mut MixDocument)) {
+    if !is_editing_mix(state) {
+        return;
+    }
+    let Some(mut mix) = state.mix.take() else {
+        return;
+    };
+    state.undo.mutate(title, coalesce, &mut mix, f);
+    state.mix = Some(mix);
+    persist_mix(state);
+    publish_play_graph(state);
+    publish_schedule(state);
+}
+
 fn delete_clips(state: &mut AppState) {
-    let ids = state.selected_clips.clone();
-    if let Some(mut mix) = state.mix.take() {
-        state.undo.mutate("Delete", false, &mut mix, |doc| {
-            for track in &mut doc.tracks {
-                track.clips.retain(|c| !ids.contains(&c.id));
+    if !is_editing_mix(state) {
+        return;
+    }
+    if state.selection.has_range() && state.selection.clips.is_empty() {
+        let (start, end) = state.selection.range();
+        let lanes = state.selection.lanes.clone();
+        mutate_mix(state, "Delete", false, |doc| {
+            for lane in &lanes {
+                doc.clear_range(*lane, start, end);
             }
         });
-        state.mix = Some(mix);
-        persist_mix(state);
+        return;
     }
-    state.selected_clips.clear();
+    let ids = state.selection.clips.clone();
+    if !ids.is_empty() {
+        mutate_mix(state, "Delete", false, |doc| doc.remove_clips(&ids));
+        state.selection.clips.clear();
+        return;
+    }
+    delete_selected_tracks(state);
+}
+
+fn delete_selected_tracks(state: &mut AppState) {
+    let mut lanes: Vec<MixLane> =
+        state.selection.lanes.iter().copied().filter(|l| *l != MixLane::Main).collect();
+    if lanes.is_empty() {
+        if let Some(lane) = state.selected_lane.filter(|l| *l != MixLane::Main) {
+            lanes.push(lane);
+        }
+    }
+    let mut unique = Vec::new();
+    for lane in lanes {
+        if !unique.contains(&lane) {
+            unique.push(lane);
+        }
+    }
+    let lanes = unique;
+    if lanes.is_empty() {
+        return;
+    }
+    mutate_mix(state, "Delete track", false, |doc| doc.remove_lanes(&lanes));
+    state.selection.clear();
+    let remaining = arrangement_tracks(state);
+    state.selected_lane = remaining
+        .iter()
+        .map(|t| t.lane)
+        .find(|l| *l != MixLane::Main)
+        .or(Some(MixLane::Main));
+}
+
+fn delete_time(state: &mut AppState) {
+    if !is_editing_mix(state) || !state.selection.has_range() {
+        return;
+    }
+    let (start, end) = state.selection.range();
+    let lanes = state.selection.lanes.clone();
+    mutate_mix(state, "Delete time", false, |doc| doc.delete_time(&lanes, start, end));
+}
+
+fn copy_selection(state: &mut AppState) {
+    let tracks = arrangement_tracks(state);
+    let mut lanes = state.selection.lanes.clone();
+    if lanes.is_empty() {
+        if let Some(lane) = state.selected_lane.filter(|l| *l != MixLane::Main) {
+            lanes.push(lane);
+        }
+    }
+    let board = if state.selection.has_range() {
+        copy_time_range(&tracks, &lanes, state.selection.start, state.selection.end)
+            .or_else(|| copy_clip_ids(&tracks, &state.selection.clips))
+    } else {
+        copy_clip_ids(&tracks, &state.selection.clips)
+    };
+    if board.is_some() {
+        state.pasteboard = board;
+    }
+}
+
+fn cut_clips(state: &mut AppState) {
+    if !is_editing_mix(state) {
+        return;
+    }
+    copy_selection(state);
+    delete_clips(state);
+}
+
+fn duplicate_clips(state: &mut AppState) {
+    if !is_editing_mix(state) {
+        return;
+    }
+    if !state.selection.has_range() {
+        copy_selection(state);
+        let Some(board) = state.pasteboard.clone() else {
+            return;
+        };
+        let at = board
+            .entries
+            .iter()
+            .map(|e| e.clip.mix_end_frame())
+            .max()
+            .unwrap_or(state.locate_frame);
+        mutate_mix(state, "Duplicate", false, |doc| {
+            let mut placements = Vec::new();
+            for entry in &board.entries {
+                let mut clip = entry.clip.clone();
+                clip.mix_start_frame = at + (entry.clip.mix_start_frame - board.origin);
+                placements.push((entry.from_lane, clip));
+            }
+            doc.insert_clips(&placements);
+        });
+        return;
+    }
+    let (start, end) = state.selection.range();
+    let mut lanes = state.selection.lanes.clone();
+    if lanes.is_empty() {
+        if let Some(lane) = state.selected_lane.filter(|l| *l != MixLane::Main) {
+            lanes.push(lane);
+        }
+    }
+    if lanes.is_empty() {
+        return;
+    }
+    let mut placed = None;
+    mutate_mix(state, "Duplicate", false, |doc| {
+        placed = doc.duplicate_range(&lanes, start, end);
+    });
+    if let Some((a, b, dest_lanes)) = placed {
+        state.selection.start = a;
+        state.selection.end = b;
+        state.selection.lanes = dest_lanes;
+        state.selection.clips.clear();
+    }
+}
+
+fn split_clips(state: &mut AppState) {
+    if !is_editing_mix(state) {
+        return;
+    }
+    let lanes = if state.selection.lanes.is_empty() {
+        state.selected_lane.into_iter().collect()
+    } else {
+        state.selection.lanes.clone()
+    };
+    let frame = state.locate_frame;
+    mutate_mix(state, "Split", false, |doc| doc.split_at(frame, &lanes));
+}
+
+fn nudge_locate(state: &mut AppState, dir: i32) {
+    let sr = sample_rate(state);
+    let step = MixTime::frame_from_bar(state.grid.raw(), state.tempo, sr).max(1);
+    locate_to(state, (state.locate_frame + dir as i64 * step).max(0));
 }
 
 fn select_lane(state: &mut AppState, delta: i32) {
@@ -928,11 +1157,12 @@ fn hit_body(state: &AppState, x: f32, y: f32) -> Option<Hit> {
                     y,
                 );
             }
-            let n = arrangement_track_count(state);
-            let sr = state._stream.as_ref().map(|s| s.sample_rate() as f64).unwrap_or(48_000.0);
+            let tracks = arrangement_tracks(state);
+            let sr = sample_rate(state);
             hit::hit_arrangement(
                 &arr_layout(state),
-                n,
+                &tracks,
+                state.viewing_take.is_some(),
                 state.arrangement_origin,
                 state.tempo,
                 sr,
@@ -953,6 +1183,12 @@ fn on_press(state: &mut AppState, event_loop: &ActiveEventLoop) {
         }
     }
 
+    if state.text_focus == TextFocus::Tempo
+        && !matches!(chrome::hit_chrome(state.page, w, h, x, y), Some(ChromeHit::Tempo))
+    {
+        commit_focus(state);
+    }
+
     if let Some(hit) = chrome::hit_chrome(state.page, w, h, x, y) {
         match hit {
             ChromeHit::Play => toggle_play(state),
@@ -968,12 +1204,25 @@ fn on_press(state: &mut AppState, event_loop: &ActiveEventLoop) {
                 state.analog.surface.toggle_solo_mode();
                 sync_xl_leds(state, true);
             }
-            ChromeHit::Grid => state.grid_enabled = !state.grid_enabled,
+            ChromeHit::Grid => {
+                state.grid_enabled = !state.grid_enabled;
+                persist_project_meta(state);
+            }
+            ChromeHit::GridStep => open_grid_menu(state),
             ChromeHit::Auto => state.automation_armed = !state.automation_armed,
             ChromeHit::Knobs => state.show_knobs = !state.show_knobs,
             ChromeHit::Inserts => state.show_inserts = !state.show_inserts,
             ChromeHit::Export => export_mix(state),
-            ChromeHit::Tempo => state.text_focus = TextFocus::Tempo,
+            ChromeHit::Tempo => {
+                if state.text_focus == TextFocus::Tempo {
+                    commit_focus(state);
+                }
+                state.drag = Some(Drag::Tempo {
+                    start_y: y,
+                    start_bpm: state.tempo,
+                    live: false,
+                });
+            }
             ChromeHit::Page(p) => {
                 if state.page == Page::Mix {
                     persist_mix(state);
@@ -1107,44 +1356,35 @@ fn on_press(state: &mut AppState, event_loop: &ActiveEventLoop) {
                 });
             }
             Hit::Locate => {
-                let sr = state._stream.as_ref().map(|s| s.sample_rate() as f64).unwrap_or(48_000.0);
-                let frame = hit::frame_at_x(&arr_layout(state), x, state.tempo, sr);
-                let snapped = if state.grid_enabled {
-                    MixTime::snap(
-                        frame,
-                        state.grid.raw(),
+                if state.modifiers.control_key() && !state.modifiers.super_key() {
+                    let tracks = arrangement_tracks(state);
+                    if let Some((_, id)) = ui_mixlink::arrangement::clip_at(
+                        &arr_layout(state),
+                        &tracks,
+                        state.viewing_take.is_some(),
                         state.tempo,
-                        sr,
-                        state.arrangement_origin,
-                    )
-                } else {
-                    frame
-                };
-                locate_to(state, snapped.max(0));
-                state.bar_selection = None;
-            }
-            Hit::Lane { track } => {
-                if let Some(t) = arrangement_tracks(state).get(track) {
-                    state.selected_lane = Some(t.lane);
-                }
-            }
-            Hit::StartMarker => {
-                state.drag = Some(Drag::Start { origin: state.arrangement_origin, start_x: x });
-            }
-            Hit::Clip { track, clip } => {
-                if let Some(t) = arrangement_tracks(state).get(track) {
-                    if let Some(c) = t.clips.get(clip) {
-                        state.selected_clips = vec![c.id];
-                        state.selected_lane = Some(t.lane);
-                        state.drag = Some(Drag::Clip {
-                            lane: t.lane,
-                            clip,
-                            start_x: x,
-                            start_frame: c.mix_start_frame,
-                        });
+                        sample_rate(state),
+                        x,
+                        y,
+                    ) {
+                        begin_clip_slip(state, id, x);
+                    } else {
+                        begin_time_select(state, x, y, false);
                     }
+                } else {
+                    begin_time_select(state, x, y, false);
                 }
             }
+            Hit::Lane { track } => select_arrange_lane(state, track),
+            Hit::StartMarker => {
+                state.drag =
+                    Some(Drag::Start { origin: state.arrangement_origin, start_x: x, live: false });
+            }
+            Hit::Clip { lane, id } => begin_clip_move(state, lane, id, x, y),
+            Hit::ClipEdge { id, left } => begin_clip_edge(state, id, left, x),
+            Hit::ClipFade { id, left } => begin_clip_fade(state, id, left, x),
+            Hit::ClipLoop { id } => begin_clip_loop(state, id, x),
+            Hit::ClipSlip { id } => begin_clip_slip(state, id, x),
             Hit::MixFader { track, rail_top, rail_bot } => {
                 if double {
                     set_mix_fader(state, track, osc::FADER_LIN_0DB);
@@ -1196,6 +1436,68 @@ fn on_press(state: &mut AppState, event_loop: &ActiveEventLoop) {
     sync_rt(state);
 }
 
+fn clip_edit_drag(state: &AppState) -> bool {
+    matches!(
+        state.drag,
+        Some(
+            Drag::ClipMove { .. }
+                | Drag::ClipEdge { .. }
+                | Drag::ClipFade { .. }
+                | Drag::ClipLoop { .. }
+                | Drag::ClipSlip { .. }
+        )
+    )
+}
+
+fn hidden_clip_ids(state: &AppState) -> Vec<uuid::Uuid> {
+    if state.clip_preview.is_none() {
+        return Vec::new();
+    }
+    match &state.drag {
+        Some(Drag::ClipMove { copy: true, .. }) => Vec::new(),
+        Some(Drag::ClipMove { ids, .. }) => ids.clone(),
+        Some(
+            Drag::ClipEdge { id, .. }
+            | Drag::ClipFade { id, .. }
+            | Drag::ClipLoop { id, .. }
+            | Drag::ClipSlip { id, .. },
+        ) => vec![*id],
+        _ => Vec::new(),
+    }
+}
+
+fn arrangement_cursor(state: &AppState) -> cursors::ArrCursor {
+    if let Some(Drag::ClipEdge { left, .. }) = &state.drag {
+        return if *left {
+            cursors::ArrCursor::TrimLeft
+        } else {
+            cursors::ArrCursor::TrimRight
+        };
+    }
+    if state.overlay.is_some() || state.drag.is_some() || !is_editing_mix(state) {
+        return cursors::ArrCursor::Default;
+    }
+    let (x, y) = state.cursor;
+    match hit_body(state, x, y) {
+        Some(Hit::ClipEdge { left: true, .. }) => cursors::ArrCursor::TrimLeft,
+        Some(Hit::ClipEdge { left: false, .. }) => cursors::ArrCursor::TrimRight,
+        _ => cursors::ArrCursor::Default,
+    }
+}
+
+fn update_cursor(state: &mut AppState) {
+    let next = arrangement_cursor(state);
+    if next == state.last_cursor {
+        return;
+    }
+    state.last_cursor = next;
+    if let Some(cursors) = &state.trim_cursors {
+        cursors.apply(&state.window, next);
+    } else {
+        cursors::apply_fallback(&state.window, next);
+    }
+}
+
 fn arr_layout(state: &AppState) -> ArrangementLayout {
     let (bx, by, bw, bh) = body_rect(state);
     let mix_h = ui_mixlink::mix_mixer::height(state.show_knobs, state.show_mixer);
@@ -1213,28 +1515,41 @@ fn arr_layout(state: &AppState) -> ArrangementLayout {
 fn on_release(state: &mut AppState) {
     if let Some(Drag::Zoom { start_x, start_y, live, .. }) = state.drag {
         if !live {
-            let sr = state._stream.as_ref().map(|s| s.sample_rate() as f64).unwrap_or(48_000.0);
-            let frame = hit::frame_at_x(&arr_layout(state), start_x, state.tempo, sr);
-            locate_to(state, frame.max(0));
+            let frame =
+                hit::frame_at_x(&arr_layout(state), start_x, state.tempo, sample_rate(state));
+            locate_to(state, snap_playhead_frame(state, frame));
+            state.selection.clear();
         }
         let _ = start_y;
     }
-    if matches!(state.drag, Some(Drag::Start { .. })) {
-        persist_start(state);
+    if let Some(Drag::Start { live, .. }) = state.drag {
+        if live {
+            persist_start(state);
+        } else {
+            audition_from_origin(state);
+        }
     }
     if matches!(
         state.drag,
-        Some(
-            Drag::MixFader { .. } | Drag::MixPan { .. } | Drag::MixKnob { .. } | Drag::Clip { .. }
-        )
+        Some(Drag::MixFader { .. } | Drag::MixPan { .. } | Drag::MixKnob { .. })
     ) {
         persist_mix(state);
     }
+    if let Some(Drag::Tempo { live, .. }) = state.drag {
+        if live {
+            persist_project_meta(state);
+        } else {
+            begin_tempo_edit(state);
+        }
+    }
+    commit_arrangement_drag(state);
     state.drag = None;
+    state.clip_preview = None;
+    state.clip_readout = None;
 }
 
 fn apply_drag(state: &mut AppState, x: f32, y: f32) {
-    match state.drag {
+    match state.drag.clone() {
         Some(Drag::Fader { kind, rail_top, rail_bot }) => {
             let h = (rail_bot - rail_top).max(1.0);
             let t = ((rail_bot - y) / h).clamp(0.0, 1.0);
@@ -1250,17 +1565,34 @@ fn apply_drag(state: &mut AppState, x: f32, y: f32) {
                 set_pan(state, kind, next);
             }
         }
-        Some(Drag::Zoom { start_ppb, start_scroll, anchor_bar, start_x, start_y, .. }) => {
+        Some(Drag::Zoom { start_ppb, start_scroll, anchor_bar, start_x, start_y, live }) => {
             let dx = x - start_x;
             let dy = y - start_y;
             if dx.hypot(dy) < 3.0 {
                 return;
             }
+            if !live && dx.abs() > dy.abs() * 1.4 {
+                let start = snap_playhead_frame(
+                    state,
+                    hit::frame_at_x(&arr_layout(state), start_x, state.tempo, sample_rate(state)),
+                );
+                state.drag = Some(Drag::Select {
+                    start_lane: state.selected_lane.unwrap_or(MixLane::Strip(0)),
+                    start,
+                    all_lanes: true,
+                    start_x,
+                    start_y,
+                    live: true,
+                });
+                apply_drag(state, x, y);
+                return;
+            }
             let factor = 1.012f32.powf(dy);
             let next = (start_ppb * factor).clamp(10.0, 16_000.0);
             state.pixels_per_bar = next;
-            state.scroll_x =
-                (start_scroll + (anchor_bar as f32) * (next - start_ppb) - dx).max(0.0);
+            state.scroll_x = (f64::from(start_scroll) + anchor_bar * f64::from(next - start_ppb)
+                - f64::from(dx))
+            .max(0.0) as f32;
             state.drag = Some(Drag::Zoom {
                 start_ppb,
                 start_scroll,
@@ -1270,42 +1602,73 @@ fn apply_drag(state: &mut AppState, x: f32, y: f32) {
                 live: true,
             });
         }
-        Some(Drag::Clip { lane, clip, start_x, start_frame }) => {
-            let sr = state._stream.as_ref().map(|s| s.sample_rate() as f64).unwrap_or(48_000.0);
-            let delta_bars = ((x - start_x) / state.pixels_per_bar.max(1.0)) as f64;
-            let next = start_frame + MixTime::frame_from_bar(delta_bars, state.tempo, sr);
-            let snapped = if state.grid_enabled {
-                MixTime::snap(next, state.grid.raw(), state.tempo, sr, state.arrangement_origin)
-            } else {
-                next
-            };
-            if let Some(mut mix) = state.mix.take() {
-                state.undo.mutate("Move clip", true, &mut mix, |doc| {
-                    if let Some(c) = doc.track_mut(lane).and_then(|t| t.clips.get_mut(clip)) {
-                        c.mix_start_frame = snapped.max(0);
-                    }
-                });
-                state.mix = Some(mix);
-            }
+        Some(Drag::ClipMove { .. })
+        | Some(Drag::ClipEdge { .. })
+        | Some(Drag::ClipFade { .. })
+        | Some(Drag::ClipLoop { .. })
+        | Some(Drag::ClipSlip { .. }) => {
+            preview_arrangement_drag(state, x, y);
         }
-        Some(Drag::Start { origin, start_x }) => {
-            let sr = state._stream.as_ref().map(|s| s.sample_rate() as f64).unwrap_or(48_000.0);
+        Some(Drag::Start { origin, start_x, live }) => {
+            if !live && (x - start_x).abs() < 3.0 {
+                return;
+            }
+            let sr = sample_rate(state);
             let delta = MixTime::frame_from_bar(
                 ((x - start_x) / state.pixels_per_bar.max(1.0)) as f64,
                 state.tempo,
                 sr,
             );
             let next = (origin + delta).max(0);
-            state.arrangement_origin = if state.grid_enabled {
-                MixTime::snap(next, state.grid.raw(), state.tempo, sr, 0).max(0)
+            // Snap relative to the drag-start origin — START *is* the grid zero.
+            let bypass = state.modifiers.super_key();
+            let snapped = if state.grid_enabled && !bypass {
+                MixTime::snap(next, state.grid.raw(), state.tempo, sr, origin).max(0)
             } else {
                 next
             };
+            set_arrangement_start(state, snapped);
+            state.clip_readout = Some(format!(
+                "START  {}",
+                MixTime::format_position(state.arrangement_origin, state.tempo, sr)
+            ));
+            state.drag = Some(Drag::Start { origin, start_x, live: true });
         }
-        Some(Drag::Select { lane, start }) => {
-            let sr = state._stream.as_ref().map(|s| s.sample_rate() as f64).unwrap_or(48_000.0);
-            let end = hit::frame_at_x(&arr_layout(state), x, state.tempo, sr);
-            state.bar_selection = Some((lane, start, end));
+        Some(Drag::Select { start_lane, start, all_lanes, start_x, start_y, live }) => {
+            if !live {
+                if (x - start_x).hypot(y - start_y) < 3.0 {
+                    return;
+                }
+                state.drag = Some(Drag::Select {
+                    start_lane,
+                    start,
+                    all_lanes,
+                    start_x,
+                    start_y,
+                    live: true,
+                });
+            }
+            let sr = sample_rate(state);
+            let mut end = hit::frame_at_x(&arr_layout(state), x, state.tempo, sr);
+            if state.grid_enabled && !state.modifiers.super_key() {
+                end =
+                    MixTime::snap(end, state.grid.raw(), state.tempo, sr, state.arrangement_origin);
+            }
+            let tracks = arrangement_tracks(state);
+            let lanes = if all_lanes {
+                arrange::all_lanes(&tracks)
+            } else if let Some(idx) =
+                ui_mixlink::arrangement::track_index_clamped(&arr_layout(state), y, tracks.len())
+            {
+                arrange::lanes_between(&tracks, start_lane, tracks[idx].lane)
+            } else {
+                vec![start_lane]
+            };
+            if let Some(lane) = lanes.last() {
+                state.selected_lane = Some(*lane);
+            }
+            state.selection = ArrSelection { lanes, start, end, clips: Vec::new() };
+            edge_auto_scroll(state, x, y);
         }
         Some(Drag::MixFader { track, rail_top, rail_bot }) => {
             let h = (rail_bot - rail_top).max(1.0);
@@ -1329,6 +1692,19 @@ fn apply_drag(state: &mut AppState, x: f32, y: f32) {
                 knob,
                 (start - (y - start_y) / Layout::KNOB_DRAG_PX).clamp(0.0, 1.0),
             );
+        }
+        Some(Drag::Tempo { start_y, start_bpm, live }) => {
+            if !live && (y - start_y).abs() < 3.0 {
+                return;
+            }
+            let next = arrange::tempo_from_drag(
+                start_bpm,
+                start_y,
+                y,
+                state.modifiers.alt_key(),
+            );
+            set_tempo(state, next);
+            state.drag = Some(Drag::Tempo { start_y, start_bpm, live: true });
         }
         None => {}
     }
@@ -1413,6 +1789,16 @@ fn sidebar_scroll_max(state: &AppState, h: f32) -> f32 {
 fn on_wheel(state: &mut AppState, dx: f32, dy: f32) {
     let (x, y) = state.cursor;
     let (w, h) = state.renderer.logical_size();
+    if matches!(chrome::hit_chrome(state.page, w, h, x, y), Some(ChromeHit::Tempo)) {
+        if state.text_focus == TextFocus::Tempo {
+            commit_focus(state);
+        }
+        let step = if state.modifiers.alt_key() { 0.1 } else { 1.0 };
+        let next = if dy > 0.0 { state.tempo + step } else { state.tempo - step };
+        set_tempo(state, arrange::tempo_from_drag(next, 0.0, 0.0, state.modifiers.alt_key()));
+        persist_project_meta(state);
+        return;
+    }
     if sidebar_open(state) && x >= w - Layout::SIDEBAR_WIDTH {
         let max = sidebar_scroll_max(state, h);
         state.sidebar_scroll = (state.sidebar_scroll - dy).clamp(0.0, max);
@@ -1531,8 +1917,22 @@ fn set_mix_knob(state: &mut AppState, track: usize, knob: usize, v: f32) {
     }
 }
 
+fn snap_playhead_frame(state: &AppState, frame: i64) -> i64 {
+    arrange::snap_locate(
+        frame,
+        state.grid_enabled,
+        state.modifiers.super_key(),
+        state.grid.raw(),
+        state.tempo,
+        sample_rate(state),
+        state.arrangement_origin,
+    )
+}
+
 fn locate_to(state: &mut AppState, frame: i64) {
     state.locate_frame = frame.max(0);
+    // Paint reads this atomically; don't wait for the audio thread to apply the seek.
+    state.engine_handles.sample_position.store(state.locate_frame, Ordering::Relaxed);
     let _ = state
         .engine_handles
         .cmd_tx
@@ -1653,7 +2053,11 @@ fn paint(state: &mut AppState) {
     };
     let chrome = ChromeState {
         page: state.page,
-        tempo: state.tempo,
+        tempo_text: if state.text_focus == TextFocus::Tempo {
+            state.edit_buf.clone()
+        } else {
+            arrange::format_tempo(state.tempo)
+        },
         playing: state.playing,
         recording: state.recording,
         position: MixTime::format_position(playhead - state.arrangement_origin, state.tempo, sr),
@@ -1730,13 +2134,14 @@ fn paint(state: &mut AppState) {
                 .collect();
             let tracks = arrangement_tracks(state);
             let arr = arr_layout(state);
+            let hidden = hidden_clip_ids(state);
             scene.extend(ui_mixlink::arrangement::paint(
                 &ui_mixlink::arrangement::ArrangementView {
                     layout: arr,
                     mix: state.mix.as_ref(),
                     tracks: &tracks,
                     selected_lane: state.selected_lane,
-                    selected_clips: &state.selected_clips,
+                    selection: &state.selection,
                     playhead,
                     origin: state.arrangement_origin,
                     tempo: state.tempo,
@@ -1744,8 +2149,14 @@ fn paint(state: &mut AppState) {
                     grid: state.grid,
                     grid_enabled: state.grid_enabled,
                     viewing_take: state.viewing_take.is_some(),
-                    bar_selection: state.bar_selection,
+                    home_take: state
+                        .viewing_take
+                        .or_else(|| state.mix.as_ref().and_then(|m| m.home_take())),
+                    drag_preview: state.clip_preview.as_deref(),
+                    readout: state.clip_readout.as_deref(),
                     waveforms: Some(&state.waveforms),
+                    show_selection: !clip_edit_drag(state),
+                    hide_clip_ids: &hidden,
                 },
             ));
             scene.extend(ui_mixlink::mix_mixer::paint(&ui_mixlink::mix_mixer::MixMixerView {
@@ -2271,6 +2682,19 @@ fn open_device_menu(state: &mut AppState, anchor: Rect) {
     place_menu(state, anchor, items, MenuAction::AudioDevice);
 }
 
+fn open_grid_menu(state: &mut AppState) {
+    let items: Vec<MenuItem> = MixGrid::ALL
+        .iter()
+        .map(|grid| MenuItem {
+            id: format!("{}", grid.raw()),
+            label: grid.help(),
+            checked: state.grid == *grid,
+            section: None,
+        })
+        .collect();
+    place_menu(state, chrome::grid_step_rect(), items, MenuAction::Grid);
+}
+
 fn open_buffer_menu(state: &mut AppState, anchor: Rect) {
     let current = state.analog.config.audio_buffer_frames.unwrap_or(64);
     let items: Vec<MenuItem> = [32, 64, 128, 256, 512]
@@ -2356,6 +2780,21 @@ fn apply_menu(state: &mut AppState, action: MenuAction, item: &MenuItem) {
             "copy" => copy_take_to_clipboard(state, number),
             _ => {}
         },
+        MenuAction::Arrange => match item.id.as_str() {
+            "copy" => copy_selection(state),
+            "paste" => paste_clips(state),
+            "duplicate" => duplicate_clips(state),
+            "delete" => delete_clips(state),
+            "split" => split_clips(state),
+            _ => {}
+        },
+        MenuAction::Grid => {
+            if let Ok(raw) = item.id.parse::<f64>() {
+                state.grid = MixGrid::from_raw(raw);
+                state.grid_enabled = true;
+                persist_project_meta(state);
+            }
+        }
     }
 }
 
@@ -2364,6 +2803,7 @@ fn on_key(state: &mut AppState, key: &Key) -> bool {
         if state.overlay.is_some() || state.text_focus != TextFocus::None {
             state.overlay = None;
             state.text_focus = TextFocus::None;
+            state.edit_replace = false;
             return true;
         }
         return false;
@@ -2377,12 +2817,26 @@ fn on_key(state: &mut AppState, key: &Key) -> bool {
             true
         }
         Key::Named(NamedKey::Backspace) => {
-            edit_focus(state, |s| {
-                s.pop();
-            });
+            if state.text_focus == TextFocus::Tempo && state.edit_replace {
+                state.edit_buf.clear();
+                state.edit_replace = false;
+            } else {
+                edit_focus(state, |s| {
+                    s.pop();
+                });
+            }
             true
         }
         Key::Character(c) => {
+            if state.text_focus == TextFocus::Tempo {
+                if !c.chars().all(|ch| ch.is_ascii_digit() || ch == '.') {
+                    return true;
+                }
+                if state.edit_replace {
+                    state.edit_buf.clear();
+                    state.edit_replace = false;
+                }
+            }
             if c.chars().all(|ch| !ch.is_control()) {
                 let add = c.to_string();
                 edit_focus(state, |s| s.push_str(&add));
@@ -2396,11 +2850,7 @@ fn on_key(state: &mut AppState, key: &Key) -> bool {
 fn edit_focus(state: &mut AppState, f: impl FnOnce(&mut String)) {
     match state.text_focus {
         TextFocus::Tempo => {
-            let mut s = format!("{:.1}", state.tempo);
-            f(&mut s);
-            if let Ok(v) = s.parse::<f64>() {
-                state.tempo = v.clamp(20.0, 400.0);
-            }
+            f(&mut state.edit_buf);
         }
         TextFocus::ProjectName => {
             let (_, mut suffix) = project_parts(
@@ -2465,10 +2915,38 @@ fn edit_focus(state: &mut AppState, f: impl FnOnce(&mut String)) {
 }
 
 fn commit_focus(state: &mut AppState) {
-    if state.text_focus == TextFocus::ProjectName {
-        reload_mix(state);
+    match state.text_focus {
+        TextFocus::Tempo => {
+            if let Ok(v) = state.edit_buf.parse::<f64>() {
+                set_tempo(state, arrange::clamp_tempo(v));
+                persist_project_meta(state);
+            }
+        }
+        TextFocus::ProjectName => reload_mix(state),
+        _ => {}
     }
     state.text_focus = TextFocus::None;
+    state.edit_replace = false;
+}
+
+fn begin_tempo_edit(state: &mut AppState) {
+    state.text_focus = TextFocus::Tempo;
+    state.edit_buf = arrange::format_tempo(state.tempo);
+    state.edit_replace = true;
+    state.caret_on = true;
+    state.caret_at = Instant::now();
+}
+
+fn set_tempo(state: &mut AppState, bpm: f64) {
+    let bpm = arrange::clamp_tempo(bpm);
+    state.tempo = bpm;
+    let _ = state.engine_handles.cmd_tx.try_push(UiCommand::SetTempo { bpm });
+    for inst in state.insert_refs.values() {
+        vst3_host::set_tempo(*inst, bpm);
+    }
+    for inst in state.plugin_refs.values() {
+        vst3_host::set_tempo(*inst, bpm);
+    }
 }
 
 fn apply_settings(state: &mut AppState) {
@@ -2530,6 +3008,7 @@ fn load_plugin_slot(state: &mut AppState, id: i32) {
     if inst.is_null() {
         state.plugin_refs.remove(&id);
     } else {
+        vst3_host::set_tempo(inst, state.tempo);
         state.plugin_refs.insert(id, inst);
     }
 }
@@ -2555,6 +3034,7 @@ fn load_insert(state: &mut AppState, id: uuid::Uuid) {
     }
     let inst = vst3_host::load(&path, insert.class_uid.as_deref(), sr, block);
     if !inst.is_null() {
+        vst3_host::set_tempo(inst, state.tempo);
         state.insert_refs.insert(id, inst);
     }
 }
@@ -2640,7 +3120,69 @@ fn on_context_press(state: &mut AppState) {
     }
     if let Some(hit) = ui_mixlink::mix_browser::hit(&mix_browser_view(state), x, y) {
         on_browser_context(state, hit);
+        return;
     }
+    match hit_body(state, x, y) {
+        Some(Hit::Lane { track }) => {
+            select_arrange_lane(state, track);
+            open_arrange_menu(state, x, y);
+        }
+        Some(Hit::Clip { id, .. })
+        | Some(Hit::ClipEdge { id, .. })
+        | Some(Hit::ClipFade { id, .. })
+        | Some(Hit::ClipLoop { id })
+        | Some(Hit::ClipSlip { id }) => {
+            if let Some(lane) = arrange::find_clip(&arrangement_tracks(state), id).map(|(l, _)| l) {
+                select_arrange_clip(state, lane, id);
+            }
+            open_arrange_menu(state, x, y);
+        }
+        Some(Hit::Locate) => open_arrange_menu(state, x, y),
+        _ => {}
+    }
+}
+
+fn select_arrange_lane(state: &mut AppState, track: usize) {
+    let Some(lane) = arrangement_tracks(state).get(track).map(|t| t.lane) else {
+        return;
+    };
+    state.selected_lane = Some(lane);
+    state.selection.clear();
+    state.selection.lanes = vec![lane];
+}
+
+fn select_arrange_clip(state: &mut AppState, lane: MixLane, id: uuid::Uuid) {
+    if state.selection.clips.contains(&id) {
+        state.selected_lane = Some(lane);
+        return;
+    }
+    let tracks = arrangement_tracks(state);
+    let Some((_, clip)) = arrange::find_clip(&tracks, id) else {
+        return;
+    };
+    state.selection = arrange::selection_for_clip(lane, clip, false, &ArrSelection::default());
+    state.selected_lane = Some(lane);
+}
+
+fn open_arrange_menu(state: &mut AppState, x: f32, y: f32) {
+    let items = vec![
+        MenuItem { id: "copy".into(), label: "Copy".into(), checked: false, section: None },
+        MenuItem { id: "paste".into(), label: "Paste".into(), checked: false, section: None },
+        MenuItem {
+            id: "duplicate".into(),
+            label: "Duplicate".into(),
+            checked: false,
+            section: None,
+        },
+        MenuItem { id: "split".into(), label: "Split".into(), checked: false, section: None },
+        MenuItem {
+            id: "delete".into(),
+            label: "Delete".into(),
+            checked: false,
+            section: Some(" ".into()),
+        },
+    ];
+    place_menu(state, Rect { x, y, w: 1.0, h: 1.0 }, items, MenuAction::Arrange);
 }
 
 fn on_browser_context(state: &mut AppState, hit: ui_mixlink::mix_browser::BrowserHit) {
@@ -2719,16 +3261,13 @@ fn copy_take_to_clipboard(state: &mut AppState, number: i32) {
     let Some(info) = state.take_infos.iter().find(|t| t.number == number) else {
         return;
     };
-    let clips: Vec<_> = info
+    let tracks: Vec<_> = info
         .arrangement_tracks()
         .into_iter()
         .filter(|track| record::lane_on_record_list(&state.analog, track.lane))
-        .flat_map(|track| track.clips)
         .collect();
-    let Some(source_lane) = clips.first().map(|c| c.source_lane) else {
-        return;
-    };
-    state.pasteboard = Some(MixPasteboard { clips, source_lane });
+    let ids: Vec<_> = tracks.iter().flat_map(|t| t.clips.iter().map(|c| c.id)).collect();
+    state.pasteboard = copy_clip_ids(&tracks, &ids);
 }
 
 fn delete_mix_id(state: &mut AppState, id: uuid::Uuid) {
@@ -2751,7 +3290,367 @@ fn delete_mix_id(state: &mut AppState, id: uuid::Uuid) {
     persist_project_meta(state);
 }
 
+fn begin_time_select(state: &mut AppState, x: f32, y: f32, all_lanes: bool) {
+    let frame = snap_playhead_frame(
+        state,
+        hit::frame_at_x(&arr_layout(state), x, state.tempo, sample_rate(state)),
+    );
+    let tracks = arrangement_tracks(state);
+    let lane = ui_mixlink::arrangement::track_index_at(&arr_layout(state), y, tracks.len())
+        .and_then(|i| tracks.get(i).map(|t| t.lane))
+        .or(state.selected_lane)
+        .unwrap_or(MixLane::Strip(0));
+    state.selected_lane = Some(lane);
+    state.selection.clear();
+    state.drag = Some(Drag::Select {
+        start_lane: lane,
+        start: frame,
+        all_lanes,
+        start_x: x,
+        start_y: y,
+        live: false,
+    });
+}
+
+fn begin_clip_move(state: &mut AppState, lane: MixLane, id: uuid::Uuid, x: f32, y: f32) {
+    let tracks = arrangement_tracks(state);
+    let Some((_, clip)) = arrange::find_clip(&tracks, id) else {
+        return;
+    };
+    let add = state.modifiers.shift_key() || state.modifiers.super_key();
+    state.selection = arrange::selection_for_clip(lane, clip, add, &state.selection);
+    state.selection.start = 0;
+    state.selection.end = 0;
+    state.selected_lane = Some(lane);
+    let ids = if state.selection.clips.contains(&id) && !state.selection.clips.is_empty() {
+        state.selection.clips.clone()
+    } else {
+        vec![id]
+    };
+    let origins: Vec<_> = ids
+        .iter()
+        .filter_map(|cid| {
+            arrange::find_clip(&tracks, *cid).map(|(l, c)| (*cid, l, c.mix_start_frame))
+        })
+        .collect();
+    let copy = state.modifiers.alt_key();
+    let slip = state.modifiers.control_key() && !state.modifiers.super_key();
+    if !is_editing_mix(state) {
+        return;
+    }
+    if slip {
+        begin_clip_slip(state, id, x);
+        return;
+    }
+    state.drag = Some(Drag::ClipMove { ids, anchor: id, start_x: x, start_y: y, origins, copy });
+}
+
+fn begin_clip_edge(state: &mut AppState, id: uuid::Uuid, left: bool, x: f32) {
+    let tracks = arrangement_tracks(state);
+    let Some((lane, clip)) = arrange::find_clip(&tracks, id) else {
+        return;
+    };
+    state.selected_lane = Some(lane);
+    if !is_editing_mix(state) {
+        return;
+    }
+    state.drag = Some(Drag::ClipEdge {
+        id,
+        left,
+        start_x: x,
+        start_frame: clip.mix_start_frame,
+        start_source: clip.source_start_frame,
+        start_count: clip.source_frame_count,
+    });
+}
+
+fn begin_clip_fade(state: &mut AppState, id: uuid::Uuid, left: bool, x: f32) {
+    let tracks = arrangement_tracks(state);
+    let Some((lane, clip)) = arrange::find_clip(&tracks, id) else {
+        return;
+    };
+    state.selected_lane = Some(lane);
+    if !is_editing_mix(state) {
+        return;
+    }
+    state.drag = Some(Drag::ClipFade {
+        id,
+        left,
+        start_x: x,
+        start_frames: if left { clip.fade_in_frames } else { clip.fade_out_frames },
+    });
+}
+
+fn begin_clip_loop(state: &mut AppState, id: uuid::Uuid, x: f32) {
+    let tracks = arrangement_tracks(state);
+    let Some((lane, clip)) = arrange::find_clip(&tracks, id) else {
+        return;
+    };
+    state.selected_lane = Some(lane);
+    if !is_editing_mix(state) {
+        return;
+    }
+    state.drag = Some(Drag::ClipLoop { id, start_x: x, start_count: clip.source_frame_count });
+}
+
+fn begin_clip_slip(state: &mut AppState, id: uuid::Uuid, x: f32) {
+    let tracks = arrangement_tracks(state);
+    let Some((lane, clip)) = arrange::find_clip(&tracks, id) else {
+        return;
+    };
+    state.selected_lane = Some(lane);
+    if !is_editing_mix(state) {
+        return;
+    }
+    state.drag = Some(Drag::ClipSlip { id, start_x: x, start_source: clip.source_start_frame });
+}
+
+fn preview_arrangement_drag(state: &mut AppState, x: f32, y: f32) {
+    let sr = sample_rate(state);
+    let bypass = state.modifiers.super_key();
+    let raw_delta = MixTime::frame_from_bar(
+        ((x - match &state.drag {
+            Some(Drag::ClipMove { start_x, .. })
+            | Some(Drag::ClipEdge { start_x, .. })
+            | Some(Drag::ClipFade { start_x, .. })
+            | Some(Drag::ClipLoop { start_x, .. })
+            | Some(Drag::ClipSlip { start_x, .. }) => *start_x,
+            _ => x,
+        }) / state.pixels_per_bar.max(1.0)) as f64,
+        state.tempo,
+        sr,
+    );
+    let delta = arrange::snap_frame_delta(
+        raw_delta,
+        state.grid_enabled,
+        bypass,
+        state.grid.raw(),
+        state.tempo,
+        sr,
+    );
+    let tracks = arrangement_tracks(state);
+    match state.drag.clone() {
+        Some(Drag::ClipMove { origins, start_y, .. }) => {
+            if !is_editing_mix(state) {
+                return;
+            }
+            let row_delta = ((y - start_y) / ui_mixlink::arrangement::TRACK_H).round() as i32;
+            let mut preview = Vec::new();
+            for (id, lane, start) in &origins {
+                let Some((_, clip)) = arrange::find_clip(&tracks, *id) else {
+                    continue;
+                };
+                let dest_lane = arrange::shift_lane(&tracks, *lane, row_delta).unwrap_or(*lane);
+                if dest_lane == MixLane::Main {
+                    continue;
+                }
+                let mut next = clip.clone();
+                next.mix_start_frame = (*start + delta).max(0);
+                preview.push((dest_lane, next));
+            }
+            if let Some((_, clip)) = preview.first() {
+                state.clip_readout = Some(arrange::clip_readout(clip, state.tempo, sr));
+            }
+            state.clip_preview = Some(preview);
+        }
+        Some(Drag::ClipEdge { id, left, start_frame, start_source, start_count, .. }) => {
+            let Some((lane, clip)) = arrange::find_clip(&tracks, id) else {
+                return;
+            };
+            let mut next = clip.clone();
+            next.mix_start_frame = start_frame;
+            next.source_start_frame = start_source;
+            next.source_frame_count = start_count;
+            if left {
+                next.trim_left((start_frame + delta).max(0));
+            } else {
+                next.trim_right(start_frame + start_count + delta);
+            }
+            state.clip_readout = Some(arrange::clip_readout(&next, state.tempo, sr));
+            state.clip_preview = Some(vec![(lane, next)]);
+        }
+        Some(Drag::ClipFade { id, left, start_frames, .. }) => {
+            let Some((lane, clip)) = arrange::find_clip(&tracks, id) else {
+                return;
+            };
+            let mut next = clip.clone();
+            let frames = (start_frames + delta).max(0);
+            if left {
+                next.set_fade_in(frames);
+            } else {
+                next.set_fade_out(frames);
+            }
+            state.clip_preview = Some(vec![(lane, next)]);
+        }
+        Some(Drag::ClipLoop { id, start_count, .. }) => {
+            let Some((lane, clip)) = arrange::find_clip(&tracks, id) else {
+                return;
+            };
+            let mut next = clip.clone();
+            next.enable_loop();
+            next.source_frame_count = (start_count + delta).max(project::MIN_CLIP_FRAMES);
+            state.clip_readout = Some(arrange::clip_readout(&next, state.tempo, sr));
+            state.clip_preview = Some(vec![(lane, next)]);
+        }
+        Some(Drag::ClipSlip { id, start_source, .. }) => {
+            let Some((lane, clip)) = arrange::find_clip(&tracks, id) else {
+                return;
+            };
+            let mut next = clip.clone();
+            next.source_start_frame = start_source;
+            next.slip(delta);
+            state.clip_preview = Some(vec![(lane, next)]);
+        }
+        _ => {}
+    }
+    edge_auto_scroll(state, x, y);
+}
+
+fn commit_arrangement_drag(state: &mut AppState) {
+    let Some(preview) = state.clip_preview.take() else {
+        if let Some(Drag::Select { start, live, .. }) = state.drag {
+            if !live {
+                locate_to(state, start);
+                state.selection.clear();
+            }
+        }
+        return;
+    };
+    if !is_editing_mix(state) {
+        return;
+    }
+    match state.drag.clone() {
+        Some(Drag::ClipMove { origins, copy, .. }) => {
+            let ids: Vec<_> = origins.iter().map(|(id, _, _)| *id).collect();
+            mutate_mix(state, if copy { "Copy clip" } else { "Move clip" }, false, |doc| {
+                if !copy {
+                    doc.remove_clips(&ids);
+                }
+                doc.insert_clips(&preview);
+            });
+            state.selection.clips = preview
+                .iter()
+                .filter_map(|(lane, clip)| {
+                    state.mix.as_ref().and_then(|m| {
+                        m.track(*lane)
+                            .and_then(|t| {
+                                t.clips.iter().find(|c| {
+                                    c.mix_start_frame == clip.mix_start_frame
+                                        && c.source_file == clip.source_file
+                                        && c.source_start_frame == clip.source_start_frame
+                                })
+                            })
+                            .map(|c| c.id)
+                    })
+                })
+                .collect();
+            state.selection.start = 0;
+            state.selection.end = 0;
+        }
+        Some(Drag::ClipEdge { id, .. }) => {
+            if let Some((lane, next)) = preview.first() {
+                let lane = *lane;
+                let next = next.clone();
+                mutate_mix(state, "Trim clip", false, |doc| {
+                    doc.remove_clips(&[id]);
+                    doc.insert_clips(&[(lane, next)]);
+                });
+            }
+        }
+        Some(Drag::ClipFade { id, .. }) => {
+            if let Some((_, next)) = preview.first() {
+                let fade_in = next.fade_in_frames;
+                let fade_out = next.fade_out_frames;
+                mutate_mix(state, "Fade", false, |doc| {
+                    if let Some(clip) =
+                        doc.tracks.iter_mut().flat_map(|t| t.clips.iter_mut()).find(|c| c.id == id)
+                    {
+                        clip.fade_in_frames = fade_in;
+                        clip.fade_out_frames = fade_out;
+                    }
+                });
+            }
+        }
+        Some(Drag::ClipLoop { id, .. }) => {
+            if let Some((lane, next)) = preview.first() {
+                let lane = *lane;
+                let next = next.clone();
+                mutate_mix(state, "Loop clip", false, |doc| {
+                    doc.remove_clips(&[id]);
+                    doc.insert_clips(&[(lane, next)]);
+                });
+            }
+        }
+        Some(Drag::ClipSlip { id, .. }) => {
+            if let Some((_, next)) = preview.first() {
+                let src = next.source_start_frame;
+                mutate_mix(state, "Slip clip", false, |doc| {
+                    if let Some(clip) =
+                        doc.tracks.iter_mut().flat_map(|t| t.clips.iter_mut()).find(|c| c.id == id)
+                    {
+                        clip.source_start_frame = src;
+                    }
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
+fn edge_auto_scroll(state: &mut AppState, x: f32, y: f32) {
+    let layout = arr_layout(state);
+    let margin = 28.0;
+    if x > layout.x + layout.w - margin {
+        state.scroll_x += 24.0;
+    } else if x < layout.x + ui_mixlink::arrangement::HEADER_W + margin {
+        state.scroll_x = (state.scroll_x - 24.0).max(0.0);
+    }
+    if y > layout.y + layout.h - ui_mixlink::arrangement::TIME_RULER_H - margin {
+        state.scroll_y += 16.0;
+    } else if y < layout.y + ui_mixlink::arrangement::RULER_H + margin {
+        state.scroll_y = (state.scroll_y - 16.0).max(0.0);
+    }
+}
+
+fn publish_play_graph(state: &AppState) {
+    let Some(player) = &state.mix_player else {
+        return;
+    };
+    if let Some(graph) = build_play_graph(state) {
+        player.publish_graph(graph);
+    }
+}
+
+fn build_play_graph(state: &AppState) -> Option<mix_play::MixPlayGraph> {
+    let folder = ProjectStore::current_url(&state.analog.config)?;
+    let tracks = mixer_tracks(state);
+    let end = tracks
+        .iter()
+        .filter(|t| t.lane != MixLane::Main)
+        .flat_map(|t| t.clips.iter())
+        .map(MixClip::mix_end_frame)
+        .max()
+        .unwrap_or(0);
+    Some(mix_play::MixPlayGraph {
+        folder,
+        tracks: tracks
+            .into_iter()
+            .take(MIX_PLAY_MAX_LANES)
+            .map(|t| mix_play::MixPlayTrack {
+                clips: if t.lane == MixLane::Main { Vec::new() } else { t.clips },
+                is_main: t.lane == MixLane::Main,
+            })
+            .collect(),
+        end_frame: end,
+        sample_rate: sample_rate(state),
+    })
+}
+
 fn persist_mix(state: &mut AppState) {
+    let takes = state.take_infos.clone();
+    if let Some(mix) = state.mix.as_mut() {
+        mix.backfill_source_totals(&takes);
+    }
     let Some(mix) = &state.mix else { return };
     if let Some(folder) = ProjectStore::current_url(&state.analog.config) {
         if let Err(e) = state.project.save_mix(mix, &folder) {
@@ -2793,19 +3692,51 @@ fn apply_undo(state: &mut AppState, redo: bool) {
     if let Some((_, doc)) = restored {
         state.mix = Some(doc);
         persist_mix(state);
+        publish_play_graph(state);
     }
     publish_schedule(state);
 }
 
 fn paste_clips(state: &mut AppState) {
-    let Some(board) = state.pasteboard.clone() else { return };
-    let dest = state.selected_lane.unwrap_or(board.source_lane);
-    let at = state.locate_frame;
-    if let Some(mut mix) = state.mix.take() {
-        state.undo.mutate("Paste", false, &mut mix, |doc| doc.paste_clips(&board, dest, at));
-        state.mix = Some(mix);
-        persist_mix(state);
+    if state.pasteboard.as_ref().is_none_or(|b| b.entries.is_empty()) {
+        return;
     }
+    let leaving_take = state.viewing_take.is_some();
+    if leaving_take {
+        if state.mix.is_none() {
+            return;
+        }
+        state.viewing_take = None;
+        state.take_view = None;
+        sync_origin(state);
+        locate_to(state, state.arrangement_origin.max(0));
+        persist_project_meta(state);
+    }
+    if !is_editing_mix(state) {
+        return;
+    }
+    let Some(board) = state.pasteboard.clone() else {
+        return;
+    };
+    let dest = state.selected_lane.filter(|l| *l != MixLane::Main).unwrap_or(MixLane::Strip(0));
+    if dest == MixLane::Main {
+        return;
+    }
+    let at = arrange::mix_paste_frame(
+        leaving_take,
+        state.mix.as_ref().map(|m| m.start_frame).unwrap_or(0),
+        state.playing,
+        state.engine_handles.sample_position.load(Ordering::Relaxed),
+        state.locate_frame,
+    );
+    mutate_mix(state, "Paste", false, |doc| doc.paste_clips(&board, dest, at));
+    let origin = board.origin;
+    let start =
+        board.entries.iter().map(|e| at + (e.clip.mix_start_frame - origin)).min().unwrap_or(at);
+    let end =
+        board.entries.iter().map(|e| at + (e.clip.mix_end_frame() - origin)).max().unwrap_or(at);
+    let lanes = if board.single_lane() { vec![dest] } else { board.lanes() };
+    state.selection = ArrSelection { lanes, start, end, clips: Vec::new() };
 }
 
 fn arrangement_tracks(state: &AppState) -> Vec<MixTrack> {
@@ -2816,18 +3747,24 @@ fn arrangement_tracks(state: &AppState) -> Vec<MixTrack> {
     }
 }
 
-fn arrangement_track_count(state: &AppState) -> usize {
-    arrangement_tracks(state).len()
-}
-
 fn select_mix(state: &mut AppState, id: uuid::Uuid) {
     if state.playing {
         halt_mix_play(state);
     }
+    let leaving_take = state.viewing_take.is_some();
     state.mix = state.mixes.iter().find(|m| m.id == id).cloned();
+    let takes = state.take_infos.clone();
+    if let Some(mix) = &mut state.mix {
+        mix.backfill_source_totals(&takes);
+    }
     state.viewing_take = None;
     state.take_view = None;
+    state.selection.clear();
+    state.clip_preview = None;
     sync_origin(state);
+    if leaving_take {
+        locate_to(state, state.arrangement_origin.max(0));
+    }
     persist_project_meta(state);
     publish_schedule(state);
 }
@@ -2837,6 +3774,8 @@ fn select_take(state: &mut AppState, number: i32) {
         halt_mix_play(state);
     }
     state.viewing_take = Some(number);
+    state.selection.clear();
+    state.clip_preview = None;
     state.take_view = state.take_infos.iter().find(|t| t.number == number).map(|info| {
         info.arrangement_tracks()
             .into_iter()
@@ -2844,6 +3783,7 @@ fn select_take(state: &mut AppState, number: i32) {
             .collect()
     });
     sync_origin(state);
+    locate_to(state, state.arrangement_origin.max(0));
     persist_project_meta(state);
 }
 
@@ -2861,16 +3801,40 @@ fn sync_origin(state: &mut AppState) {
     };
 }
 
+fn arrangement_length(state: &AppState) -> i64 {
+    if let Some(n) = state.viewing_take {
+        state.take_infos.iter().find(|t| t.number == n).map(|t| t.frame_count()).unwrap_or(0)
+    } else {
+        state.mix.as_ref().map(|m| m.last_clip_end()).unwrap_or(0)
+    }
+}
+
+fn clamp_arrangement_start(state: &AppState, frame: i64) -> i64 {
+    let length = arrangement_length(state);
+    if length <= 0 {
+        return frame.max(0);
+    }
+    frame.max(0).min(length - 1)
+}
+
+fn set_arrangement_start(state: &mut AppState, frame: i64) {
+    let origin = clamp_arrangement_start(state, frame);
+    state.arrangement_origin = origin;
+    if state.viewing_take.is_none() {
+        if let Some(mix) = state.mix.as_mut() {
+            mix.start_frame = origin;
+        }
+    }
+}
+
 fn persist_start(state: &mut AppState) {
-    let origin = state.arrangement_origin.max(0);
+    set_arrangement_start(state, state.arrangement_origin);
     if state.viewing_take.is_some() {
         persist_project_meta(state);
-        return;
+    } else {
+        persist_mix(state);
     }
-    if let Some(mix) = state.mix.as_mut() {
-        mix.start_frame = origin;
-    }
-    persist_mix(state);
+    locate_to(state, state.arrangement_origin);
 }
 
 fn persist_project_meta(state: &mut AppState) {
@@ -2921,7 +3885,7 @@ fn reload_mix(state: &mut AppState) {
     }
     let sr = state._stream.as_ref().map(|s| s.sample_rate() as f64).unwrap_or(48_000.0);
     let meta = state.project.load_meta(&folder);
-    state.tempo = meta.tempo;
+    set_tempo(state, meta.tempo);
     state.grid = meta.grid;
     state.grid_enabled = meta.grid_enabled;
     state.pixels_per_bar = meta.pixels_per_bar as f32;
@@ -3043,7 +4007,7 @@ fn publish_schedule(state: &AppState) {
     schedule.any_solo = play_tracks.iter().any(|t| t.solo);
     let main_dest = state.analog.config.mix_playback_channel(analog::MixLane::Main);
     for (i, track) in play_tracks.iter().take(MIX_PLAY_MAX_LANES).enumerate() {
-        // Channel strips feed Main → Control Room only. They never write analog dests.
+        // Mix page: strip, send, and return are the same — clips into Main.
         let dest = if track.lane == MixLane::Main { main_dest } else { -1 };
         let amp = osc::fader_lin_to_amp(track.fader);
         let pan = if track.lane == MixLane::Main { 0.5 } else { track.pan };

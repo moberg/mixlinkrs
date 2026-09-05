@@ -437,12 +437,7 @@ impl AnalogEngine {
                 return level;
             }
         }
-        self.surface
-            .returns
-            .iter()
-            .find(|r| r.id == lane as i32)
-            .map(|r| r.fader)
-            .unwrap_or(0.0)
+        self.surface.returns.iter().find(|r| r.id == lane as i32).map(|r| r.fader).unwrap_or(0.0)
     }
 
     pub fn return_main_mix_pan(&self, lane: ReturnLane) -> f32 {
@@ -456,12 +451,7 @@ impl AnalogEngine {
     }
 
     pub fn return_record_pan(&self, lane: ReturnLane) -> f32 {
-        self.surface
-            .returns
-            .iter()
-            .find(|r| r.id == lane as i32)
-            .map(|r| r.pan)
-            .unwrap_or(0.5)
+        self.surface.returns.iter().find(|r| r.id == lane as i32).map(|r| r.pan).unwrap_or(0.5)
     }
 
     pub fn pull_return_faders_from_sends(&mut self) {

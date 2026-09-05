@@ -8,6 +8,8 @@ pub const TEXT_DIM: Color = [0.55, 0.55, 0.58, 1.0];
 pub const ORANGE: Color = [1.00, 0.45, 0.12, 1.0];
 pub const AMBER: Color = [1.00, 0.62, 0.14, 1.0];
 pub const BLUE: Color = [0.22, 0.55, 0.95, 1.0];
+/// Live-style time selection — ice cyan used to mark a copy/duplicate range.
+pub const COPY_SELECT: Color = [0.62, 0.92, 1.0, 1.0];
 /// Mix / take browser selection (sampled from MixLink Take 7 highlight).
 pub const BROWSER_SELECTED: Color = [42.0 / 255.0, 70.0 / 255.0, 120.0 / 255.0, 1.0];
 pub const METER_GREEN: Color = [0.20, 0.82, 0.32, 1.0];
@@ -133,6 +135,37 @@ pub fn clip_color_for_lane(take: i32, lane: analog::MixLane) -> Color {
 
 pub fn fill(cmds: &mut Vec<DrawCmd>, rect: Rect, color: Color) {
     cmds.push(DrawCmd::Rect { rect, color });
+}
+
+pub fn stroke_rect(cmds: &mut Vec<DrawCmd>, rect: Rect, color: Color, thickness: f32) {
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    let t = thickness.max(1.0);
+    cmds.push(DrawCmd::Line {
+        a: (rect.x, rect.y),
+        b: (rect.x + rect.w, rect.y),
+        color,
+        thickness: t,
+    });
+    cmds.push(DrawCmd::Line {
+        a: (rect.x + rect.w, rect.y),
+        b: (rect.x + rect.w, rect.y + rect.h),
+        color,
+        thickness: t,
+    });
+    cmds.push(DrawCmd::Line {
+        a: (rect.x + rect.w, rect.y + rect.h),
+        b: (rect.x, rect.y + rect.h),
+        color,
+        thickness: t,
+    });
+    cmds.push(DrawCmd::Line {
+        a: (rect.x, rect.y + rect.h),
+        b: (rect.x, rect.y),
+        color,
+        thickness: t,
+    });
 }
 
 /// MixLink `HardwareSurface` — one chassis panel, not a per-strip fill.

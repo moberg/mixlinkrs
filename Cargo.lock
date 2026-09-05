@@ -152,6 +152,7 @@ version = "0.1.0"
 dependencies = [
  "analog",
  "anyhow",
+ "arc-swap",
  "asset",
  "audio-io",
  "dsp-core",

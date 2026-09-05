@@ -1,5 +1,5 @@
 use asset::{minmax_for_width, minmax_zoom_points, WaveformCache, WaveformStatus};
-use project::{MixDocument, MixGrid, MixLane, MixTime};
+use project::{ArrSelection, MixClip, MixDocument, MixGrid, MixLane, MixTime};
 use render::{DrawCmd, Rect};
 
 use crate::theme;
@@ -8,6 +8,12 @@ pub const TRACK_H: f32 = 80.0;
 pub const HEADER_W: f32 = 86.0;
 pub const RULER_H: f32 = 22.0;
 pub const TIME_RULER_H: f32 = 22.0;
+pub const TITLE_H: f32 = 14.0;
+pub const CLIP_EDGE_PX: f32 = 6.0;
+/// Title-bar trim hit zone (Ableton-style). Wider than the body edge.
+pub const CLIP_MARK_PX: f32 = 12.0;
+pub const FADE_HANDLE: f32 = 10.0;
+pub const LOOP_CORNER: f32 = 10.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ArrangementLayout {
@@ -25,7 +31,7 @@ pub struct ArrangementView<'a> {
     pub mix: Option<&'a MixDocument>,
     pub tracks: &'a [project::MixTrack],
     pub selected_lane: Option<MixLane>,
-    pub selected_clips: &'a [uuid::Uuid],
+    pub selection: &'a ArrSelection,
     pub playhead: i64,
     pub origin: i64,
     pub tempo: f64,
@@ -33,8 +39,23 @@ pub struct ArrangementView<'a> {
     pub grid: MixGrid,
     pub grid_enabled: bool,
     pub viewing_take: bool,
-    pub bar_selection: Option<(MixLane, i64, i64)>,
+    pub home_take: Option<i32>,
+    pub drag_preview: Option<&'a [(MixLane, MixClip)]>,
+    pub readout: Option<&'a str>,
     pub waveforms: Option<&'a WaveformCache>,
+    /// Time-range and clip-outline chrome. Off while moving or resizing.
+    pub show_selection: bool,
+    /// When set, the live preview replaces these clips instead of ghosting over them.
+    pub hide_clip_ids: &'a [uuid::Uuid],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ClipHit {
+    Body { lane: MixLane, id: uuid::Uuid },
+    Edge { id: uuid::Uuid, left: bool },
+    Fade { id: uuid::Uuid, left: bool },
+    Loop { id: uuid::Uuid },
+    Slip { id: uuid::Uuid },
 }
 
 pub fn paint(view: &ArrangementView<'_>) -> Vec<DrawCmd> {
@@ -50,7 +71,9 @@ pub fn paint(view: &ArrangementView<'_>) -> Vec<DrawCmd> {
 
     cmds.push(DrawCmd::Layer);
     cmds.push(DrawCmd::Clip { rect: timeline });
+    paint_bar_bands(&mut cmds, view);
     paint_bar_ruler(&mut cmds, view);
+    paint_bar_grid(&mut cmds, view);
     for (i, track) in view.tracks.iter().enumerate() {
         let y = l.y + RULER_H + i as f32 * TRACK_H - l.scroll_y;
         if y + TRACK_H < l.y || y > l.y + l.h - TIME_RULER_H {
@@ -69,8 +92,9 @@ pub fn paint(view: &ArrangementView<'_>) -> Vec<DrawCmd> {
             false,
         );
     }
-    paint_start_marker(&mut cmds, view);
+    paint_start_line(&mut cmds, view);
     paint_playhead(&mut cmds, view);
+    paint_readout(&mut cmds, view);
 
     cmds.push(DrawCmd::Layer);
     theme::fill(&mut cmds, legend, [0.11, 0.11, 0.11, 1.0]);
@@ -109,11 +133,23 @@ pub fn paint(view: &ArrangementView<'_>) -> Vec<DrawCmd> {
             selected,
             Some(header),
         );
+        if track.solo {
+            theme::text_clip(
+                &mut cmds,
+                Rect { x: l.x + HEADER_W - 16.0, y: header.y + 2.0, w: 14.0, h: 12.0 },
+                "S",
+                9.0,
+                theme::ORANGE,
+                true,
+                Some(header),
+            );
+        }
         theme::seam_h(&mut cmds, l.x, y + TRACK_H - 1.0, HEADER_W, false);
     }
 
     cmds.push(DrawCmd::Layer);
     cmds.push(DrawCmd::Clip { rect: bounds });
+    paint_start_badge(&mut cmds, view);
     paint_time_ruler(&mut cmds, view);
     cmds.push(DrawCmd::Layer);
     cmds
@@ -125,10 +161,136 @@ fn x_of(view: &ArrangementView<'_>, frame: i64) -> f32 {
 
 pub fn x_of_frame(layout: &ArrangementLayout, frame: i64, tempo: f64, rate: f64) -> f32 {
     let bar = MixTime::bar_of(frame, tempo, rate);
-    layout.x + HEADER_W + bar as f32 * layout.pixels_per_bar - layout.scroll_x
+    (f64::from(layout.x) + f64::from(HEADER_W) + bar * f64::from(layout.pixels_per_bar)
+        - f64::from(layout.scroll_x)) as f32
 }
 
-/// START badge in the bar ruler — the only place the marker is grabbed.
+pub fn clip_display_start(clip: &MixClip, viewing_take: bool) -> i64 {
+    if viewing_take {
+        0
+    } else {
+        clip.mix_start_frame
+    }
+}
+
+pub fn clip_rect(
+    layout: &ArrangementLayout,
+    clip: &MixClip,
+    lane_y: f32,
+    viewing_take: bool,
+    tempo: f64,
+    rate: f64,
+) -> Rect {
+    let start = clip_display_start(clip, viewing_take);
+    let end = start + clip.source_frame_count.max(0);
+    let left = x_of_frame(layout, start, tempo, rate);
+    let right = x_of_frame(layout, end, tempo, rate).max(left + 4.0);
+    Rect { x: left, y: lane_y + 4.0, w: right - left, h: TRACK_H - 8.0 }
+}
+
+fn track_index(layout: &ArrangementLayout, y: f32) -> i32 {
+    ((y - layout.y - RULER_H + layout.scroll_y) / TRACK_H).floor() as i32
+}
+
+pub fn track_index_at(layout: &ArrangementLayout, y: f32, track_count: usize) -> Option<usize> {
+    let idx = track_index(layout, y);
+    if idx >= 0 && (idx as usize) < track_count {
+        Some(idx as usize)
+    } else {
+        None
+    }
+}
+
+/// Same as `track_index_at`, but a drag that leaves the lane stack keeps the
+/// nearest channel so a time selection can grow across every lane.
+pub fn track_index_clamped(
+    layout: &ArrangementLayout,
+    y: f32,
+    track_count: usize,
+) -> Option<usize> {
+    if track_count == 0 {
+        return None;
+    }
+    Some(track_index(layout, y).clamp(0, track_count as i32 - 1) as usize)
+}
+
+pub fn hit_clip(
+    layout: &ArrangementLayout,
+    tracks: &[project::MixTrack],
+    viewing_take: bool,
+    tempo: f64,
+    rate: f64,
+    x: f32,
+    y: f32,
+) -> Option<ClipHit> {
+    let idx = track_index_at(layout, y, tracks.len())?;
+    let track = &tracks[idx];
+    let lane_y = layout.y + RULER_H + idx as f32 * TRACK_H - layout.scroll_y;
+    for clip in track.clips.iter().rev() {
+        let rect = clip_rect(layout, clip, lane_y, viewing_take, tempo, rate);
+        if x < rect.x || x > rect.x + rect.w || y < rect.y || y > rect.y + rect.h {
+            continue;
+        }
+        let edge = CLIP_EDGE_PX.min(rect.w * 0.25);
+        let mark = CLIP_MARK_PX.min(rect.w * 0.28);
+        let on_title = y <= rect.y + TITLE_H.min(rect.h);
+        if on_title && x <= rect.x + mark {
+            return Some(ClipHit::Edge { id: clip.id, left: true });
+        }
+        if on_title && x >= rect.x + rect.w - mark {
+            return Some(ClipHit::Edge { id: clip.id, left: false });
+        }
+        if x <= rect.x + edge {
+            return Some(ClipHit::Edge { id: clip.id, left: true });
+        }
+        if x >= rect.x + rect.w - edge {
+            return Some(ClipHit::Edge { id: clip.id, left: false });
+        }
+        if on_title {
+            if clip.fade_in_frames > 0 && x <= rect.x + mark + FADE_HANDLE {
+                return Some(ClipHit::Fade { id: clip.id, left: true });
+            }
+            if clip.fade_out_frames > 0 && x >= rect.x + rect.w - mark - FADE_HANDLE {
+                return Some(ClipHit::Fade { id: clip.id, left: false });
+            }
+            return Some(ClipHit::Body { lane: track.lane, id: clip.id });
+        }
+        if y >= rect.y + rect.h - LOOP_CORNER && x >= rect.x + rect.w - LOOP_CORNER {
+            return Some(ClipHit::Loop { id: clip.id });
+        }
+        // Waveform is time-select, not move — fall through to Locate.
+        return None;
+    }
+    None
+}
+
+pub fn clip_at(
+    layout: &ArrangementLayout,
+    tracks: &[project::MixTrack],
+    viewing_take: bool,
+    tempo: f64,
+    rate: f64,
+    x: f32,
+    y: f32,
+) -> Option<(project::MixLane, uuid::Uuid)> {
+    let idx = track_index_at(layout, y, tracks.len())?;
+    let track = &tracks[idx];
+    let lane_y = layout.y + RULER_H + idx as f32 * TRACK_H - layout.scroll_y;
+    for clip in track.clips.iter().rev() {
+        let rect = clip_rect(layout, clip, lane_y, viewing_take, tempo, rate);
+        if x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h {
+            return Some((track.lane, clip.id));
+        }
+    }
+    None
+}
+
+/// MixLink START badge in the bar ruler (58×14). The lane body only hits the line
+/// so a time selection can start next to bar 0.
+pub const START_HIT_W: f32 = 58.0;
+pub const START_HIT_INSET: f32 = 8.0;
+pub const START_LINE_HIT_W: f32 = 12.0;
+
 pub fn start_marker_hit(
     layout: &ArrangementLayout,
     origin: i64,
@@ -138,7 +300,116 @@ pub fn start_marker_hit(
     y: f32,
 ) -> bool {
     let mx = x_of_frame(layout, origin, tempo, rate);
-    x >= mx - 8.0 && x < mx + 42.0 && y >= layout.y && y < layout.y + RULER_H
+    let top = layout.y;
+    let bot = layout.y + layout.h - TIME_RULER_H;
+    if y < top || y >= bot {
+        return false;
+    }
+    if y < layout.y + RULER_H {
+        let left = mx - START_HIT_INSET;
+        return x >= left && x < left + START_HIT_W;
+    }
+    let half = START_LINE_HIT_W * 0.5;
+    x >= mx - half && x < mx + half
+}
+
+fn x_of_bar(view: &ArrangementView<'_>, bar: f64) -> f32 {
+    x_of(view, view.origin + MixTime::frame_from_bar(bar, view.tempo, view.sample_rate))
+}
+
+fn visible_musical_bars(view: &ArrangementView<'_>) -> (f64, f64) {
+    let l = view.layout;
+    let rate = view.sample_rate.max(1.0);
+    let left = frame_at(l.x + HEADER_W, &l, view.tempo, rate);
+    let right = frame_at(l.x + l.w, &l, view.tempo, rate);
+    (
+        MixTime::bar_of(left - view.origin, view.tempo, rate),
+        MixTime::bar_of(right - view.origin, view.tempo, rate),
+    )
+}
+
+/// Live-style truncation: `3`, `3.2`, `3.2.4` — never `3.1` or `3.2.1`.
+fn format_bar_label(bar: f64) -> String {
+    let sign = if bar < -1e-9 { "-" } else { "" };
+    let sixteenths = (bar.abs() * 16.0).round() as i64;
+    let bars = sixteenths / 16;
+    let rem = sixteenths.rem_euclid(16);
+    let beat = rem / 4 + 1;
+    let tick = rem % 4 + 1;
+    if beat == 1 && tick == 1 {
+        format!("{sign}{bars}")
+    } else if tick == 1 {
+        format!("{sign}{bars}.{beat}")
+    } else {
+        format!("{sign}{bars}.{beat}.{tick}")
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct BarTickScale {
+    label: f64,
+    mid: f64,
+    minor: f64,
+}
+
+/// Adaptive bar/beat/16th cadence — same zoom steps as Live's arrangement ruler.
+fn bar_tick_steps(pixels_per_bar: f32) -> BarTickScale {
+    let ppb = f64::from(pixels_per_bar);
+    // (label, mid, minor, min pixels per labeled step)
+    const STEPS: [(f64, f64, f64, f64); 7] = [
+        (0.0625, 0.0625, 0.0625, 36.0),
+        (0.25, 0.0625, 0.0625, 30.0),
+        (1.0, 0.25, 0.25, 40.0),
+        (2.0, 1.0, 0.25, 40.0),
+        (4.0, 1.0, 1.0, 36.0),
+        (8.0, 4.0, 1.0, 36.0),
+        (16.0, 8.0, 4.0, 36.0),
+    ];
+    for (label, mid, minor, min_px) in STEPS {
+        if label * ppb >= min_px {
+            return BarTickScale { label, mid, minor };
+        }
+    }
+    BarTickScale { label: 32.0, mid: 16.0, minor: 8.0 }
+}
+
+fn shade_step(scale: BarTickScale) -> f64 {
+    if scale.label <= 0.0625 + 1e-9 {
+        0.25
+    } else if scale.label <= 1.0 + 1e-9 {
+        2.0
+    } else {
+        scale.label.max(2.0)
+    }
+}
+
+fn paint_bar_bands(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
+    let l = view.layout;
+    let y = l.y + RULER_H;
+    let h = (l.h - RULER_H - TIME_RULER_H).max(0.0);
+    if h < 1.0 || l.pixels_per_bar < 1.0 {
+        return;
+    }
+    let step = shade_step(bar_tick_steps(l.pixels_per_bar));
+    if step * f64::from(l.pixels_per_bar) < 20.0 {
+        return;
+    }
+    let (start, end) = visible_musical_bars(view);
+    let first = (start / step).floor() as i32 - 1;
+    let last = (end / step).ceil() as i32 + 1;
+    let left = l.x + HEADER_W;
+    let right = l.x + l.w;
+    for i in first..=last {
+        if i.rem_euclid(2) != 0 {
+            continue;
+        }
+        let x0 = x_of_bar(view, f64::from(i) * step).max(left);
+        let x1 = x_of_bar(view, f64::from(i + 1) * step).min(right);
+        if x1 - x0 < 1.0 {
+            continue;
+        }
+        theme::fill(cmds, Rect { x: x0, y, w: x1 - x0, h }, [1.0, 1.0, 1.0, 0.028]);
+    }
 }
 
 fn paint_bar_ruler(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
@@ -149,43 +420,63 @@ fn paint_bar_ruler(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
         theme::SurfaceStyle::UpperFaceplate,
     );
     let ppb = l.pixels_per_bar;
-    let step = if ppb >= 36.0 {
-        1.0
-    } else if ppb * 4.0 >= 36.0 {
-        4.0
-    } else {
-        8.0
-    };
-    let start_bar = MixTime::bar_of(-view.origin, view.tempo, view.sample_rate);
-    let end_bar = start_bar + ((l.w - HEADER_W + l.scroll_x) / ppb.max(1.0)) as f64 + 4.0;
-    let mut bar = (start_bar / step).floor() * step;
-    while bar <= end_bar {
-        let frame = view.origin + MixTime::frame_from_bar(bar, view.tempo, view.sample_rate);
-        let x = x_of(view, frame);
-        if x >= l.x + HEADER_W - 2.0 && x < l.x + l.w {
-            let musical = bar;
-            if (musical - musical.round()).abs() < 0.001 {
-                let n = musical.round() as i32;
-                if n != 0 {
-                    let color = if musical == 0.0 {
-                        theme::METER_GREEN
-                    } else if n.rem_euclid(4) == 0 {
-                        theme::TEXT
-                    } else {
-                        theme::TEXT_DIM
-                    };
-                    theme::text_mono(
-                        cmds,
-                        Rect { x: x + 3.0, y: l.y + 2.0, w: 24.0, h: 14.0 },
-                        format!("{n}"),
-                        9.0,
-                        color,
-                        musical == 0.0,
-                    );
-                }
-            }
+    if ppb < 1.0 || l.w <= HEADER_W + 1.0 {
+        return;
+    }
+    let scale = bar_tick_steps(ppb);
+    let (start, end) = visible_musical_bars(view);
+    let first = (start / scale.minor).floor() as i32 - 1;
+    let last = (end / scale.minor).ceil() as i32 + 1;
+    if first > last {
+        return;
+    }
+    let labels_every = ((scale.label / scale.minor).round() as i32).max(1);
+    let mids_every = ((scale.mid / scale.minor).round() as i32).max(1);
+    let draw_mid = scale.mid * f64::from(ppb) >= 16.0;
+    let draw_minor = scale.minor * f64::from(ppb) >= 28.0 && scale.minor + 1e-9 < scale.mid;
+    let edge = l.x + l.w;
+    let origin_x = x_of(view, view.origin);
+    for i in first..=last {
+        let bar = f64::from(i) * scale.minor;
+        let x = x_of_bar(view, bar);
+        if x < l.x + HEADER_W - 2.0 || x > edge + 2.0 {
+            continue;
         }
-        bar += step;
+        let on_start = (x - origin_x).abs() < 8.0;
+        if i % labels_every == 0 {
+            cmds.push(DrawCmd::Line {
+                a: (x, l.y + 1.0),
+                b: (x, l.y + 6.0),
+                color: [1.0, 1.0, 1.0, 0.28],
+                thickness: 1.0,
+            });
+            if !on_start && bar.abs() > 1e-6 && x < edge - 10.0 {
+                let label = format_bar_label(bar);
+                let wide = label.contains('.');
+                theme::text_mono(
+                    cmds,
+                    Rect { x: x + 3.0, y: l.y + 8.0, w: if wide { 46.0 } else { 28.0 }, h: 12.0 },
+                    label,
+                    8.0,
+                    if wide { [1.0, 1.0, 1.0, 0.32] } else { [1.0, 1.0, 1.0, 0.46] },
+                    false,
+                );
+            }
+        } else if draw_mid && i % mids_every == 0 {
+            cmds.push(DrawCmd::Line {
+                a: (x, l.y + 1.0),
+                b: (x, l.y + 4.0),
+                color: [1.0, 1.0, 1.0, 0.14],
+                thickness: 1.0,
+            });
+        } else if draw_minor {
+            cmds.push(DrawCmd::Line {
+                a: (x, l.y + 1.0),
+                b: (x, l.y + 2.5),
+                color: [1.0, 1.0, 1.0, 0.08],
+                thickness: 1.0,
+            });
+        }
     }
 }
 
@@ -195,48 +486,186 @@ fn paint_lane(
     track: &project::MixTrack,
     y: f32,
 ) {
-    let l = view.layout;
-    draw_grid(cmds, view, y, TRACK_H);
     for clip in &track.clips {
-        let start = if view.viewing_take { 0 } else { clip.mix_start_frame };
-        let end = start + clip.source_frame_count.max(0);
-        let left = x_of(view, start);
-        let right = x_of(view, end).max(left + 4.0);
-        let rect = Rect { x: left, y: y + 4.0, w: right - left, h: TRACK_H - 8.0 };
-        if rect.x + rect.w < l.x + HEADER_W || rect.x > l.x + l.w {
+        if view.hide_clip_ids.contains(&clip.id) {
             continue;
         }
-        let selected = view.selected_clips.contains(&clip.id);
-        let mut color = theme::clip_color_for_lane(clip.source_take, track.lane.into());
-        color[3] = if selected { 0.95 } else { 0.72 };
-        cmds.push(DrawCmd::RoundedRect { rect, color, radius: 3.0 });
+        paint_one_clip(cmds, view, clip, y, 1.0);
+    }
+    if let Some(preview) = view.drag_preview {
+        let alpha = if view.hide_clip_ids.is_empty() { 0.55 } else { 1.0 };
+        for (lane, clip) in preview {
+            if *lane == track.lane {
+                paint_one_clip(cmds, view, clip, y, alpha);
+            }
+        }
+    }
+    if view.show_selection
+        && view.selection.has_range()
+        && view.selection.lanes.contains(&track.lane)
+    {
+        let (a, b) = view.selection.range();
+        let x0 = x_of(view, a);
+        let x1 = x_of(view, b).max(x0 + 2.0);
+        let rect = Rect { x: x0, y, w: x1 - x0, h: TRACK_H };
+        theme::fill(
+            cmds,
+            rect,
+            [theme::COPY_SELECT[0], theme::COPY_SELECT[1], theme::COPY_SELECT[2], 0.20],
+        );
+        theme::stroke_rect(
+            cmds,
+            rect,
+            [theme::COPY_SELECT[0], theme::COPY_SELECT[1], theme::COPY_SELECT[2], 0.40],
+            1.0,
+        );
+        let top_lane = view
+            .tracks
+            .iter()
+            .find(|t| view.selection.lanes.contains(&t.lane))
+            .map(|t| t.lane);
+        if top_lane == Some(track.lane) {
+            paint_copy_ticks(cmds, x0, x1, y);
+        }
+    }
+}
+
+fn paint_copy_ticks(cmds: &mut Vec<DrawCmd>, x0: f32, x1: f32, y: f32) {
+    let s = 5.0;
+    let color = [1.0, 1.0, 1.0, 0.92];
+    let tick = |cmds: &mut Vec<DrawCmd>, tip_x: f32, inward: f32| {
+        cmds.push(DrawCmd::Line {
+            a: (tip_x, y),
+            b: (tip_x + inward, y),
+            color,
+            thickness: 1.2,
+        });
+        cmds.push(DrawCmd::Line {
+            a: (tip_x, y),
+            b: (tip_x + inward * 0.5, y + s),
+            color,
+            thickness: 1.2,
+        });
+        cmds.push(DrawCmd::Line {
+            a: (tip_x + inward, y),
+            b: (tip_x + inward * 0.5, y + s),
+            color,
+            thickness: 1.2,
+        });
+    };
+    tick(cmds, x0, s);
+    tick(cmds, x1 - s, s);
+}
+
+fn paint_one_clip(
+    cmds: &mut Vec<DrawCmd>,
+    view: &ArrangementView<'_>,
+    clip: &MixClip,
+    lane_y: f32,
+    alpha: f32,
+) {
+    let l = view.layout;
+    let rect = clip_rect(&l, clip, lane_y, view.viewing_take, view.tempo, view.sample_rate);
+    if rect.x + rect.w < l.x + HEADER_W || rect.x > l.x + l.w {
+        return;
+    }
+    let selected = view.show_selection && view.selection.clips.contains(&clip.id);
+    let mut color = theme::clip_color(clip.source_take);
+    color[3] = if selected { 0.95 * alpha } else { 0.62 * alpha };
+    cmds.push(DrawCmd::RoundedRect { rect, color, radius: 3.0 });
+    let title = Rect { x: rect.x, y: rect.y, w: rect.w, h: TITLE_H.min(rect.h) };
+    let mut title_color = color;
+    title_color[0] *= 0.55;
+    title_color[1] *= 0.55;
+    title_color[2] *= 0.55;
+    title_color[3] = if selected { 0.95 * alpha } else { 0.82 * alpha };
+    theme::fill(cmds, title, title_color);
+    cmds.push(DrawCmd::Line {
+        a: (rect.x, rect.y),
+        b: (rect.x, rect.y + rect.h),
+        color: if selected { [1.0, 1.0, 1.0, 0.85 * alpha] } else { [0.0, 0.0, 0.0, 0.55 * alpha] },
+        thickness: 1.0,
+    });
+    cmds.push(DrawCmd::Line {
+        a: (rect.x + rect.w, rect.y),
+        b: (rect.x + rect.w, rect.y + rect.h),
+        color: if selected { [1.0, 1.0, 1.0, 0.85 * alpha] } else { [0.0, 0.0, 0.0, 0.55 * alpha] },
+        thickness: 1.0,
+    });
+    if selected {
         cmds.push(DrawCmd::Line {
             a: (rect.x, rect.y),
             b: (rect.x + rect.w, rect.y),
-            color: if selected { [1.0, 1.0, 1.0, 0.85] } else { [0.0, 0.0, 0.0, 0.4] },
-            thickness: if selected { 1.2 } else { 0.6 },
+            color: [1.0, 1.0, 1.0, 0.85 * alpha],
+            thickness: 1.2,
         });
-        theme::text(
-            cmds,
-            Rect { x: rect.x + 4.0, y: rect.y + 2.0, w: 40.0, h: 12.0 },
-            format!("T{}", clip.source_take),
-            8.0,
-            [1.0, 1.0, 1.0, 0.8],
-            true,
-        );
-        paint_clip_waveform(cmds, view, clip, rect);
+        cmds.push(DrawCmd::Line {
+            a: (rect.x, rect.y + rect.h),
+            b: (rect.x + rect.w, rect.y + rect.h),
+            color: [1.0, 1.0, 1.0, 0.7 * alpha],
+            thickness: 1.0,
+        });
     }
-    if let Some((lane, a, b)) = view.bar_selection {
-        if lane == track.lane {
-            let x0 = x_of(view, a.min(b));
-            let x1 = x_of(view, a.max(b)).max(x0 + 2.0);
-            theme::fill(
-                cmds,
-                Rect { x: x0, y, w: x1 - x0, h: TRACK_H },
-                [theme::ORANGE[0], theme::ORANGE[1], theme::ORANGE[2], 0.22],
-            );
-        }
+    theme::text_clip(
+        cmds,
+        Rect { x: rect.x + 4.0, y: rect.y + 1.0, w: (rect.w - 8.0).max(4.0), h: 12.0 },
+        clip.title(view.home_take),
+        8.0,
+        [1.0, 1.0, 1.0, 0.88 * alpha],
+        selected,
+        Some(title),
+    );
+    let body = Rect {
+        x: rect.x,
+        y: rect.y + TITLE_H.min(rect.h),
+        w: rect.w,
+        h: (rect.h - TITLE_H).max(0.0),
+    };
+    if body.h > 2.0 {
+        paint_clip_waveform(cmds, view, clip, body);
     }
+    paint_fade_handles(cmds, clip, rect, alpha);
+}
+
+fn paint_fade_handles(cmds: &mut Vec<DrawCmd>, clip: &MixClip, rect: Rect, alpha: f32) {
+    if clip.fade_in_frames > 0 && clip.source_frame_count > 0 {
+        let t = (clip.fade_in_frames as f32 / clip.source_frame_count as f32).clamp(0.0, 0.5);
+        cmds.push(DrawCmd::Line {
+            a: (rect.x, rect.y + rect.h),
+            b: (rect.x + rect.w * t, rect.y + TITLE_H.min(rect.h)),
+            color: [1.0, 1.0, 1.0, 0.45 * alpha],
+            thickness: 1.0,
+        });
+    }
+    if clip.fade_out_frames > 0 && clip.source_frame_count > 0 {
+        let t = (clip.fade_out_frames as f32 / clip.source_frame_count as f32).clamp(0.0, 0.5);
+        cmds.push(DrawCmd::Line {
+            a: (rect.x + rect.w, rect.y + rect.h),
+            b: (rect.x + rect.w * (1.0 - t), rect.y + TITLE_H.min(rect.h)),
+            color: [1.0, 1.0, 1.0, 0.45 * alpha],
+            thickness: 1.0,
+        });
+    }
+}
+
+fn paint_readout(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
+    let Some(text) = view.readout else {
+        return;
+    };
+    let l = view.layout;
+    theme::fill(
+        cmds,
+        Rect { x: l.x + HEADER_W + 8.0, y: l.y + 2.0, w: 220.0, h: 16.0 },
+        [0.0, 0.0, 0.0, 0.55],
+    );
+    theme::text_mono(
+        cmds,
+        Rect { x: l.x + HEADER_W + 10.0, y: l.y + 2.0, w: 216.0, h: 14.0 },
+        text,
+        9.0,
+        theme::ORANGE,
+        true,
+    );
 }
 
 /// Visible slice only. Zoomed out: one min/max column per pixel. Zoomed in:
@@ -281,7 +710,7 @@ fn paint_clip_waveform(
     if bin_count == 0 {
         return;
     }
-    let peak = asset::waveform_display_peak(lod.max_peak);
+    let peak = asset::WAVEFORM_REF_PEAK;
     let scale = bin_count as f64 / full_width;
     let (x0, bar_w, mut bins) = if scale >= 1.0 {
         let cols = vis_w.ceil() as usize;
@@ -348,66 +777,69 @@ fn paint_clip_loading(cmds: &mut Vec<DrawCmd>, rect: Rect) {
     );
 }
 
-fn draw_grid(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>, y: f32, h: f32) {
+fn paint_bar_grid(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
     let l = view.layout;
-    let ppb = l.pixels_per_bar;
-    let layers = [(4.0, 0.08), (1.0, 0.04)];
-    for (step, op) in layers {
-        if step * ppb < 5.0 {
+    let y = l.y + RULER_H;
+    let h = (l.h - RULER_H - TIME_RULER_H).max(0.0);
+    if h < 1.0 || l.pixels_per_bar < 1.0 {
+        return;
+    }
+    let scale = bar_tick_steps(l.pixels_per_bar);
+    let ppb = f64::from(l.pixels_per_bar);
+    let (start, end) = visible_musical_bars(view);
+    let first = (start / scale.minor).floor() as i32 - 1;
+    let last = (end / scale.minor).ceil() as i32 + 1;
+    let left = l.x + HEADER_W;
+    let right = l.x + l.w;
+    for i in first..=last {
+        let bar = f64::from(i) * scale.minor;
+        let x = x_of_bar(view, bar);
+        if x < left || x > right {
             continue;
         }
-        let start = MixTime::bar_of(-view.origin, view.tempo, view.sample_rate);
-        let end = start + ((l.w + l.scroll_x) / ppb.max(1.0)) as f64 + 2.0;
-        let step = f64::from(step);
-        let mut bar = (start / step).floor() * step;
-        while bar <= end {
-            let frame = view.origin + MixTime::frame_from_bar(bar, view.tempo, view.sample_rate);
-            let x = x_of(view, frame);
-            if x >= l.x + HEADER_W && x <= l.x + l.w {
-                cmds.push(DrawCmd::Line {
-                    a: (x, y),
-                    b: (x, y + h),
-                    color: [1.0, 1.0, 1.0, op],
-                    thickness: 1.0,
-                });
-            }
-            bar += step;
-        }
-    }
-    if view.grid_enabled {
-        let step = view.grid.raw();
-        if step < 1.0 && step * ppb as f64 >= 5.0 {
-            let start = MixTime::bar_of(-view.origin, view.tempo, view.sample_rate);
-            let end = start + ((l.w + l.scroll_x) / ppb.max(1.0)) as f64 + 2.0;
-            let mut bar = (start / step).floor() * step;
-            while bar <= end {
-                let frame =
-                    view.origin + MixTime::frame_from_bar(bar, view.tempo, view.sample_rate);
-                let x = x_of(view, frame);
-                if x >= l.x + HEADER_W && x <= l.x + l.w {
-                    cmds.push(DrawCmd::Line {
-                        a: (x, y),
-                        b: (x, y + h),
-                        color: [1.0, 1.0, 1.0, 0.035],
-                        thickness: 1.0,
-                    });
-                }
-                bar += step;
-            }
+        let is_bar = on_bar_step(bar, 1.0);
+        let is_beat = on_bar_step(bar, 0.25);
+        let (op, draw) = if is_bar && ppb >= 16.0 {
+            (0.070, true)
+        } else if is_beat && 0.25 * ppb >= 18.0 {
+            (0.038, true)
+        } else if 0.0625 * ppb >= 16.0 {
+            (0.020, true)
+        } else {
+            (0.0, false)
+        };
+        if draw {
+            cmds.push(DrawCmd::Line {
+                a: (x, y),
+                b: (x, y + h),
+                color: [1.0, 1.0, 1.0, op],
+                thickness: 1.0,
+            });
         }
     }
 }
 
-fn paint_start_marker(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
+fn on_bar_step(bar: f64, step: f64) -> bool {
+    let q = bar / step;
+    (q - q.round()).abs() < 1e-6
+}
+
+fn paint_start_line(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
     let x = x_of(view, view.origin);
     let l = view.layout;
-    let h = RULER_H + view.tracks.len() as f32 * TRACK_H;
+    let h = (l.h - TIME_RULER_H).max(RULER_H);
+    // MixLink: badge frame is `x - 8`, line is `+8` inside that frame → origin x.
     cmds.push(DrawCmd::Line {
-        a: (x + 8.0, l.y),
-        b: (x + 8.0, l.y + h),
+        a: (x, l.y),
+        b: (x, l.y + h),
         color: theme::METER_GREEN,
         thickness: 1.4,
     });
+}
+
+fn paint_start_badge(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
+    let x = x_of(view, view.origin);
+    let l = view.layout;
     theme::fill(cmds, Rect { x: x - 8.0, y: l.y + 1.0, w: 50.0, h: 14.0 }, theme::METER_GREEN);
     theme::text_mono(
         cmds,
@@ -462,7 +894,8 @@ fn paint_time_ruler(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>) {
     }
 }
 
-/// MixLink `drawTimeRuler` — major ticks with 9 medium mono clock labels.
+/// Ableton-style clock ruler: short ticks along the top edge, labels below,
+/// and majors kept far enough apart that tenths never form a comb.
 fn paint_time_ticks(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>, y: f32) {
     let l = view.layout;
     let rate = view.sample_rate.max(1.0);
@@ -470,18 +903,21 @@ fn paint_time_ticks(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>, y: f32)
     if pps <= 0.01 || l.w <= HEADER_W + 1.0 {
         return;
     }
-    let (major, minor) = time_tick_steps(pps);
+    let scale = time_tick_steps(pps);
     let start_sec = frame_at(l.x + HEADER_W, &l, view.tempo, rate) as f64 / rate;
     let end_sec = frame_at(l.x + l.w, &l, view.tempo, rate) as f64 / rate;
-    let first_minor = ((start_sec / minor).floor() as i32).max(0);
-    let last_minor = (end_sec / minor).ceil() as i32;
+    let first_minor = ((start_sec / scale.minor).floor() as i32).max(0);
+    let last_minor = (end_sec / scale.minor).ceil() as i32;
     if first_minor > last_minor {
         return;
     }
-    let majors_every = ((major / minor).round() as i32).max(1);
+    let majors_every = ((scale.major / scale.minor).round() as i32).max(1);
+    let mids_every = ((scale.mid / scale.minor).round() as i32).max(1);
+    let draw_mid = scale.mid * pps >= 16.0;
+    let draw_minor = scale.minor * pps >= 40.0;
     let edge = l.x + l.w;
     for i in first_minor..=last_minor {
-        let t = i as f64 * minor;
+        let t = i as f64 * scale.minor;
         let frame = (t * rate).round() as i64;
         let x = x_of(view, frame);
         if x < l.x + HEADER_W - 2.0 || x > edge + 2.0 {
@@ -489,55 +925,69 @@ fn paint_time_ticks(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>, y: f32)
         }
         if i % majors_every == 0 {
             cmds.push(DrawCmd::Line {
-                a: (x, y),
-                b: (x, y + 12.0),
-                color: [1.0, 1.0, 1.0, 0.42],
+                a: (x, y + 1.0),
+                b: (x, y + 6.0),
+                color: [1.0, 1.0, 1.0, 0.28],
                 thickness: 1.0,
             });
             if x < edge - 8.0 {
                 theme::text_mono(
                     cmds,
-                    Rect { x: x + 4.0, y: y + 3.0, w: 48.0, h: 12.0 },
+                    Rect { x: x + 3.0, y: y + 8.0, w: 48.0, h: 12.0 },
                     MixTime::format_clock_seconds(t),
-                    9.0,
-                    theme::TEXT_DIM,
+                    8.0,
+                    [1.0, 1.0, 1.0, 0.40],
                     false,
                 );
             }
-        } else {
+        } else if draw_mid && i % mids_every == 0 {
             cmds.push(DrawCmd::Line {
-                a: (x, y),
-                b: (x, y + 7.0),
-                color: [1.0, 1.0, 1.0, 0.22],
+                a: (x, y + 1.0),
+                b: (x, y + 4.0),
+                color: [1.0, 1.0, 1.0, 0.14],
+                thickness: 1.0,
+            });
+        } else if draw_minor {
+            cmds.push(DrawCmd::Line {
+                a: (x, y + 1.0),
+                b: (x, y + 2.5),
+                color: [1.0, 1.0, 1.0, 0.08],
                 thickness: 1.0,
             });
         }
     }
 }
 
-fn time_tick_steps(pixels_per_second: f64) -> (f64, f64) {
-    const MIN_MAJOR: f64 = 52.0;
-    const STEPS: [(f64, f64); 13] = [
-        (0.1, 0.02),
-        (0.2, 0.05),
-        (0.5, 0.1),
-        (1.0, 0.25),
-        (2.0, 0.5),
-        (5.0, 1.0),
-        (10.0, 2.0),
-        (15.0, 5.0),
-        (30.0, 5.0),
-        (60.0, 10.0),
-        (120.0, 30.0),
-        (300.0, 60.0),
-        (600.0, 120.0),
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TimeTickScale {
+    major: f64,
+    mid: f64,
+    minor: f64,
+}
+
+/// 1–2–5 majors with ~90px of label room — same cadence as Live's time ruler.
+fn time_tick_steps(pixels_per_second: f64) -> TimeTickScale {
+    // (major, mid, minor, min pixels per labeled major)
+    const STEPS: [(f64, f64, f64, f64); 12] = [
+        (0.1, 0.05, 0.01, 160.0),
+        (0.5, 0.1, 0.05, 320.0),
+        (1.0, 0.25, 0.05, 90.0),
+        (2.0, 0.5, 0.1, 88.0),
+        (5.0, 1.0, 0.5, 88.0),
+        (10.0, 2.0, 1.0, 88.0),
+        (15.0, 5.0, 1.0, 88.0),
+        (30.0, 10.0, 5.0, 88.0),
+        (60.0, 15.0, 5.0, 88.0),
+        (120.0, 30.0, 10.0, 88.0),
+        (300.0, 60.0, 15.0, 88.0),
+        (600.0, 120.0, 30.0, 88.0),
     ];
-    for (major, minor) in STEPS {
-        if major * pixels_per_second >= MIN_MAJOR {
-            return (major, minor);
+    for (major, mid, minor, min_px) in STEPS {
+        if major * pixels_per_second >= min_px {
+            return TimeTickScale { major, mid, minor };
         }
     }
-    (1200.0, 300.0)
+    TimeTickScale { major: 1200.0, mid: 300.0, minor: 60.0 }
 }
 
 pub fn visible_bars(last: i64, play: i64, origin: i64, tempo: f64, rate: f64) -> i32 {
@@ -546,15 +996,20 @@ pub fn visible_bars(last: i64, play: i64, origin: i64, tempo: f64, rate: f64) ->
 }
 
 pub fn frame_at(x: f32, layout: &ArrangementLayout, tempo: f64, rate: f64) -> i64 {
-    let local = ((x - layout.x - HEADER_W) + layout.scroll_x).max(0.0);
-    MixTime::frame_from_bar((local / layout.pixels_per_bar.max(1.0)) as f64, tempo, rate)
+    let local =
+        f64::from(x) - f64::from(layout.x) - f64::from(HEADER_W) + f64::from(layout.scroll_x);
+    MixTime::frame_from_bar(
+        (local / f64::from(layout.pixels_per_bar.max(1.0))).max(0.0),
+        tempo,
+        rate,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use asset::WaveformLod;
-    use project::{MixClip, MixLane, MixTrack};
+    use project::{ArrSelection, MixClip, MixLane, MixTrack};
 
     #[test]
     fn zoomed_in_waveform_stays_viewport_sized() {
@@ -569,15 +1024,17 @@ mod tests {
             },
         );
         let mut track = MixTrack::empty(MixLane::Strip(0), Some("Ch 1".into()));
-        track.clips = vec![MixClip {
-            id: uuid::Uuid::nil(),
-            source_take: 1,
-            source_lane: MixLane::Strip(0),
-            source_file: "clip.wav".into(),
-            source_start_frame: 0,
-            source_frame_count: 10_000 * asset::SAMPLES_PER_BIN as i64,
-            mix_start_frame: 0,
-        }];
+        let mut clip = MixClip::new(
+            1,
+            MixLane::Strip(0),
+            "clip.wav",
+            0,
+            10_000 * asset::SAMPLES_PER_BIN as i64,
+            0,
+            10_000 * asset::SAMPLES_PER_BIN as i64,
+        );
+        clip.id = uuid::Uuid::nil();
+        track.clips = vec![clip];
         let view = ArrangementView {
             layout: ArrangementLayout {
                 x: 0.0,
@@ -591,7 +1048,7 @@ mod tests {
             mix: None,
             tracks: std::slice::from_ref(&track),
             selected_lane: None,
-            selected_clips: &[],
+            selection: &ArrSelection::default(),
             playhead: 0,
             origin: 0,
             tempo: 120.0,
@@ -599,8 +1056,12 @@ mod tests {
             grid: MixGrid::Bar1,
             grid_enabled: false,
             viewing_take: false,
-            bar_selection: None,
+            home_take: None,
+            drag_preview: None,
+            readout: None,
             waveforms: Some(&cache),
+            show_selection: true,
+            hide_clip_ids: &[],
         };
         let cmds = paint(&view);
         let (bins, bar_w) = cmds
@@ -620,15 +1081,9 @@ mod tests {
         let cache = WaveformCache::new();
         cache.mark_loading("clip.wav");
         let mut track = MixTrack::empty(MixLane::Strip(0), Some("Ch 1".into()));
-        track.clips = vec![MixClip {
-            id: uuid::Uuid::nil(),
-            source_take: 1,
-            source_lane: MixLane::Strip(0),
-            source_file: "clip.wav".into(),
-            source_start_frame: 0,
-            source_frame_count: 48_000,
-            mix_start_frame: 0,
-        }];
+        let mut clip = MixClip::new(1, MixLane::Strip(0), "clip.wav", 0, 48_000, 0, 48_000);
+        clip.id = uuid::Uuid::nil();
+        track.clips = vec![clip];
         let cmds = paint(&ArrangementView {
             layout: ArrangementLayout {
                 x: 0.0,
@@ -642,7 +1097,7 @@ mod tests {
             mix: None,
             tracks: std::slice::from_ref(&track),
             selected_lane: None,
-            selected_clips: &[],
+            selection: &ArrSelection::default(),
             playhead: 0,
             origin: 0,
             tempo: 120.0,
@@ -650,8 +1105,12 @@ mod tests {
             grid: MixGrid::Bar1,
             grid_enabled: false,
             viewing_take: false,
-            bar_selection: None,
+            home_take: None,
+            drag_preview: None,
+            readout: None,
             waveforms: Some(&cache),
+            show_selection: true,
+            hide_clip_ids: &[],
         });
         let loading = cmds.iter().any(|c| match c {
             DrawCmd::Text(t) => t.text == "Loading",
@@ -681,7 +1140,7 @@ mod tests {
             mix: None,
             tracks: std::slice::from_ref(&track),
             selected_lane: None,
-            selected_clips: &[],
+            selection: &ArrSelection::default(),
             playhead: 0,
             origin: 0,
             tempo: 120.0,
@@ -689,8 +1148,12 @@ mod tests {
             grid: MixGrid::Bar1,
             grid_enabled: false,
             viewing_take: false,
-            bar_selection: None,
+            home_take: None,
+            drag_preview: None,
+            readout: None,
             waveforms: None,
+            show_selection: true,
+            hide_clip_ids: &[],
         });
         let clips: Vec<Rect> = cmds
             .iter()
@@ -701,5 +1164,257 @@ mod tests {
             .collect();
         assert!(!clips.is_empty());
         assert!(clips.iter().all(|r| r.x >= 147.9 && r.x + r.w <= 948.1));
+    }
+
+    #[test]
+    fn time_select_keeps_the_nearest_lane_when_the_cursor_leaves() {
+        let layout = ArrangementLayout {
+            x: 0.0,
+            y: 0.0,
+            w: 800.0,
+            h: 400.0,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            pixels_per_bar: 48.0,
+        };
+        assert_eq!(track_index_clamped(&layout, -20.0, 4), Some(0));
+        assert_eq!(track_index_clamped(&layout, layout.y + RULER_H + TRACK_H * 10.0, 4), Some(3));
+        assert_eq!(track_index_at(&layout, -20.0, 4), None);
+    }
+
+    #[test]
+    fn start_line_and_playhead_share_x_when_located_at_origin() {
+        let track = MixTrack::empty(MixLane::Strip(0), Some("Ch 1".into()));
+        let layout = ArrangementLayout {
+            x: 148.0,
+            y: 40.0,
+            w: 800.0,
+            h: 400.0,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            pixels_per_bar: 48.0,
+        };
+        let origin = 48_000;
+        let cmds = paint(&ArrangementView {
+            layout,
+            mix: None,
+            tracks: std::slice::from_ref(&track),
+            selected_lane: None,
+            selection: &ArrSelection::default(),
+            playhead: origin,
+            origin,
+            tempo: 120.0,
+            sample_rate: 48_000.0,
+            grid: MixGrid::Bar1,
+            grid_enabled: false,
+            viewing_take: false,
+            home_take: None,
+            drag_preview: None,
+            readout: None,
+            waveforms: None,
+            show_selection: true,
+            hide_clip_ids: &[],
+        });
+        let start_x = cmds.iter().find_map(|c| match c {
+            DrawCmd::Line { a, color, thickness, .. }
+                if *color == theme::METER_GREEN && *thickness > 1.3 =>
+            {
+                Some(a.0)
+            }
+            _ => None,
+        });
+        let play_x = cmds.iter().find_map(|c| match c {
+            DrawCmd::Line { a, color, thickness, .. }
+                if *color == theme::ORANGE && *thickness > 1.1 =>
+            {
+                Some(a.0)
+            }
+            _ => None,
+        });
+        assert_eq!(start_x, play_x);
+        assert!(start_x.is_some());
+    }
+
+    #[test]
+    fn frame_x_round_trips_at_wide_and_narrow_zoom() {
+        let layout_at = |ppb: f32| ArrangementLayout {
+            x: 148.0,
+            y: 40.0,
+            w: 800.0,
+            h: 400.0,
+            scroll_x: 120.0,
+            scroll_y: 0.0,
+            pixels_per_bar: ppb,
+        };
+        for ppb in [10.0, 48.0, 240.0, 4_000.0] {
+            let layout = layout_at(ppb);
+            for frame in [0, 24_000, 48_000, 192_000] {
+                let x = x_of_frame(&layout, frame, 120.0, 48_000.0);
+                let back = frame_at(x, &layout, 120.0, 48_000.0);
+                assert!((back - frame).abs() <= 1, "ppb={ppb} frame={frame} x={x} back={back}");
+            }
+        }
+    }
+
+    #[test]
+    fn time_ruler_matches_ableton_label_cadence() {
+        // Live at ~2.5 min across ~1400px (~9 px/s) labels every 10 seconds.
+        assert_eq!(time_tick_steps(9.3).major, 10.0);
+        // Close zoom like the MixLink screenshot (~1.6s across ~1000px): 1s, not tenths.
+        let close = time_tick_steps(625.0);
+        assert_eq!(close.major, 1.0);
+        assert!(close.mid >= 0.2);
+        // Tenths stay unlabeled until each tenth is ~160px.
+        assert!(time_tick_steps(1_200.0).major >= 0.5);
+        assert_eq!(time_tick_steps(2_000.0).major, 0.1);
+    }
+
+    #[test]
+    fn time_ruler_stays_sparse_at_close_zoom() {
+        let track = MixTrack::empty(MixLane::Strip(0), Some("Ch 1".into()));
+        // 120 BPM, 1 bar = 2s. 1250 px/bar → 625 px/s, ~1.6s of timeline.
+        let cmds = paint(&ArrangementView {
+            layout: ArrangementLayout {
+                x: 0.0,
+                y: 0.0,
+                w: 1_100.0,
+                h: 400.0,
+                scroll_x: 0.0,
+                scroll_y: 0.0,
+                pixels_per_bar: 1_250.0,
+            },
+            mix: None,
+            tracks: std::slice::from_ref(&track),
+            selected_lane: None,
+            selection: &ArrSelection::default(),
+            playhead: 0,
+            origin: 0,
+            tempo: 120.0,
+            sample_rate: 48_000.0,
+            grid: MixGrid::Bar1,
+            grid_enabled: false,
+            viewing_take: false,
+            home_take: None,
+            drag_preview: None,
+            readout: None,
+            waveforms: None,
+            show_selection: true,
+            hide_clip_ids: &[],
+        });
+        let ruler_top = 400.0 - TIME_RULER_H;
+        let labels: Vec<&str> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                DrawCmd::Text(t)
+                    if t.monospaced && t.rect.y >= ruler_top + 6.0 && t.rect.x >= HEADER_W =>
+                {
+                    Some(t.text.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            labels.len() <= 4,
+            "close zoom should label seconds, not tenths: {labels:?}"
+        );
+        assert!(labels.iter().any(|s| *s == "0:00"), "{labels:?}");
+        assert!(labels.iter().all(|s| !s.contains('.')), "no tenth labels: {labels:?}");
+        let ticks = cmds
+            .iter()
+            .filter(|c| match c {
+                DrawCmd::Line { a, b, color, thickness } => {
+                    *thickness <= 1.01
+                        && (a.1 - (ruler_top + 1.0)).abs() < 0.2
+                        && b.1 - a.1 <= 5.5
+                        && color[3] <= 0.30
+                }
+                _ => false,
+            })
+            .count();
+        assert!(ticks <= 12, "tick comb: {ticks}");
+    }
+
+    fn bar_labels(cmds: &[DrawCmd], layout_y: f32) -> Vec<String> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                DrawCmd::Text(t)
+                    if t.monospaced
+                        && t.rect.y >= layout_y + 6.0
+                        && t.rect.y < layout_y + RULER_H
+                        && t.rect.x >= HEADER_W
+                        && t.text != "▶ START" =>
+                {
+                    Some(t.text.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn paint_bars(ppb: f32, w: f32) -> Vec<DrawCmd> {
+        let track = MixTrack::empty(MixLane::Strip(0), Some("Ch 1".into()));
+        paint(&ArrangementView {
+            layout: ArrangementLayout {
+                x: 0.0,
+                y: 0.0,
+                w,
+                h: 400.0,
+                scroll_x: 0.0,
+                scroll_y: 0.0,
+                pixels_per_bar: ppb,
+            },
+            mix: None,
+            tracks: std::slice::from_ref(&track),
+            selected_lane: None,
+            selection: &ArrSelection::default(),
+            playhead: 0,
+            origin: 0,
+            tempo: 120.0,
+            sample_rate: 48_000.0,
+            grid: MixGrid::Bar1,
+            grid_enabled: false,
+            viewing_take: false,
+            home_take: None,
+            drag_preview: None,
+            readout: None,
+            waveforms: None,
+            show_selection: true,
+            hide_clip_ids: &[],
+        })
+    }
+
+    #[test]
+    fn bar_labels_follow_ableton_truncation() {
+        assert_eq!(format_bar_label(0.0), "0");
+        assert_eq!(format_bar_label(1.0), "1");
+        assert_eq!(format_bar_label(2.25), "2.2");
+        assert_eq!(format_bar_label(2.5), "2.3");
+        assert_eq!(format_bar_label(2.75), "2.4");
+        assert_eq!(format_bar_label(2.3125), "2.2.2");
+        assert_eq!(format_bar_label(3.0), "3");
+        assert_eq!(format_bar_label(-1.25), "-1.2");
+    }
+
+    #[test]
+    fn bar_ruler_picks_ableton_zoom_steps() {
+        assert_eq!(bar_tick_steps(2_000.0).label, 0.0625);
+        assert_eq!(bar_tick_steps(180.0).label, 0.25);
+        assert_eq!(bar_tick_steps(48.0).label, 1.0);
+        assert!(bar_tick_steps(18.0).label >= 2.0);
+    }
+
+    #[test]
+    fn bar_ruler_shows_beats_then_sixteenths() {
+        let beat = bar_labels(&paint_bars(180.0, 1_100.0), 0.0);
+        assert!(beat.iter().any(|s| s == "1"), "{beat:?}");
+        assert!(beat.iter().any(|s| s == "1.2"), "{beat:?}");
+        assert!(beat.iter().all(|s| s != "0" && !s.ends_with(".1")), "{beat:?}");
+
+        let bars_only = bar_labels(&paint_bars(48.0, 800.0), 0.0);
+        assert!(bars_only.iter().any(|s| s == "1"), "{bars_only:?}");
+        assert!(bars_only.iter().all(|s| !s.contains('.')), "{bars_only:?}");
+
+        let sixteenths = bar_labels(&paint_bars(1_600.0, 1_100.0), 0.0);
+        assert!(sixteenths.iter().any(|s| s.contains(".2.")), "{sixteenths:?}");
     }
 }

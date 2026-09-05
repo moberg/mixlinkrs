@@ -43,6 +43,8 @@ pub enum MenuAction {
     InsertBundle { insert: uuid::Uuid },
     MixContext { id: uuid::Uuid },
     TakeContext { number: i32 },
+    Arrange,
+    Grid,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

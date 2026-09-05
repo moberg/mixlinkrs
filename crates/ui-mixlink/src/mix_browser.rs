@@ -117,12 +117,7 @@ pub fn row_rect(view: &MixBrowserView<'_>, hit: BrowserHit) -> Option<Rect> {
     match hit {
         BrowserHit::Mix(id) => {
             let i = view.mixes.iter().position(|m| m.id == id)?;
-            Some(Rect {
-                x: view.x,
-                y: view.y + MIX_LIST_TOP + i as f32 * ROW_H,
-                w: WIDTH,
-                h: 22.0,
-            })
+            Some(Rect { x: view.x, y: view.y + MIX_LIST_TOP + i as f32 * ROW_H, w: WIDTH, h: 22.0 })
         }
         BrowserHit::Take(number) => {
             let i = view.takes.iter().position(|n| *n == number)?;
@@ -207,7 +202,9 @@ mod tests {
             mixer_collapsed: false,
         };
         let mix_rect = row_rect(&view, BrowserHit::Mix(id)).unwrap();
-        assert!(matches!(hit(&view, 20.0, mix_rect.y + 4.0), Some(BrowserHit::Mix(found)) if found == id));
+        assert!(
+            matches!(hit(&view, 20.0, mix_rect.y + 4.0), Some(BrowserHit::Mix(found)) if found == id)
+        );
         let take_rect = row_rect(&view, BrowserHit::Take(20)).unwrap();
         assert!(matches!(hit(&view, 20.0, take_rect.y + 4.0), Some(BrowserHit::Take(20))));
     }

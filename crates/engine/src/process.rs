@@ -316,14 +316,10 @@ impl Engine {
             }
             let mix = mix_gain(&schedule, tap_i);
             let muted = record_muted(&schedule, tap_i) || mix.muted;
-            let (gain_l, gain_r) = if muted {
-                (0.0, 0.0)
-            } else {
-                stereo_pan_amps(mix.gain, mix.pan)
-            };
+            let (gain_l, gain_r) =
+                if muted { (0.0, 0.0) } else { stereo_pan_amps(mix.gain, mix.pan) };
             let peak = if tap.channel_l >= 0 {
-                peak_from_input(&input, tap.channel_l, tap.channel_r, frames)
-                    * gain_l.max(gain_r)
+                peak_from_input(&input, tap.channel_l, tap.channel_r, frames) * gain_l.max(gain_r)
             } else {
                 0.0
             };
@@ -542,11 +538,7 @@ fn hold_plugin_taps(
         }
         let mix = mix_gain(schedule, tap_i);
         let muted = record_muted(schedule, tap_i) || mix.muted;
-        let (gain_l, gain_r) = if muted {
-            (0.0, 0.0)
-        } else {
-            stereo_pan_amps(mix.gain, mix.pan)
-        };
+        let (gain_l, gain_r) = if muted { (0.0, 0.0) } else { stereo_pan_amps(mix.gain, mix.pan) };
         let peak = peak_of(&engine.scratch_out_l[..frames], &engine.scratch_out_r[..frames])
             * gain_l.max(gain_r);
         hold_peak(&engine.peaks[tap_i], peak);
@@ -863,10 +855,7 @@ mod tests {
         let mut mix_l = [0.0f32; 8];
         let mut mix_r = [0.0f32; 8];
         assert_eq!(engine.copy_record_frames(0, &mut left, &mut right), 8);
-        assert_eq!(
-            engine.copy_record_frames(engine_api::MASTER_TAP, &mut mix_l, &mut mix_r),
-            8
-        );
+        assert_eq!(engine.copy_record_frames(engine_api::MASTER_TAP, &mut mix_l, &mut mix_r), 8);
         assert!((left[0] - 0.8).abs() < 1e-6);
         assert_eq!(right[0], 0.0);
         assert!((mix_l[0] - 0.8).abs() < 1e-6);
