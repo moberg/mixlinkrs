@@ -272,6 +272,9 @@ fn paint_strip(
         if let StripKind::Input(i) = kind {
             for lane in sends {
                 name_bar(cmds, x, y, w, first_input, Some(*lane), view.engine);
+                if first_input {
+                    paint_control_with_pan(cmds, view, sends, *lane, extras);
+                }
                 y += Layout::SEND_NAME_BAR;
                 let aux = view.engine.surface.strips[i].aux(*lane);
                 let row_h = Layout::send_row_h(*lane);
@@ -298,20 +301,6 @@ fn paint_strip(
         for lane in sends {
             name_bar(cmds, x, y, w, false, None, view.engine);
             y += Layout::SEND_NAME_BAR;
-            if matches!(kind, StripKind::Return(ReturnLane::SendC))
-                && sends.len() >= 3
-                && *lane == ReturnLane::SendC
-            {
-                let box_r = Rect { x: x + 10.0, y: y + 10.0, w: w - 16.0, h: 24.0 };
-                widgets::checkbox(
-                    cmds,
-                    box_r.x,
-                    box_r.y,
-                    view.engine.config.pan_knobs_control_send_c,
-                    "Control with Pan",
-                );
-                extras.push((box_r, MixerExtraHit::ControlWithPan));
-            }
             y += Layout::send_row_h(*lane);
         }
     }
@@ -452,7 +441,7 @@ fn name_bar(
 ) {
     if show_title {
         let label = if let Some(lane) = lane {
-            format!("SEND {} · {}", lane.strip_title(), engine.return_display_name(lane))
+            send_lane_title(lane, &engine.return_display_name(lane))
         } else {
             "PAN".into()
         };
@@ -465,6 +454,34 @@ fn name_bar(
             false,
         );
     }
+}
+
+fn send_lane_title(lane: ReturnLane, return_name: &str) -> String {
+    format!("SEND {} · {}", lane.strip_title(), return_name)
+}
+
+fn paint_control_with_pan(
+    cmds: &mut Vec<DrawCmd>,
+    view: &MixerView<'_>,
+    sends: &[ReturnLane],
+    lane: ReturnLane,
+    extras: &mut Vec<(Rect, MixerExtraHit)>,
+) {
+    if lane != ReturnLane::SendC {
+        return;
+    }
+    let name = view.engine.return_display_name(lane);
+    let Some(hit) = control_with_pan_rect(&view.layout, sends.len(), &name) else {
+        return;
+    };
+    widgets::checkbox(
+        cmds,
+        hit.x,
+        hit.y + (hit.h - CONTROL_WITH_PAN_BOX) * 0.5,
+        view.engine.config.pan_knobs_control_send_c,
+        CONTROL_WITH_PAN_LABEL,
+    );
+    extras.push((hit, MixerExtraHit::ControlWithPan));
 }
 
 fn peak_for(view: &MixerView<'_>, kind: StripKind) -> f32 {
@@ -747,26 +764,53 @@ pub fn strip_at(layout: &MixerLayout, send_count: usize, x: f32, _y: f32) -> Opt
     None
 }
 
-pub fn control_with_pan_rect(layout: &MixerLayout, send_count: usize) -> Option<Rect> {
+const CONTROL_WITH_PAN_LABEL: &str = "Control with Pan";
+const CONTROL_WITH_PAN_BOX: f32 = 14.0;
+/// Checkbox (14) + gap to label (6) + `widgets::checkbox` label width (110).
+const CONTROL_WITH_PAN_HIT_W: f32 = 130.0;
+const SEND_TITLE_SIZE: f32 = 9.0;
+
+/// Hit rect on the Send C name bar, immediately to the right of `SEND C · {name}`.
+/// Only when there are ≥3 effect returns (MixLink: Control with Pan is Send C only).
+pub fn control_with_pan_rect(
+    layout: &MixerLayout,
+    send_count: usize,
+    return_name: &str,
+) -> Option<Rect> {
     if send_count < 3 {
         return None;
     }
-    let mut sx = layout.x + Layout::MIXER_LEADING + 4.0 - layout.scroll_x;
-    sx += layout.ch_w * 8.0 + 1.0;
-    let sends = ALL_SEND_LANES.iter().copied().take(send_count.max(2).min(6)).collect::<Vec<_>>();
-    let Some(i) = sends.iter().position(|l| *l == ReturnLane::SendC) else {
+    let n = send_count.max(2).min(6);
+    let Some(i) = ALL_SEND_LANES.iter().take(n).position(|l| *l == ReturnLane::SendC) else {
         return None;
     };
-    let x = sx + i as f32 * layout.ch_w;
-    let mut y = layout.y + Layout::GROUP_HEADER + Layout::ENABLE_ROW;
-    for lane in &sends {
-        if *lane == ReturnLane::SendC {
-            y += Layout::SEND_NAME_BAR;
-            return Some(Rect { x: x + 8.0, y: y + 6.0, w: layout.ch_w - 12.0, h: 24.0 });
-        }
-        y += Layout::SEND_NAME_BAR + Layout::send_row_h(*lane);
-    }
-    None
+    let (sx, sw) = strip_frame(layout, send_count, StripKind::Input(0));
+    let y = layout.y
+        + Layout::GROUP_HEADER
+        + Layout::ENABLE_ROW
+        + ALL_SEND_LANES.iter().take(i).copied().map(Layout::send_lane_h).sum::<f32>();
+    let title = send_lane_title(ReturnLane::SendC, return_name);
+    let title_w = send_title_advance(&title).min((sw - 8.0).max(0.0));
+    Some(Rect {
+        x: sx + 6.0 + title_w + 10.0,
+        y,
+        w: CONTROL_WITH_PAN_HIT_W,
+        h: Layout::SEND_NAME_BAR,
+    })
+}
+
+fn send_title_advance(s: &str) -> f32 {
+    s.chars()
+        .map(|ch| {
+            SEND_TITLE_SIZE
+                * match ch {
+                    ' ' | '.' | '·' | ',' | ':' | ';' | 'i' | 'l' | 'I' | 'j' | 't' | 'f'
+                    | '\'' => 0.36,
+                    'm' | 'M' | 'w' | 'W' => 1.00,
+                    _ => 0.70,
+                }
+        })
+        .sum()
 }
 
 #[cfg(test)]
@@ -810,5 +854,30 @@ mod tests {
             "max_scroll={} at window {w}",
             layout.max_scroll_x(3)
         );
+    }
+
+    #[test]
+    fn control_with_pan_sits_on_send_c_name_bar() {
+        let layout = MixerLayout::new(0.0, 0.0, 1600.0, 900.0, 3);
+        let r = control_with_pan_rect(&layout, 3, "No effect").expect("Send C title-bar hit");
+        let bar_y = layout.y
+            + Layout::GROUP_HEADER
+            + Layout::ENABLE_ROW
+            + Layout::send_lane_h(ReturnLane::SendA)
+            + Layout::send_lane_h(ReturnLane::SendB);
+        assert!((r.y - bar_y).abs() < 0.01);
+        assert!((r.h - Layout::SEND_NAME_BAR).abs() < 0.01);
+        let (sx, _) = strip_frame(&layout, 3, StripKind::Input(0));
+        assert!(r.x >= sx + 6.0, "checkbox should sit after the title, got x={}", r.x);
+        let (cx, _) = strip_frame(&layout, 3, StripKind::Return(ReturnLane::SendC));
+        assert!(r.x + r.w < cx, "must not land on the Send C return strip");
+        // First-channel title slot — checkbox is to the right of that text.
+        assert!(r.x >= sx + 20.0);
+    }
+
+    #[test]
+    fn control_with_pan_hidden_without_send_c() {
+        let layout = MixerLayout::new(0.0, 0.0, 1600.0, 900.0, 2);
+        assert!(control_with_pan_rect(&layout, 2, "No effect").is_none());
     }
 }

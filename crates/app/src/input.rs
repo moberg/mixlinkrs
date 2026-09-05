@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use analog::MixAssign;
+use analog::{MixAssign, ReturnLane};
 use project::{ArrSelection, MixTime};
 use ui_mixlink::chrome::{self, ChromeHit, Page, HEADER_H};
 use ui_mixlink::hit::{self, Hit, Pad};
@@ -216,20 +216,17 @@ impl AppState {
         }
 
         let (bx, by, bw, bh) = self.chrome.body_rect();
-        let layout = MixerLayout::new(
-            bx,
-            by,
-            bw,
-            bh,
-            self.surface.analog.config.effect_return_count as usize,
-        );
-        if let Some(rect) = ui_mixlink::mixer::control_with_pan_rect(
-            &layout,
-            self.surface.analog.config.effect_return_count as usize,
-        ) {
+        let send_count = self.surface.analog.config.effect_return_count as usize;
+        let mut layout = MixerLayout::new(bx, by, bw, bh, send_count);
+        layout.scroll_x = self.chrome.mixer_scroll;
+        let return_name = self.surface.analog.return_display_name(ReturnLane::SendC);
+        if let Some(rect) =
+            ui_mixlink::mixer::control_with_pan_rect(&layout, send_count, &return_name)
+        {
             if overlay::contains(rect, x, y) {
                 let on = !self.surface.analog.config.pan_knobs_control_send_c;
                 self.surface.analog.set_pan_knobs_control_send_c(on);
+                self.sync_xl_leds(true);
                 return;
             }
         }

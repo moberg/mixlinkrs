@@ -174,6 +174,30 @@ mod tests {
     }
 
     #[test]
+    fn send_c_return_name_row_still_hits_name() {
+        let layout = MixerLayout::new(0.0, 0.0, 1600.0, 900.0, 3);
+        let y = name_y(&layout, 3);
+        let (sx, sw) = mixer::strip_frame(&layout, 3, StripKind::Return(ReturnLane::SendC));
+        match hit_mixer(&layout, 3, sx + sw * 0.5, y) {
+            Some(Hit::Name { kind: StripKind::Return(ReturnLane::SendC) }) => {}
+            other => panic!("Send C name row should stay Hit::Name, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_c_title_bar_checkbox_is_not_a_knob_or_name() {
+        let layout = MixerLayout::new(0.0, 0.0, 1600.0, 900.0, 3);
+        let r = mixer::control_with_pan_rect(&layout, 3, "No effect")
+            .expect("Control with Pan on Send C title bar");
+        match hit_mixer(&layout, 3, r.x + 8.0, r.y + r.h * 0.5) {
+            None => {}
+            Some(Hit::Knob { .. }) => panic!("title-bar checkbox must not steal a send knob"),
+            Some(Hit::Name { .. }) => panic!("title-bar checkbox must not steal a name/menu hit"),
+            other => panic!("title-bar checkbox should be extras-only, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn main_name_row_hits_name_but_is_not_a_menu_kind() {
         let layout = MixerLayout::new(0.0, 0.0, 1600.0, 900.0, 2);
         let (sx, sw) = mixer::strip_frame(&layout, 2, StripKind::Main);

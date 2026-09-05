@@ -3,7 +3,7 @@
 use analog::{AnalogEngine, ChannelID, MixerBus, RoutingSlot};
 use render::{DrawCmd, Rect};
 
-use crate::chrome::{HEADER_H, HEADER_TRAFFIC_INSET};
+use crate::chrome::HEADER_H;
 use crate::theme::{self, Layout};
 use crate::widgets::{self, MenuItem};
 
@@ -25,20 +25,25 @@ pub const WINDOW_CLOSE_W: f32 = 72.0;
 pub const WINDOW_CLOSE_H: f32 = 26.0;
 pub const WINDOW_CLOSE_PAD: f32 = 16.0;
 
-const CHANNELS_PAD_X: f32 = 16.0;
-const CHANNELS_MIX_OUT_Y: f32 = 10.0;
-const CHANNELS_MIX_OUT_H: f32 = 24.0;
-const CHANNELS_TITLE_Y: f32 = 42.0;
-const CHANNELS_TITLE_H: f32 = 20.0;
-const CHANNELS_LIST_Y: f32 = 68.0;
-const CHANNELS_ROW_H: f32 = 24.0;
-const CHANNELS_ROW_STRIDE: f32 = 28.0;
-const CHANNELS_LABEL_W: f32 = 140.0;
-const CHANNELS_LABEL_GAP: f32 = 8.0;
-const CHANNELS_BOTTOM_PAD: f32 = WINDOW_CLOSE_PAD + WINDOW_CLOSE_H + 12.0;
-const CHANNELS_PANEL_INSET: f32 = 8.0;
-/// MixLink `MixLinkTheme.button` — column divider.
-const CHANNELS_DIVIDER: theme::Color = [0.22, 0.22, 0.24, 1.0];
+/// Shared Settings / Channels document card (inset, title band, field grid).
+const DOC_PANEL_INSET: f32 = 18.0;
+const DOC_TITLE_Y: f32 = 10.0;
+const DOC_TITLE_H: f32 = 22.0;
+const DOC_CONTENT_Y: f32 = 40.0;
+const DOC_ROW_H: f32 = 24.0;
+const DOC_ROW_STRIDE: f32 = 32.0;
+const DOC_PAD_X: f32 = 16.0;
+const DOC_FIELD_X: f32 = 140.0;
+const DOC_FIELD_W: f32 = 260.0;
+const DOC_LABEL_W: f32 = 140.0;
+const DOC_LABEL_SIZE: f32 = 14.0;
+const DOC_SECTION_GAP: f32 = 40.0;
+const DOC_CLOSE_RESERVE: f32 = WINDOW_CLOSE_PAD + WINDOW_CLOSE_H + 10.0;
+
+const CHANNELS_PAD_X: f32 = DOC_PAD_X;
+const CHANNELS_ROW_H: f32 = DOC_ROW_H;
+const CHANNELS_ROW_STRIDE: f32 = DOC_ROW_STRIDE;
+const CHANNELS_LABEL_W: f32 = DOC_LABEL_W;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChannelsHit {
@@ -163,7 +168,7 @@ pub fn paint_settings(
     (cmds, rect)
 }
 
-/// Full-window Channels chrome (MixLink `ChannelNamesView`). Settings panel language.
+/// Full-window Channels chrome — same document card / title / field grid as Settings.
 pub fn paint_channels(
     engine: &AnalogEngine,
     w: f32,
@@ -173,18 +178,22 @@ pub fn paint_channels(
     scroll: f32,
 ) -> (Vec<DrawCmd>, Vec<(Rect, ChannelsHit)>) {
     let mut cmds = Vec::new();
-    widgets::document_window(&mut cmds, w, h, channels_panel(w, h));
-    let (left, right) = channels_columns(w, h);
-    let split_y = CHANNELS_TITLE_Y - 6.0;
-    let split_h = (channels_list_bottom(h) - split_y).max(0.0);
-    theme::fill(
+    let panel = channels_panel(w, h);
+    widgets::document_window(&mut cmds, w, h, panel);
+    theme::text_center(
         &mut cmds,
-        Rect { x: left.w, y: split_y, w: 1.0, h: split_h },
-        CHANNELS_DIVIDER,
+        Rect { x: panel.x, y: panel.y + DOC_TITLE_Y, w: panel.w, h: DOC_TITLE_H },
+        "Channels",
+        DOC_LABEL_SIZE,
+        theme::TEXT,
+        true,
     );
-    theme::fill(&mut cmds, Rect { x: 0.0, y: split_y, w, h: 1.0 }, CHANNELS_DIVIDER);
     let mut fields = Vec::new();
-    paint_mix_out(&mut cmds, &mut fields, engine, w);
+    paint_mix_out(&mut cmds, &mut fields, engine, w, h);
+    let (left, right) = channels_columns(w, h);
+    let title_y = channels_section_y(h);
+    let list_top = channels_list_top(h);
+    let list_bottom = channels_list_bottom(h);
     paint_channel_col(
         &mut cmds,
         &mut fields,
@@ -195,6 +204,9 @@ pub fn paint_channels(
         focus,
         caret,
         scroll,
+        title_y,
+        list_top,
+        list_bottom,
     );
     paint_channel_col(
         &mut cmds,
@@ -206,6 +218,9 @@ pub fn paint_channels(
         focus,
         caret,
         scroll,
+        title_y,
+        list_top,
+        list_bottom,
     );
     let close = window_close_rect(w, h);
     widgets::window_close(&mut cmds, close);
@@ -223,28 +238,26 @@ pub fn window_close_rect(w: f32, h: f32) -> Rect {
 }
 
 fn channels_panel(w: f32, h: f32) -> Rect {
-    let inset = CHANNELS_PANEL_INSET;
-    Rect { x: inset, y: inset, w: (w - inset * 2.0).max(0.0), h: (h - inset * 2.0).max(0.0) }
+    document_panel(w, h)
+}
+
+fn channels_section_y(h: f32) -> f32 {
+    document_panel(0.0, h).y + DOC_CONTENT_Y + DOC_SECTION_GAP
+}
+
+fn channels_list_top(h: f32) -> f32 {
+    channels_section_y(h) + DOC_ROW_STRIDE
 }
 
 fn channels_list_bottom(h: f32) -> f32 {
-    (h - WINDOW_CLOSE_PAD - WINDOW_CLOSE_H - 8.0).max(CHANNELS_LIST_Y)
+    let panel = document_panel(0.0, h);
+    panel.y + panel.h
 }
 
-/// Main Out picker in the Channels header (label + dropdown, same row metrics as aliases).
+/// Mix Out picker — Settings projects-folder field (label + `channel_picker`).
 pub fn channels_mix_out_rect(w: f32) -> Rect {
-    let (left, _) = channels_columns(w, 0.0);
-    let field_x = channels_mix_out_label_x() + CHANNELS_LABEL_W + CHANNELS_LABEL_GAP;
-    Rect {
-        x: field_x,
-        y: CHANNELS_MIX_OUT_Y,
-        w: (left.w - CHANNELS_PAD_X - field_x).max(0.0),
-        h: CHANNELS_MIX_OUT_H,
-    }
-}
-
-fn channels_mix_out_label_x() -> f32 {
-    HEADER_TRAFFIC_INSET
+    let panel = document_panel(w, 0.0);
+    Rect { x: panel.x + DOC_FIELD_X, y: panel.y + DOC_CONTENT_Y, w: DOC_FIELD_W, h: DOC_ROW_H }
 }
 
 /// Empty band under the transparent titlebar — `Window::drag_window` from the shell.
@@ -262,20 +275,10 @@ fn paint_mix_out(
     fields: &mut Vec<(Rect, ChannelsHit)>,
     engine: &AnalogEngine,
     w: f32,
+    h: f32,
 ) {
-    theme::text(
-        cmds,
-        Rect {
-            x: channels_mix_out_label_x(),
-            y: CHANNELS_MIX_OUT_Y,
-            w: CHANNELS_LABEL_W,
-            h: CHANNELS_MIX_OUT_H,
-        },
-        RoutingSlot::Mix.title(),
-        12.0,
-        theme::TEXT_DIM,
-        false,
-    );
+    let panel = channels_panel(w, h);
+    field_label(cmds, panel.x + DOC_PAD_X, panel.y + DOC_CONTENT_Y, RoutingSlot::Mix.title());
     let picker = channels_mix_out_rect(w);
     widgets::channel_picker(
         cmds,
@@ -287,18 +290,19 @@ fn paint_mix_out(
 }
 
 pub fn channels_columns(w: f32, h: f32) -> (Rect, Rect) {
-    let mid = (w * 0.5).floor();
+    let panel = channels_panel(w, h);
+    let mid = (panel.x + panel.w * 0.5).floor();
     (
-        Rect { x: 0.0, y: 0.0, w: mid, h },
-        Rect { x: mid + 1.0, y: 0.0, w: (w - mid - 1.0).max(0.0), h },
+        Rect { x: panel.x, y: panel.y, w: (mid - panel.x).max(0.0), h: panel.h },
+        Rect { x: mid, y: panel.y, w: (panel.x + panel.w - mid).max(0.0), h: panel.h },
     )
 }
 
 pub fn channels_max_scroll(engine: &AnalogEngine, h: f32) -> f32 {
     let n =
         engine.mixer.strips(MixerBus::Input).len().max(engine.mixer.strips(MixerBus::Output).len());
-    let content = CHANNELS_LIST_Y + n as f32 * CHANNELS_ROW_STRIDE + CHANNELS_BOTTOM_PAD;
-    (content - h).max(0.0)
+    let visible = (channels_list_bottom(h) - channels_list_top(h)).max(0.0);
+    (n as f32 * CHANNELS_ROW_STRIDE - visible).max(0.0)
 }
 
 fn paint_channel_col(
@@ -311,22 +315,12 @@ fn paint_channel_col(
     focus: &TextFocus,
     caret: bool,
     scroll: f32,
+    title_y: f32,
+    list_top: f32,
+    list_bottom: f32,
 ) {
-    theme::text(
-        cmds,
-        Rect {
-            x: rect.x + CHANNELS_PAD_X,
-            y: rect.y + CHANNELS_TITLE_Y,
-            w: (rect.w - CHANNELS_PAD_X * 2.0).max(0.0),
-            h: CHANNELS_TITLE_H,
-        },
-        title,
-        12.0,
-        theme::TEXT_DIM,
-        true,
-    );
-    let list_top = rect.y + CHANNELS_LIST_Y;
-    let list_h = (channels_list_bottom(rect.h) - list_top).max(0.0);
+    field_label(cmds, rect.x + CHANNELS_PAD_X, title_y, title);
+    let list_h = (list_bottom - list_top).max(0.0);
     let clip = Rect { x: rect.x, y: list_top, w: rect.w, h: list_h };
     let mut y = list_top - scroll;
     for ch in engine.mixer.strips(bus) {
@@ -336,16 +330,15 @@ fn paint_channel_col(
                 cmds,
                 Rect { x: rect.x + CHANNELS_PAD_X, y, w: CHANNELS_LABEL_W, h: CHANNELS_ROW_H },
                 AnalogEngine::hardware_label(&ch),
-                12.0,
+                DOC_LABEL_SIZE,
                 theme::TEXT_DIM,
                 false,
                 Some(clip),
             );
-            let field_x = rect.x + CHANNELS_PAD_X + CHANNELS_LABEL_W + CHANNELS_LABEL_GAP;
             let field = Rect {
-                x: field_x,
+                x: rect.x + DOC_FIELD_X,
                 y,
-                w: (rect.x + rect.w - CHANNELS_PAD_X - field_x).max(0.0),
+                w: (rect.w - DOC_FIELD_X - CHANNELS_PAD_X).max(0.0),
                 h: CHANNELS_ROW_H,
             };
             let name = engine.config.gear_name(ch.id);
@@ -357,7 +350,14 @@ fn paint_channel_col(
 }
 
 fn field_label(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, s: &str) {
-    theme::text(cmds, Rect { x, y, w: 140.0, h: 24.0 }, s, 14.0, theme::TEXT_DIM, false);
+    theme::text(
+        cmds,
+        Rect { x, y, w: DOC_LABEL_W, h: DOC_ROW_H },
+        s,
+        DOC_LABEL_SIZE,
+        theme::TEXT_DIM,
+        false,
+    );
 }
 
 pub fn settings_hits(w: f32, h: f32) -> SettingsHits {
@@ -421,14 +421,19 @@ pub fn clamp_to_window(rect: Rect, window_w: f32, window_h: f32) -> Rect {
 }
 
 pub fn settings_panel(window_w: f32, window_h: f32) -> Rect {
-    let inset = 18.0;
+    document_panel(window_w, window_h)
+}
+
+/// Recessed card shared by Settings and Channels: clears the traffic-light
+/// band, 18pt inset, Close reserved at the bottom.
+pub fn document_panel(window_w: f32, window_h: f32) -> Rect {
+    let inset = DOC_PANEL_INSET;
     let top = HEADER_H.max(inset);
-    let close_reserve = WINDOW_CLOSE_PAD + WINDOW_CLOSE_H + 10.0;
     Rect {
         x: inset,
         y: top,
         w: (window_w - inset * 2.0).max(0.0),
-        h: (window_h - top - close_reserve).max(0.0),
+        h: (window_h - top - DOC_CLOSE_RESERVE).max(0.0),
     }
 }
 
@@ -499,6 +504,7 @@ pub fn layout_popup_window(anchor: Rect, items: &[MenuItem], window_w: f32, wind
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chrome::HEADER_TRAFFIC_INSET;
     use crate::widgets::MenuItem;
 
     fn item(label: &str) -> MenuItem {
@@ -615,7 +621,10 @@ mod tests {
         );
         let dimmer = cmds.iter().any(|c| match c {
             DrawCmd::Rect { rect, color: [0.0, 0.0, 0.0, a] } => {
-                *a > 0.5 && *a < 0.7 && rect.w >= SETTINGS_WINDOW_W - 1.0 && rect.h >= SETTINGS_WINDOW_H - 1.0
+                *a > 0.5
+                    && *a < 0.7
+                    && rect.w >= SETTINGS_WINDOW_W - 1.0
+                    && rect.h >= SETTINGS_WINDOW_H - 1.0
             }
             _ => false,
         });
@@ -623,14 +632,17 @@ mod tests {
     }
 
     #[test]
-    fn channels_columns_split_mixlink_window() {
+    fn channels_columns_split_document_panel() {
+        let panel = document_panel(CHANNELS_WINDOW_W, CHANNELS_WINDOW_H);
         let (l, r) = channels_columns(CHANNELS_WINDOW_W, CHANNELS_WINDOW_H);
-        assert_eq!(l.x, 0.0);
-        assert_eq!(l.h, CHANNELS_WINDOW_H);
-        assert_eq!(r.h, CHANNELS_WINDOW_H);
-        assert!((l.w + 1.0 + r.w - CHANNELS_WINDOW_W).abs() < 0.5);
+        assert!((l.x - panel.x).abs() < 0.5);
+        assert!((l.y - panel.y).abs() < 0.5);
+        assert!((l.h - panel.h).abs() < 0.5);
+        assert!((r.h - panel.h).abs() < 0.5);
+        assert!((l.w + r.w - panel.w).abs() < 1.0);
         assert!(l.w > 300.0 && r.w > 300.0);
-        assert_eq!(r.x, l.w + 1.0);
+        assert!((r.x + r.w - (panel.x + panel.w)).abs() < 0.5);
+        assert!(l.y >= HEADER_H);
     }
 
     #[test]
@@ -649,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    fn channels_mix_out_hit_is_header_picker() {
+    fn channels_mix_out_hit_is_settings_style_picker() {
         let engine = test_engine();
         let (_, hits) = paint_channels(
             &engine,
@@ -659,17 +671,26 @@ mod tests {
             false,
             0.0,
         );
+        let panel = document_panel(CHANNELS_WINDOW_W, CHANNELS_WINDOW_H);
         let picker = channels_mix_out_rect(CHANNELS_WINDOW_W);
-        let (left, _) = channels_columns(CHANNELS_WINDOW_W, CHANNELS_WINDOW_H);
+        let settings = settings_hits(SETTINGS_WINDOW_W, SETTINGS_WINDOW_H);
+        assert!((picker.x - (panel.x + DOC_FIELD_X)).abs() < 0.5);
+        assert!((picker.w - settings.projects_folder.w).abs() < 0.5);
+        assert!((picker.h - settings.projects_folder.h).abs() < 0.5);
+        assert!(picker.y >= HEADER_H);
+        assert!(picker.y + picker.h <= channels_list_top(CHANNELS_WINDOW_H));
         assert!(picker.x >= HEADER_TRAFFIC_INSET);
-        assert!(picker.y + picker.h <= CHANNELS_LIST_Y);
-        assert!(picker.x + picker.w <= left.w + 0.5);
         assert_eq!(
             hit_channels(&hits, picker.x + picker.w * 0.5, picker.y + picker.h * 0.5),
             Some(ChannelsHit::MixOut)
         );
+        let (left, _) = channels_columns(CHANNELS_WINDOW_W, CHANNELS_WINDOW_H);
         assert_ne!(
-            hit_channels(&hits, CHANNELS_PAD_X + 8.0, CHANNELS_LIST_Y + 8.0),
+            hit_channels(
+                &hits,
+                left.x + CHANNELS_PAD_X + 8.0,
+                channels_list_top(CHANNELS_WINDOW_H) + 8.0
+            ),
             Some(ChannelsHit::MixOut)
         );
         let close = window_close_rect(CHANNELS_WINDOW_W, CHANNELS_WINDOW_H);
@@ -713,8 +734,58 @@ mod tests {
                 _ => None,
             })
             .collect();
+        assert!(texts.contains(&"Channels"), "{texts:?}");
         assert!(texts.contains(&"Mix (Main Out)"), "{texts:?}");
+        assert!(texts.contains(&"Inputs"), "{texts:?}");
+        assert!(texts.contains(&"Outputs"), "{texts:?}");
+        assert!(texts.iter().any(|t| t.eq_ignore_ascii_case("close")), "{texts:?}");
         assert!(texts.iter().any(|t| *t == name), "missing {name:?} in {texts:?}");
+        let title = cmds.iter().find_map(|c| match c {
+            DrawCmd::Text(t) if t.text == "Channels" => Some(t),
+            _ => None,
+        });
+        let settings_title = {
+            let (scmds, _) = paint_settings(
+                &engine,
+                SETTINGS_WINDOW_W,
+                SETTINGS_WINDOW_H,
+                &TextFocus::None,
+                false,
+                "/tmp",
+            );
+            scmds.iter().find_map(|c| match c {
+                DrawCmd::Text(t) if t.text == "Settings" => Some(t.size),
+                _ => None,
+            })
+        };
+        let Some(title) = title else { panic!("expected Channels title") };
+        assert!((title.size - settings_title.unwrap_or(14.0)).abs() < 0.05);
+        assert!(title.bold);
+    }
+
+    #[test]
+    fn channels_panel_matches_settings_document() {
+        let channels = document_panel(CHANNELS_WINDOW_W, CHANNELS_WINDOW_H);
+        let settings = settings_panel(SETTINGS_WINDOW_W, SETTINGS_WINDOW_H);
+        assert!((channels.x - settings.x).abs() < 0.5);
+        assert!((channels.y - settings.y).abs() < 0.5);
+        assert!(channels.y >= HEADER_H);
+        let close = window_close_rect(CHANNELS_WINDOW_W, CHANNELS_WINDOW_H);
+        assert!(channels.y + channels.h <= close.y + 0.5);
+        assert!(close.x > CHANNELS_WINDOW_W * 0.5);
+    }
+
+    #[test]
+    fn channels_content_clears_titlebar_and_empty_chrome_drags() {
+        let panel = document_panel(CHANNELS_WINDOW_W, CHANNELS_WINDOW_H);
+        let picker = channels_mix_out_rect(CHANNELS_WINDOW_W);
+        let close = window_close_rect(CHANNELS_WINDOW_W, CHANNELS_WINDOW_H);
+        assert!(panel.y >= HEADER_H);
+        assert!(picker.y >= HEADER_H);
+        assert!(channels_list_top(CHANNELS_WINDOW_H) >= picker.y + picker.h);
+        assert!(document_chrome_drag(12.0, 12.0));
+        assert!(!document_chrome_drag(picker.x + 4.0, picker.y + 4.0));
+        assert!(!document_chrome_drag(close.x + 4.0, close.y + 4.0));
     }
 
     #[test]
