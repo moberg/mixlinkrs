@@ -2654,11 +2654,9 @@ fn ensure_waveforms(state: &mut AppState) {
         .flat_map(|t| t.clips.iter().map(|c| c.source_file.clone()))
         .collect();
     for file in files {
-        if state.waveforms.get(&file).is_none() {
-            let path = folder.join(&file);
-            if path.exists() {
-                state.waveforms.load_file(&file, path);
-            }
+        let path = folder.join(&file);
+        if path.exists() {
+            state.waveforms.request(&file, path);
         }
     }
 }

@@ -1,4 +1,4 @@
-use asset::{minmax_for_width, minmax_zoom_points, WaveformCache};
+use asset::{minmax_for_width, minmax_zoom_points, WaveformCache, WaveformStatus};
 use project::{MixDocument, MixGrid, MixLane, MixTime};
 use render::{DrawCmd, Rect};
 
@@ -254,8 +254,13 @@ fn paint_clip_waveform(
     let Some(cache) = view.waveforms else {
         return;
     };
-    let Some(lod) = cache.get(&clip.source_file) else {
-        return;
+    let lod = match cache.status(&clip.source_file) {
+        WaveformStatus::Ready(lod) => lod,
+        WaveformStatus::Loading => {
+            paint_clip_loading(cmds, rect);
+            return;
+        }
+        WaveformStatus::Missing => return,
     };
     if lod.min.is_empty() || lod.max.is_empty() {
         return;
@@ -311,6 +316,45 @@ fn paint_clip_waveform(
         color: [1.0, 1.0, 1.0, 0.78],
         bins,
     });
+}
+
+fn paint_clip_loading(cmds: &mut Vec<DrawCmd>, rect: Rect) {
+    let phase = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f32())
+        .unwrap_or(0.0)
+        * 2.4)
+        .fract();
+    let bars = 7usize;
+    let gap = 3.0;
+    let total_w = (rect.w * 0.42).clamp(28.0, 110.0);
+    let bar_w = ((total_w - gap * (bars.saturating_sub(1)) as f32) / bars as f32).max(2.0);
+    let cluster = bar_w * bars as f32 + gap * (bars.saturating_sub(1)) as f32;
+    let x0 = rect.x + (rect.w - cluster) * 0.5;
+    let mid_y = rect.y + rect.h * 0.46;
+    let max_h = (rect.h * 0.38).max(8.0);
+    for i in 0..bars {
+        let wave = ((phase + i as f32 * 0.12) * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+        let h = 4.0 + max_h * (0.22 + 0.78 * wave);
+        cmds.push(DrawCmd::RoundedRect {
+            rect: Rect {
+                x: x0 + i as f32 * (bar_w + gap),
+                y: mid_y - h * 0.5,
+                w: bar_w,
+                h,
+            },
+            color: [1.0, 1.0, 1.0, 0.18 + 0.32 * wave],
+            radius: 1.2,
+        });
+    }
+    theme::text_center(
+        cmds,
+        Rect { x: rect.x + 4.0, y: rect.y + rect.h * 0.64, w: (rect.w - 8.0).max(8.0), h: 14.0 },
+        "Loading",
+        10.0,
+        [1.0, 1.0, 1.0, 0.55],
+        false,
+    );
 }
 
 fn draw_grid(cmds: &mut Vec<DrawCmd>, view: &ArrangementView<'_>, y: f32, h: f32) {
@@ -578,6 +622,55 @@ mod tests {
         assert!(bar_w > 1.0, "zoomed-in strip spaces LOD bins, got bar_w={bar_w}");
         assert!(bins < 800, "must not emit one column per pixel, got {bins}");
         assert!(bins > 20, "visible slice should still cover the lane");
+    }
+
+    #[test]
+    fn loading_clip_shows_indicator() {
+        let cache = WaveformCache::new();
+        cache.mark_loading("clip.wav");
+        let mut track = MixTrack::empty(MixLane::Strip(0), Some("Ch 1".into()));
+        track.clips = vec![MixClip {
+            id: uuid::Uuid::nil(),
+            source_take: 1,
+            source_lane: MixLane::Strip(0),
+            source_file: "clip.wav".into(),
+            source_start_frame: 0,
+            source_frame_count: 48_000,
+            mix_start_frame: 0,
+        }];
+        let cmds = paint(&ArrangementView {
+            layout: ArrangementLayout {
+                x: 0.0,
+                y: 0.0,
+                w: 800.0,
+                h: 400.0,
+                scroll_x: 0.0,
+                scroll_y: 0.0,
+                pixels_per_bar: 120.0,
+            },
+            mix: None,
+            tracks: std::slice::from_ref(&track),
+            selected_lane: None,
+            selected_clips: &[],
+            playhead: 0,
+            origin: 0,
+            tempo: 120.0,
+            sample_rate: 48_000.0,
+            grid: MixGrid::Bar1,
+            grid_enabled: false,
+            viewing_take: false,
+            bar_selection: None,
+            waveforms: Some(&cache),
+        });
+        let loading = cmds.iter().any(|c| match c {
+            DrawCmd::Text(t) => t.text == "Loading",
+            _ => false,
+        });
+        assert!(loading, "pending waveform should show a loading label");
+        assert!(
+            !cmds.iter().any(|c| matches!(c, DrawCmd::WaveformBins { .. })),
+            "must not draw bins while the file is still decoding"
+        );
     }
 
     #[test]

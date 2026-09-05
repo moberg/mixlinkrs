@@ -39,10 +39,32 @@ impl WaveformLod {
 
 /// Cache keyed by filename. [`WaveformCache::note_file_finished`] bumps `epoch`
 /// so the timeline redraws without treating playhead ticks as data changes.
-#[derive(Debug)]
+///
+/// Decode runs on Rayon's pool ([`WaveformCache::request`]); the UI thread only
+/// queues work and reads [`WaveformStatus`].
+#[derive(Clone, Debug)]
 pub struct WaveformCache {
-    inner: Mutex<HashMap<String, Arc<WaveformLod>>>,
+    inner: Arc<CacheInner>,
+}
+
+#[derive(Debug)]
+struct CacheInner {
+    map: Mutex<HashMap<String, CacheEntry>>,
     epoch: AtomicU64,
+    next_gen: AtomicU64,
+}
+
+#[derive(Clone, Debug)]
+enum CacheEntry {
+    Pending(u64),
+    Ready(Arc<WaveformLod>),
+}
+
+#[derive(Clone, Debug)]
+pub enum WaveformStatus {
+    Missing,
+    Loading,
+    Ready(Arc<WaveformLod>),
 }
 
 impl Default for WaveformCache {
@@ -53,41 +75,93 @@ impl Default for WaveformCache {
 
 impl WaveformCache {
     pub fn new() -> Self {
-        Self { inner: Mutex::new(HashMap::new()), epoch: AtomicU64::new(0) }
+        Self {
+            inner: Arc::new(CacheInner {
+                map: Mutex::new(HashMap::new()),
+                epoch: AtomicU64::new(0),
+                next_gen: AtomicU64::new(1),
+            }),
+        }
     }
 
     pub fn epoch(&self) -> u64 {
-        self.epoch.load(Ordering::Relaxed)
+        self.inner.epoch.load(Ordering::Relaxed)
+    }
+
+    pub fn status(&self, filename: &str) -> WaveformStatus {
+        let Ok(map) = self.inner.map.lock() else {
+            return WaveformStatus::Missing;
+        };
+        match map.get(filename) {
+            Some(CacheEntry::Ready(lod)) => WaveformStatus::Ready(lod.clone()),
+            Some(CacheEntry::Pending(_)) => WaveformStatus::Loading,
+            None => WaveformStatus::Missing,
+        }
     }
 
     pub fn get(&self, filename: &str) -> Option<Arc<WaveformLod>> {
-        self.inner.lock().ok()?.get(filename).cloned()
+        match self.status(filename) {
+            WaveformStatus::Ready(lod) => Some(lod),
+            _ => None,
+        }
+    }
+
+    pub fn is_loading(&self, filename: &str) -> bool {
+        matches!(self.status(filename), WaveformStatus::Loading)
     }
 
     pub fn insert(&self, filename: impl Into<String>, lod: WaveformLod) {
-        if let Ok(mut map) = self.inner.lock() {
-            map.insert(filename.into(), Arc::new(lod));
+        if let Ok(mut map) = self.inner.map.lock() {
+            map.insert(filename.into(), CacheEntry::Ready(Arc::new(lod)));
+        }
+    }
+
+    /// Test / paint helper: treat `filename` as in-flight without decoding.
+    pub fn mark_loading(&self, filename: impl Into<String>) {
+        let gen = self.inner.next_gen.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut map) = self.inner.map.lock() {
+            map.entry(filename.into()).or_insert(CacheEntry::Pending(gen));
         }
     }
 
     /// Recording (or bounce) finished — drop the stale bins and bump epoch.
     pub fn note_file_finished(&self, filename: &str) {
-        if let Ok(mut map) = self.inner.lock() {
+        if let Ok(mut map) = self.inner.map.lock() {
             map.remove(filename);
         }
-        self.epoch.fetch_add(1, Ordering::Relaxed);
+        self.inner.epoch.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn load_file(&self, filename: &str, path: impl AsRef<Path>) -> Arc<WaveformLod> {
-        if let Some(cached) = self.get(filename) {
-            return cached;
-        }
-        let lod = load_waveform(path.as_ref());
-        let arc = Arc::new(lod);
-        if let Ok(mut map) = self.inner.lock() {
-            map.insert(filename.into(), arc.clone());
-        }
-        arc
+    /// Queue a background decode. No-op if this name is already pending or ready.
+    /// Completions bump [`Self::epoch`].
+    pub fn request(&self, filename: impl Into<String>, path: impl AsRef<Path>) {
+        let filename = filename.into();
+        let path = path.as_ref().to_path_buf();
+        let gen = {
+            let Ok(mut map) = self.inner.map.lock() else {
+                return;
+            };
+            if map.contains_key(&filename) {
+                return;
+            }
+            let gen = self.inner.next_gen.fetch_add(1, Ordering::Relaxed);
+            map.insert(filename.clone(), CacheEntry::Pending(gen));
+            gen
+        };
+        let inner = Arc::clone(&self.inner);
+        rayon::spawn(move || {
+            let lod = load_waveform(&path);
+            let ready = Arc::new(lod);
+            if let Ok(mut map) = inner.map.lock() {
+                match map.get(&filename) {
+                    Some(CacheEntry::Pending(g)) if *g == gen => {
+                        map.insert(filename, CacheEntry::Ready(ready));
+                        inner.epoch.fetch_add(1, Ordering::Relaxed);
+                    }
+                    _ => {}
+                }
+            }
+        });
     }
 }
 
@@ -463,5 +537,57 @@ mod tests {
         cache.note_file_finished("3-ch-01-Rytm.wav");
         assert_eq!(cache.epoch(), 1);
         assert!(cache.get("3-ch-01-Rytm.wav").is_none());
+    }
+
+    #[test]
+    fn request_returns_before_decode() {
+        let dir = tempfile::tempdir().unwrap();
+        let frames = 80_000;
+        let samples: Vec<f32> = (0..frames).map(|i| ((i % 32) as f32) / 32.0).collect();
+        let names = ["a.wav", "b.wav", "c.wav", "d.wav"];
+        let paths: Vec<_> = names
+            .iter()
+            .map(|name| {
+                let path = dir.path().join(name);
+                crate::write_bounce(&path, 48_000, &samples, &samples).unwrap();
+                path
+            })
+            .collect();
+
+        let cache = WaveformCache::new();
+        let start = std::time::Instant::now();
+        for (name, path) in names.iter().zip(&paths) {
+            cache.request(*name, path);
+        }
+        assert!(
+            start.elapsed().as_millis() < 80,
+            "request must not decode on the caller, took {:?}",
+            start.elapsed()
+        );
+        for name in names {
+            assert!(
+                cache.is_loading(name) || cache.get(name).is_some(),
+                "{name} should be queued or already ready"
+            );
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        for name in names {
+            while cache.get(name).is_none() {
+                assert!(std::time::Instant::now() < deadline, "timed out waiting for {name}");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(!cache.is_loading(name));
+            let lod = cache.get(name).unwrap();
+            assert!(!lod.min.is_empty());
+        }
+    }
+
+    #[test]
+    fn mark_loading_stays_pending() {
+        let cache = WaveformCache::new();
+        cache.mark_loading("pending.wav");
+        assert!(cache.is_loading("pending.wav"));
+        assert!(cache.get("pending.wav").is_none());
+        assert!(matches!(cache.status("pending.wav"), WaveformStatus::Loading));
     }
 }

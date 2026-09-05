@@ -14,5 +14,5 @@ pub use bounce::{wav_frame_count, write_bounce, BounceError, StreamingWav};
 pub use streamer::{Streamer, StreamerError};
 pub use waveform::{
     bins_for_width, column_half_pixels, gamma_mag, minmax_for_width, minmax_zoom_points,
-    WaveformCache, WaveformLod, GAMMA, MIN_HALF_PX, SAMPLES_PER_BIN,
+    WaveformCache, WaveformLod, WaveformStatus, GAMMA, MIN_HALF_PX, SAMPLES_PER_BIN,
 };

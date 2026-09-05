@@ -9,3 +9,7 @@ hound.workspace = true
 thiserror.workspace = true
 log.workspace = true
 rtrb.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
