@@ -30,7 +30,9 @@ impl AppState {
     pub(crate) fn arrangement_cursor(&self) -> crate::cursors::ArrCursor {
         match &self.chrome.drag {
             Some(Drag::ClipEdge { left: true, .. }) => return crate::cursors::ArrCursor::TrimLeft,
-            Some(Drag::ClipEdge { left: false, .. }) => return crate::cursors::ArrCursor::TrimRight,
+            Some(Drag::ClipEdge { left: false, .. }) => {
+                return crate::cursors::ArrCursor::TrimRight
+            }
             Some(Drag::Zoom { .. }) => return crate::cursors::ArrCursor::Zoom,
             Some(_) => return crate::cursors::ArrCursor::Default,
             None => {}
@@ -126,6 +128,12 @@ impl AppState {
                             label: "Copy take to clipboard".into(),
                             checked: false,
                             section: None,
+                        },
+                        MenuItem {
+                            id: "delete".into(),
+                            label: "Delete take…".into(),
+                            checked: false,
+                            section: Some(" ".into()),
                         },
                     ],
                     MenuAction::TakeContext { number },
@@ -386,6 +394,7 @@ impl AppState {
 
     pub(crate) fn edge_auto_scroll(&mut self, x: f32, y: f32) {
         self.timeline.edge_auto_scroll(&self.chrome, x, y);
+        self.timeline.clamp_scroll_y(&self.chrome, self.arrangement_tracks().len());
     }
 }
 
@@ -460,6 +469,11 @@ impl Timeline {
             scroll_y: self.scroll_y,
             pixels_per_bar: self.pixels_per_bar,
         }
+    }
+
+    pub(crate) fn clamp_scroll_y(&mut self, chrome: &Chrome, track_count: usize) {
+        let max = self.arr_layout(chrome).max_scroll_y(track_count);
+        self.scroll_y = self.scroll_y.clamp(0.0, max);
     }
 
     pub(crate) fn edge_auto_scroll(&mut self, chrome: &Chrome, x: f32, y: f32) {

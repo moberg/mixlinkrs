@@ -71,28 +71,37 @@ pub fn alert(message: &str) {
 }
 
 pub fn confirm_delete_mix() -> bool {
+    confirm_delete("Delete this mix?", "The mix file will be removed from the project folder.")
+}
+
+pub fn confirm_delete_take() -> bool {
+    confirm_delete("Delete this take?", "The audio files will be permanently deleted from disk.")
+}
+
+fn confirm_delete(title: &str, info: &str) -> bool {
     #[cfg(target_os = "macos")]
     {
         // NSAlert runs from a winit mouseDown that cannot unwind.
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(confirm_delete_macos))
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| confirm_delete_macos(title, info)))
             .unwrap_or(false)
     }
     #[cfg(not(target_os = "macos"))]
     {
+        let _ = (title, info);
         true
     }
 }
 
 #[cfg(target_os = "macos")]
-fn confirm_delete_macos() -> bool {
+fn confirm_delete_macos(title: &str, info: &str) -> bool {
     use objc2::rc::Id;
     use objc2::runtime::AnyObject;
     use objc2::{class, msg_send, msg_send_id};
     use objc2_foundation::NSString;
 
     let alert: Id<AnyObject> = unsafe { msg_send_id![class!(NSAlert), new] };
-    let title = NSString::from_str("Delete this mix?");
-    let info = NSString::from_str("The mix file will be removed from the project folder.");
+    let title = NSString::from_str(title);
+    let info = NSString::from_str(info);
     let delete = NSString::from_str("Delete");
     let cancel = NSString::from_str("Cancel");
     let _: () = unsafe { msg_send![&*alert, setMessageText: &*title] };

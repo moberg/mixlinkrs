@@ -24,5 +24,5 @@ pub use session::{
     app_support_dir, bookmark_from_path, insert_state_url, plugin_slot_state_url, resolve_bookmark,
     uuid_upper, BookmarkError,
 };
-pub use store::{scan_take_infos, scan_takes, ProjectStore, StoreError};
+pub use store::{delete_take_files, scan_take_infos, scan_takes, ProjectStore, StoreError};
 pub use undo::{UndoEntry, UndoStack, UNDO_LEVELS};

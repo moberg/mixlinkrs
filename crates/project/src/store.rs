@@ -177,6 +177,40 @@ impl ProjectStore {
     }
 }
 
+/// Remove every parseable take WAV for `number`, including `{N}-mix.wav`.
+pub fn delete_take_files(project: &Path, number: i32) -> Vec<String> {
+    take_filenames(project, number)
+        .into_iter()
+        .filter(|name| match fs::remove_file(project.join(name)) {
+            Ok(()) => true,
+            Err(e) => {
+                log::warn!("delete take {number} {name}: {e}");
+                false
+            }
+        })
+        .collect()
+}
+
+fn take_filenames(project: &Path, number: i32) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(project) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            if !name.to_ascii_lowercase().ends_with(".wav") {
+                return None;
+            }
+            let (take, _, _) = parse_take_wav(name)?;
+            (take == number).then(|| name.to_string())
+        })
+        .collect();
+    names.sort();
+    names
+}
+
 /// MixLink `MixStore.scanTakes` — `{N}-mix.wav` is recorded but hidden from the take list.
 pub fn scan_take_infos(project: &Path, sample_rate: f64) -> Vec<TakeInfo> {
     let Ok(entries) = fs::read_dir(project) else {
@@ -387,6 +421,25 @@ mod tests {
         store.save_meta(&meta, &dir).unwrap();
         assert_eq!(scan_takes(&dir), 1);
         assert_eq!(store.next_take(&dir), 5);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_take_files_removes_wavs_including_mix() {
+        let dir = temp_dir();
+        fs::write(dir.join("7-ch-01-Rytm.wav"), []).unwrap();
+        fs::write(dir.join("7-ret-A-BigSky.wav"), []).unwrap();
+        fs::write(dir.join("7-mix.wav"), []).unwrap();
+        fs::write(dir.join("8-ch-01-Rytm.wav"), []).unwrap();
+        fs::write(dir.join("notes.txt"), []).unwrap();
+        let deleted = delete_take_files(&dir, 7);
+        assert_eq!(deleted, vec!["7-ch-01-Rytm.wav", "7-mix.wav", "7-ret-A-BigSky.wav"]);
+        assert!(!dir.join("7-ch-01-Rytm.wav").exists());
+        assert!(!dir.join("7-ret-A-BigSky.wav").exists());
+        assert!(!dir.join("7-mix.wav").exists());
+        assert!(dir.join("8-ch-01-Rytm.wav").exists());
+        assert!(dir.join("notes.txt").exists());
+        assert!(delete_take_files(&dir, 7).is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 

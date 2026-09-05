@@ -26,6 +26,14 @@ pub struct ArrangementLayout {
     pub pixels_per_bar: f32,
 }
 
+impl ArrangementLayout {
+    /// Vertical travel while any lane is still below the time ruler.
+    pub fn max_scroll_y(&self, track_count: usize) -> f32 {
+        let visible = (self.h - RULER_H - TIME_RULER_H).max(0.0);
+        (track_count as f32 * TRACK_H - visible).max(0.0)
+    }
+}
+
 pub struct ArrangementView<'a> {
     pub layout: ArrangementLayout,
     pub mix: Option<&'a MixDocument>,
@@ -63,6 +71,12 @@ pub fn paint(view: &ArrangementView<'_>) -> Vec<DrawCmd> {
     let l = view.layout;
     let bounds = Rect { x: l.x, y: l.y, w: l.w, h: l.h };
     let timeline = Rect { x: l.x + HEADER_W, y: l.y, w: (l.w - HEADER_W).max(0.0), h: l.h };
+    let lanes = Rect {
+        x: l.x + HEADER_W,
+        y: l.y + RULER_H,
+        w: (l.w - HEADER_W).max(0.0),
+        h: (l.h - RULER_H - TIME_RULER_H).max(0.0),
+    };
     let legend = Rect { x: l.x, y: l.y, w: HEADER_W, h: (l.h - TIME_RULER_H).max(0.0) };
 
     cmds.push(DrawCmd::Layer);
@@ -71,12 +85,16 @@ pub fn paint(view: &ArrangementView<'_>) -> Vec<DrawCmd> {
 
     cmds.push(DrawCmd::Layer);
     cmds.push(DrawCmd::Clip { rect: timeline });
-    paint_bar_bands(&mut cmds, view);
     paint_bar_ruler(&mut cmds, view);
+    paint_readout(&mut cmds, view);
+
+    cmds.push(DrawCmd::Layer);
+    cmds.push(DrawCmd::Clip { rect: lanes });
+    paint_bar_bands(&mut cmds, view);
     paint_bar_grid(&mut cmds, view);
     for (i, track) in view.tracks.iter().enumerate() {
         let y = l.y + RULER_H + i as f32 * TRACK_H - l.scroll_y;
-        if y + TRACK_H < l.y || y > l.y + l.h - TIME_RULER_H {
+        if y + TRACK_H < l.y + RULER_H || y > l.y + l.h - TIME_RULER_H {
             continue;
         }
         theme::seam_h(&mut cmds, l.x + HEADER_W, y + TRACK_H - 1.0, l.w - HEADER_W, false);
@@ -92,8 +110,10 @@ pub fn paint(view: &ArrangementView<'_>) -> Vec<DrawCmd> {
             false,
         );
     }
+
+    cmds.push(DrawCmd::Layer);
+    cmds.push(DrawCmd::Clip { rect: timeline });
     paint_playhead(&mut cmds, view);
-    paint_readout(&mut cmds, view);
 
     cmds.push(DrawCmd::Layer);
     theme::fill(&mut cmds, legend, [0.11, 0.11, 0.11, 1.0]);
@@ -105,7 +125,7 @@ pub fn paint(view: &ArrangementView<'_>) -> Vec<DrawCmd> {
     theme::seam_v(&mut cmds, l.x + HEADER_W - 2.0, l.y, legend.h, true);
     for (i, track) in view.tracks.iter().enumerate() {
         let y = l.y + RULER_H + i as f32 * TRACK_H - l.scroll_y;
-        if y + TRACK_H < l.y || y > l.y + l.h - TIME_RULER_H {
+        if y + TRACK_H < l.y + RULER_H || y > l.y + l.h - TIME_RULER_H {
             continue;
         }
         let selected = view.selected_lane == Some(track.lane);
@@ -1170,6 +1190,28 @@ mod tests {
             .collect();
         assert!(!clips.is_empty());
         assert!(clips.iter().all(|r| r.x >= 147.9 && r.x + r.w <= 948.1));
+        assert!(
+            clips.iter().any(|r| (r.y - (layout.y + RULER_H)).abs() < 0.1
+                && (r.h - (layout.h - RULER_H - TIME_RULER_H)).abs() < 0.1),
+            "lane body must clip below the bar ruler"
+        );
+    }
+
+    #[test]
+    fn max_scroll_y_stops_at_the_last_lane() {
+        let tall = ArrangementLayout {
+            x: 0.0,
+            y: 0.0,
+            w: 800.0,
+            h: RULER_H + TRACK_H * 2.0 + TIME_RULER_H + 40.0,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            pixels_per_bar: 48.0,
+        };
+        assert_eq!(tall.max_scroll_y(2), 0.0);
+        let short = ArrangementLayout { h: RULER_H + TRACK_H + TIME_RULER_H, ..tall };
+        assert_eq!(short.max_scroll_y(3), TRACK_H * 2.0);
+        assert_eq!(short.max_scroll_y(0), 0.0);
     }
 
     #[test]

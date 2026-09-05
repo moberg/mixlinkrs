@@ -110,6 +110,7 @@ impl AppState {
                     })
                     .collect();
                 let tracks = self.arrangement_tracks();
+                self.timeline.clamp_scroll_y(&self.chrome, tracks.len());
                 let arr = self.arr_layout();
                 let hidden = self.hidden_clip_ids();
                 scene.extend(ui_mixlink::arrangement::paint(

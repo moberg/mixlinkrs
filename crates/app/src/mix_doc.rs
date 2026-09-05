@@ -172,6 +172,41 @@ impl AppState {
         self.session.pasteboard = copy_clip_ids(&tracks, &ids);
     }
 
+    pub(crate) fn delete_take(&mut self, number: i32) {
+        if !crate::native::confirm_delete_take() {
+            return;
+        }
+        let Some(folder) = ProjectStore::current_url(&self.surface.analog.config) else {
+            return;
+        };
+        let deleted = project::delete_take_files(&folder, number);
+        for name in &deleted {
+            self.chrome.waveforms.note_file_finished(name);
+        }
+        self.session.take_infos = crate::record::list_take_infos(&folder, self.audio.sample_rate());
+        self.session.takes = self.session.take_infos.iter().map(|t| t.number).collect();
+        if self.session.viewing_take == Some(number) && !self.session.takes.contains(&number) {
+            if let Some(id) = self
+                .session
+                .mix
+                .as_ref()
+                .map(|m| m.id)
+                .or_else(|| self.session.mixes.first().map(|m| m.id))
+            {
+                self.select_mix(id);
+            } else {
+                if self.audio.playing {
+                    self.halt_mix_play();
+                }
+                self.session.viewing_take = None;
+                self.session.take_view = None;
+                self.sync_origin();
+                self.persist_project_meta();
+                self.publish_schedule();
+            }
+        }
+    }
+
     pub(crate) fn delete_mix_id(&mut self, id: uuid::Uuid) {
         if !crate::native::confirm_delete_mix() {
             return;

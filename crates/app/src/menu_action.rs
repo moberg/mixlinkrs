@@ -96,6 +96,7 @@ impl AppState {
             MenuAction::TakeContext { number } => match item.id.as_str() {
                 "start" => self.start_from_take(number),
                 "copy" => self.copy_take_to_clipboard(number),
+                "delete" => self.delete_take(number),
                 _ => {}
             },
             MenuAction::Arrange => match item.id.as_str() {

@@ -648,6 +648,7 @@ impl AppState {
         } else {
             self.timeline.scroll_x = (self.timeline.scroll_x - dx).max(0.0);
             self.timeline.scroll_y = (self.timeline.scroll_y - dy).max(0.0);
+            self.timeline.clamp_scroll_y(&self.chrome, self.arrangement_tracks().len());
         }
     }
 
