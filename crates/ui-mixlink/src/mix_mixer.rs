@@ -89,6 +89,7 @@ fn paint_track(
     y += 36.0;
     let peak = view.peaks.get(index).copied().unwrap_or(0.0);
     let meter_h = (view.h - (y - view.y) - 36.0).max(40.0);
+    let hardware = view.engine.config.hardware_strips;
     theme::fill(cmds, Rect { x: x + 6.0, y, w: 6.0, h: meter_h }, [0.0, 0.0, 0.0, 0.45]);
     let lit = meter_h * peak;
     theme::fill(
@@ -103,7 +104,7 @@ fn paint_track(
         w: Layout::FADER_CAP_W,
         h: Layout::FADER_CAP_H,
     };
-    crate::widgets::fader_cap(cmds, dest);
+    crate::widgets::fader_cap(cmds, dest, hardware);
     crate::widgets::hardware_pad(
         cmds,
         Rect { x: x + 6.0, y: view.y + view.h - 28.0, w: w * 0.5 - 8.0, h: 22.0 },

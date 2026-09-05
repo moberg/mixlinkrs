@@ -232,7 +232,16 @@ fn paint_strip(
 
     let bay_h = (l.y + l.h - y - Layout::NAME_ROW - Layout::BUTTON_STACK).max(80.0);
     theme::channel_bay_shading(cmds, Rect { x, y, w, h: bay_h + Layout::NAME_ROW + Layout::BUTTON_STACK });
-    paint_fader(cmds, x, y, w, bay_h, fader, peak_for(view, kind));
+    paint_fader(
+        cmds,
+        x,
+        y,
+        w,
+        bay_h,
+        fader,
+        peak_for(view, kind),
+        view.engine.config.hardware_strips,
+    );
     y += bay_h;
 
     widgets::strip_name_label(
@@ -380,7 +389,16 @@ impl FaderBay {
     }
 }
 
-fn paint_fader(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, w: f32, h: f32, lin: f32, peak: f32) {
+fn paint_fader(
+    cmds: &mut Vec<DrawCmd>,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    lin: f32,
+    peak: f32,
+    hardware: bool,
+) {
     let bay = FaderBay::layout(x, y, w, h);
     widgets::level_meter(cmds, bay.meter, peak);
     widgets::decibel_scale(
@@ -442,6 +460,7 @@ fn paint_fader(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, w: f32, h: f32, lin: f32
             w: Layout::FADER_CAP_W,
             h: Layout::FADER_CAP_H,
         },
+        hardware,
     );
 }
 

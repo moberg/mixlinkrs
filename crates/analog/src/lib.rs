@@ -5,12 +5,14 @@ pub mod engine;
 pub mod mixer;
 pub mod surface;
 pub mod types;
+pub mod xl;
 
 pub use config::SessionConfig;
 pub use engine::AnalogEngine;
 pub use mixer::{apply_inbound, MixerState};
 pub use osc::OscSession;
 pub use surface::{SurfaceState, TrackControlMode};
+pub use xl::{apply_xl, XlEffect, XlRuntime};
 pub use types::{
     ChannelID, EffectRef, HardwareEffect, MixAssign, MixEvent, MixLane, MixNode, MixerBus,
     MixerChannel, PluginSlot, ReturnLane, ReturnLaneConfig, ReturnStrip, RoutingSlot,
@@ -174,6 +176,7 @@ mod tests {
         assert_eq!(c.effect_return_count, 2);
         assert!(!c.pan_knobs_control_send_c);
         assert!(c.sends_post_fader);
+        assert!(!c.hardware_strips);
         assert_eq!(c.strips.len(), 8);
         assert!(c.strips.iter().enumerate().all(|(i, s)| {
             s.bus == MixerBus::Input && s.index == i as i32 * 2 && s.linked_stereo && s.enabled
@@ -212,5 +215,16 @@ mod tests {
         assert!(wire.get("oscHost").is_some());
         assert!(wire.get("mainOutput").is_some());
         assert!(wire.get("projectsRootBookmark").is_none() || wire["projectsRootBookmark"].is_null());
+    }
+
+    #[test]
+    fn pan_knobs_control_send_c_persists_on_the_wire() {
+        let mut engine = test_engine();
+        engine.set_pan_knobs_control_send_c(true);
+        assert!(engine.config.pan_knobs_control_send_c);
+        let json = serde_json::to_string(&engine.config).unwrap();
+        assert!(json.contains("\"panKnobsControlSendC\":true"));
+        let back: SessionConfig = serde_json::from_str(&json).unwrap();
+        assert!(back.pan_knobs_control_send_c);
     }
 }

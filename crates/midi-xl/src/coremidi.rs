@@ -492,6 +492,23 @@ mod tests {
     }
 
     #[test]
+    fn copy_packets_reads_user_mute_note() {
+        let mut buf = [0u8; 64];
+        buf[0..4].copy_from_slice(&1u32.to_ne_bytes());
+        write_packet(&mut buf, ffi::PACKET_LIST_PACKET_OFFSET, &[0x90, 106, 127]);
+        let packets = copy_packets(buf.as_ptr().cast());
+        assert_eq!(packets, vec![vec![0x90, 106, 127]]);
+        let mut session = crate::session::MidiSession::recording();
+        let ev = session.ingest(&packets[0]);
+        match ev.as_slice() {
+            [crate::session::SessionEvent::Control { control, .. }] => {
+                assert_eq!(*control, crate::profile::Control::Mute);
+            }
+            other => panic!("mute note dropped: {other:?}"),
+        }
+    }
+
+    #[test]
     fn copy_packets_walks_two_aligned_packets() {
         let mut buf = [0u8; 128];
         buf[0..4].copy_from_slice(&2u32.to_ne_bytes());

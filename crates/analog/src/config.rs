@@ -44,6 +44,9 @@ pub struct SessionConfig {
     pub pan_knobs_control_send_c: bool,
     #[serde(default = "default_true")]
     pub sends_post_fader: bool,
+    /// Cream caps, milled fader slots, and a recessed channel-strip well.
+    #[serde(default)]
+    pub hardware_strips: bool,
     #[serde(default, with = "opt_base64")]
     pub projects_root_bookmark: Option<Vec<u8>>,
     #[serde(default)]
@@ -92,6 +95,7 @@ impl SessionConfig {
             effect_return_count: 2,
             pan_knobs_control_send_c: false,
             sends_post_fader: true,
+            hardware_strips: false,
             projects_root_bookmark: None,
             current_project_relative: None,
         }

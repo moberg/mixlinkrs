@@ -149,7 +149,10 @@ impl Renderer {
             &device,
             &queue,
             config.format,
-            include_bytes!("../../../assets/FaderCap.png"),
+            &[
+                include_bytes!("../../../assets/FaderCap.png") as &[u8],
+                include_bytes!("../../../assets/HardwareFaderCap.png") as &[u8],
+            ],
         );
 
         Self {
@@ -191,7 +194,7 @@ impl Renderer {
             let v0 = all_verts.len() as u32;
             all_verts.extend(scene::tessellate(layer, (lw, lh)));
             let i0 = all_images.len() as u32;
-            all_images.extend(image::ImageAtlas::tessellate(layer, (lw, lh)));
+            all_images.extend(self.images.tessellate(layer, (lw, lh)));
             let texts: Vec<TextCmd> = layer
                 .iter()
                 .filter_map(|c| match c {

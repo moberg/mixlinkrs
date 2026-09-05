@@ -2,6 +2,36 @@
 
 #![allow(dead_code)]
 
+/// Dock / Cmd-Tab icon. `cargo run` is a bare binary, so the bundle icon never
+/// applies — set `NSApplication.applicationIconImage` once NSApp exists.
+pub fn apply_app_icon() {
+    #[cfg(target_os = "macos")]
+    apply_app_icon_macos();
+}
+
+#[cfg(target_os = "macos")]
+fn apply_app_icon_macos() {
+    use objc2::ClassType;
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::{MainThreadMarker, NSData, NSSize};
+
+    const ICON_PNG: &[u8] = include_bytes!("../assets/AppIcon.png");
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        log::warn!("app icon: not on main thread");
+        return;
+    };
+    let data = NSData::with_bytes(ICON_PNG);
+    let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
+        log::warn!("app icon: NSImage init failed");
+        return;
+    };
+    // Bitmap is 1024² px; point size must be a Dock tile, not 1024pt.
+    unsafe { image.setSize(NSSize { width: 128.0, height: 128.0 }) };
+    let app = NSApplication::sharedApplication(mtm);
+    unsafe { app.setApplicationIconImage(Some(&image)) };
+}
+
 pub fn pick_projects_folder() -> Option<std::path::PathBuf> {
     #[cfg(target_os = "macos")]
     {

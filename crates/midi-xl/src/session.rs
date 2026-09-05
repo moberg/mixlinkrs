@@ -2,12 +2,15 @@
 //!
 //! Hardware I/O is behind [`MidiSink`] so tests never need a device.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
 use crate::leds::{is_template_select, led_messages, LedFrame, SYSEX_PREFIX};
-use crate::profile::{describe, identify, is_device_release, is_pad_off, value_for, Control};
+use crate::profile::{
+    describe, identify, is_device_release, is_focus_or_control_note, is_pad_off, value_for, Control,
+    CONTROL_NOTES, FOCUS_NOTES,
+};
 
 #[cfg(target_os = "macos")]
 pub use crate::coremidi::MidiEndpoint;
@@ -116,6 +119,10 @@ pub struct MidiSession<S: MidiSink> {
     pub led_status: String,
     sysex_buffer: Vec<u8>,
     running_status: u8,
+    /// Focus/Control note-ons we just wrote as LEDs. Inbound copies are echoes
+    /// (HUI / some Mk2 ports) and must not toggle pads — MixLink skips those ports;
+    /// we also drop the echo so Mute/Solo can latch.
+    led_note_echo: Vec<(u8, Instant)>,
 }
 
 impl MidiSession<RecordingSink> {
@@ -141,6 +148,7 @@ impl MidiSession<NullSink> {
             led_status: String::new(),
             sysex_buffer: Vec::new(),
             running_status: 0,
+            led_note_echo: Vec::new(),
         };
         s.led_status = format_led_status(None, 0, false);
         s
@@ -184,6 +192,7 @@ impl MidiSession<MidiEndpoint> {
             led_status: String::new(),
             sysex_buffer: Vec::new(),
             running_status: 0,
+            led_note_echo: Vec::new(),
         })
     }
 
@@ -216,6 +225,7 @@ impl<S: MidiSink> MidiSession<S> {
             led_status: String::new(),
             sysex_buffer: Vec::new(),
             running_status: 0,
+            led_note_echo: Vec::new(),
         }
     }
 
@@ -271,6 +281,12 @@ impl<S: MidiSink> MidiSession<S> {
             return;
         }
         self.last_send_failed = false;
+        let now = Instant::now();
+        self.led_note_echo.clear();
+        for i in 0..8 {
+            self.led_note_echo.push((FOCUS_NOTES[i], now));
+            self.led_note_echo.push((CONTROL_NOTES[i], now));
+        }
         for msg in led_messages(frame) {
             self.send_midi(&msg);
         }
@@ -280,6 +296,12 @@ impl<S: MidiSink> MidiSession<S> {
             Some(self.dest_name.as_str())
         };
         self.led_status = format_led_status(name, self.current_template, self.last_send_failed);
+    }
+
+    fn is_led_note_echo(&self, note: u8) -> bool {
+        self.led_note_echo.iter().any(|(n, at)| {
+            *n == note && at.elapsed() < LED_REFRESH_DELAY
+        })
     }
 
     /// Byte-wise ingest. Channel-status bytes abort an incomplete SysEx so
@@ -399,6 +421,11 @@ impl<S: MidiSink> MidiSession<S> {
                 return Some(SessionEvent::Control { control, value });
             }
         }
+        // LED note-ons for Focus/Control echo on some ports. Mute/Solo are notes
+        // 106/107 and are never written as LED notes — they must still latch.
+        if is_focus_or_control_note(d1) && self.is_led_note_echo(d1) {
+            return None;
+        }
         if is_pad_off(status, d1, d2) || is_device_release(status, d1, d2) {
             self.last_message = format!("{hex} pad-off");
             return Some(SessionEvent::PadOff);
@@ -429,7 +456,7 @@ mod tests {
     use crate::leds::{
         assert_full_led_packet, check_full_led_packet, is_template_select, LED_OFF, SYSEX_PREFIX,
     };
-    use crate::profile::{CONTROL_NOTES, FOCUS_NOTES};
+    use crate::profile::{describe, CONTROL_NOTES, FOCUS_NOTES};
 
     #[test]
     fn send_midi_drops_template_select() {
@@ -541,6 +568,61 @@ mod tests {
         }
         let ev = session.ingest(&[0x80, 41, 0]);
         assert_eq!(ev, vec![SessionEvent::PadOff]);
+    }
+
+    fn assert_control(session: &mut MidiSession<RecordingSink>, bytes: &[u8], want: Control) {
+        let ev = session.ingest(bytes);
+        match ev.as_slice() {
+            [SessionEvent::Control { control, .. }] => assert_eq!(*control, want),
+            other => panic!("expected {want:?}, got {other:?} ({})", session.last_message),
+        }
+        assert!(
+            !session.last_message.contains("(unmapped)"),
+            "expected mapped footer, got {}",
+            session.last_message
+        );
+        assert!(
+            session.last_message.contains(&describe(want)),
+            "footer should name {}, got {}",
+            describe(want),
+            session.last_message
+        );
+    }
+
+    #[test]
+    fn ingest_user_template_notes_and_factory_ccs() {
+        let mut session = MidiSession::recording();
+        assert_control(&mut session, &[0x90, 106, 127], Control::Mute);
+        assert_control(&mut session, &[0x90, 107, 127], Control::Solo);
+        assert_control(&mut session, &[0x90, 108, 127], Control::Arm);
+        assert_control(&mut session, &[0x90, 41, 127], Control::Focus(0));
+        assert_control(&mut session, &[0x90, 73, 127], Control::Control(0));
+        assert_control(&mut session, &[0xB0, 104, 127], Control::SendSelectUp);
+        assert_control(&mut session, &[0xB0, 20, 64], Control::AuxA(7));
+        assert_control(&mut session, &[0xB0, 106, 127], Control::TrackSelectLeft);
+        for i in 0..8u8 {
+            assert_control(&mut session, &[0xB0, 13 + i, 64], Control::AuxA(i as usize));
+            assert_control(&mut session, &[0xB0, 29 + i, 32], Control::AuxB(i as usize));
+        }
+        let off = session.ingest(&[0x80, 73, 0]);
+        assert_eq!(off, vec![SessionEvent::PadOff]);
+        assert!(session.last_message.contains("pad-off"));
+    }
+
+    #[test]
+    fn led_note_echo_does_not_drop_mute_or_solo() {
+        let mut session = MidiSession::recording();
+        let mut frame = LedFrame::default();
+        frame.mute = true;
+        session.send_leds(&frame);
+        // Focus/Control note-ons we just wrote must not look like pad presses.
+        assert!(session.ingest(&[0x90, FOCUS_NOTES[0], 127]).is_empty());
+        assert!(session.ingest(&[0x90, CONTROL_NOTES[0], 127]).is_empty());
+        // Mute/Solo are never LED note-ons — they must still latch.
+        assert_control(&mut session, &[0x90, 106, 127], Control::Mute);
+        assert_control(&mut session, &[0x90, 107, 127], Control::Solo);
+        assert_control(&mut session, &[0xB0, 111, 127], Control::Mute);
+        assert_control(&mut session, &[0xB0, 112, 127], Control::Solo);
     }
 
     #[test]

@@ -10,6 +10,8 @@ pub mod coreaudio;
 pub mod rt_thread;
 #[cfg(target_os = "macos")]
 pub mod permission;
+#[cfg(target_os = "macos")]
+pub mod display_sleep;
 
 #[cfg(not(target_os = "macos"))]
 pub mod coreaudio {

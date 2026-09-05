@@ -6,12 +6,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use analog::{
-    AnalogEngine, ChannelID, EffectRef, MixAssign, MixerBus, MixerState, ReturnLane, SessionConfig,
-    SurfaceState,
+    apply_xl, AnalogEngine, ChannelID, EffectRef, MixAssign, MixerBus, MixerState, ReturnLane,
+    SessionConfig, SurfaceState, XlEffect, XlRuntime,
 };
 use engine::{AudioTapBinding, Engine, EngineHandles, LanePlayer, Schedule, StripFeed};
 use engine_api::{UiCommand, MASTER_TAP, MIX_PLAY_MAX_LANES, TAP_COUNT};
-use midi_xl::{Control, LedFrame, MidiSession, SessionEvent, TrackControlMode as XlMode};
+use midi_xl::{describe, schedule_refresh, LedFrame, MidiSession, SessionEvent, TrackControlMode as XlMode};
 use project::{
     MixAutomationTarget, MixDocument, MixGrid, MixInsert, MixLane, MixPasteboard, MixTime, ProjectStore,
     UndoStack,
@@ -67,10 +67,9 @@ struct AppState {
     playing: bool,
     automation_armed: bool,
     show_knobs: bool,
-    send_select_up: bool,
-    send_select_down: bool,
-    relative_main: Option<(f32, f32)>,
-    last_debounce: Instant,
+    xl: XlRuntime,
+    led_refresh_at: Option<Instant>,
+    last_led: Option<LedFrame>,
     project: ProjectStore,
     mix: Option<MixDocument>,
     mixes: Vec<MixDocument>,
@@ -144,6 +143,14 @@ impl MidiIo {
             Self::Hw(s) => s.send_leds(frame),
         }
     }
+
+    fn last_message(&self) -> String {
+        match self {
+            Self::None(s) => s.last_message.clone(),
+            #[cfg(target_os = "macos")]
+            Self::Hw(s) => s.last_message.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -173,6 +180,7 @@ impl ApplicationHandler for App {
                 )
                 .expect("window"),
         );
+        native::apply_app_icon();
         let renderer = pollster::block_on(render::Renderer::new(window.clone()));
 
         let config = SessionConfig::load();
@@ -242,10 +250,9 @@ impl ApplicationHandler for App {
             playing: false,
             automation_armed: false,
             show_knobs: false,
-            send_select_up: false,
-            send_select_down: false,
-            relative_main: None,
-            last_debounce: Instant::now(),
+            xl: XlRuntime::default(),
+            led_refresh_at: None,
+            last_led: None,
             project: ProjectStore::new(),
             mix: None,
             mixes: Vec::new(),
@@ -280,6 +287,7 @@ impl ApplicationHandler for App {
             insert_refs: HashMap::new(),
             take_number: 1,
         };
+        boot.xl.clear_on_connect();
         publish_schedule(&boot);
         refresh_project_lists(&mut boot);
         load_configured_plugins(&mut boot);
@@ -414,21 +422,64 @@ impl ApplicationHandler for App {
             _ => {}
         }
     }
+
+    fn about_to_wait(&mut self, _: &ActiveEventLoop) {
+        if let Some(state) = self.state.as_mut() {
+            poll_midi_and_leds(state);
+        }
+    }
 }
 
 fn tick(state: &mut AppState) {
+    display_sleep::poll_external_wake();
     state.analog.poll_osc();
-    for ev in state.midi.drain() {
-        handle_midi(state, ev);
-    }
-    let frame = led_frame(state);
-    state.midi.send_leds(&frame);
+    poll_midi_and_leds(state);
     if state.caret_at.elapsed().as_millis() > 500 {
         state.caret_on = !state.caret_on;
         state.caret_at = Instant::now();
     }
     write_automation_if_armed(state);
     publish_schedule(state);
+}
+
+fn poll_midi_and_leds(state: &mut AppState) {
+    let events = state.midi.drain();
+    let mut pad_off = false;
+    for ev in events {
+        pad_off |= matches!(ev, SessionEvent::PadOff);
+        handle_midi(state, ev);
+    }
+    let msg = state.midi.last_message();
+    if !msg.is_empty() {
+        state.last_midi = msg;
+    }
+    sync_xl_leds(state, pad_off);
+}
+
+/// MixLink `pushPadLEDs` — write every LED, then refresh after the pad flash.
+fn push_pad_leds(state: &mut AppState) {
+    let frame = led_frame(state);
+    state.midi.send_leds(&frame);
+    state.last_led = Some(frame);
+    state.led_refresh_at = Some(Instant::now() + schedule_refresh());
+}
+
+/// MixLink `pushPadLEDs`: full write now, then one more after 80 ms so the XL’s
+/// momentary flash does not leave Mute/Solo/Focus dark. Idle frames are silent.
+fn sync_xl_leds(state: &mut AppState, reassert: bool) {
+    let frame = led_frame(state);
+    let refresh_due = state.led_refresh_at.is_some_and(|at| Instant::now() >= at);
+    if reassert || state.last_led != Some(frame) {
+        state.midi.send_leds(&frame);
+        state.last_led = Some(frame);
+        state.led_refresh_at = Some(Instant::now() + schedule_refresh());
+        return;
+    }
+    if refresh_due {
+        state.led_refresh_at = None;
+        state.midi.send_leds(&frame);
+        state.last_led = Some(frame);
+    }
 }
 
 fn led_frame(state: &AppState) -> LedFrame {
@@ -454,8 +505,8 @@ fn led_frame(state: &AppState) -> LedFrame {
         mute: matches!(state.analog.surface.track_control_mode, analog::TrackControlMode::Mute),
         solo: matches!(state.analog.surface.track_control_mode, analog::TrackControlMode::Solo),
         arm: state.recording,
-        send_up: state.send_select_up,
-        send_down: state.send_select_down,
+        send_up: state.xl.send_select_up,
+        send_down: state.xl.send_select_down,
         track_left: state.analog.config.pan_knobs_control_send_c && state.analog.config.effect_return_count >= 3,
     }
 }
@@ -463,104 +514,44 @@ fn led_frame(state: &AppState) -> LedFrame {
 fn handle_midi(state: &mut AppState, ev: SessionEvent) {
     match ev {
         SessionEvent::Control { control, value } => {
-            state.last_midi = format!("{control:?} {:.2}", value);
-            match control {
-                Control::Fader(i) => state.analog.apply_fader(i, value),
-                Control::Pan(i) => {
-                    if state.analog.config.pan_knobs_control_send_c && state.analog.config.effect_return_count >= 3 {
-                        state.analog.apply_aux(i, ReturnLane::SendC, value);
-                    } else {
-                        state.analog.apply_pan(i, value);
-                    }
+            state.last_midi = describe(control);
+            let mode_before = state.analog.surface.track_control_mode;
+            match apply_xl(&mut state.analog, &mut state.xl, control, value) {
+                XlEffect::ToggleRecord => toggle_record(state),
+                XlEffect::ToggleSleep => display_sleep::toggle(),
+                XlEffect::NudgeMain { next } => {
+                    state.analog.osc.send_float(
+                        osc::output_fader_lin(state.analog.config.main_output),
+                        next,
+                    );
                 }
-                Control::AuxA(i) => {
-                    if (state.send_select_up || state.send_select_down) && i == 7 {
-                        nudge_main(state, value);
-                    } else {
-                        state.analog.apply_aux_a(i, value);
-                    }
-                }
-                Control::AuxB(i) => state.analog.apply_aux_b(i, value),
-                Control::Focus(i) => {
-                    let prev = state.analog.surface.strips[i].assign;
-                    let next = if prev == MixAssign::Bus1 { MixAssign::Main } else { MixAssign::Bus1 };
-                    state.analog.apply_assign(i, prev, next);
-                }
-                Control::Control(i) => match state.analog.surface.track_control_mode {
-                    analog::TrackControlMode::BusAssign => {
-                        let prev = state.analog.surface.strips[i].assign;
-                        let next = if prev == MixAssign::Bus2 { MixAssign::Main } else { MixAssign::Bus2 };
-                        state.analog.apply_assign(i, prev, next);
-                    }
-                    analog::TrackControlMode::Mute => state.analog.toggle_mute(i),
-                    analog::TrackControlMode::Solo => state.analog.toggle_solo(i),
-                },
-                Control::Mute => {
-                    if debounce_ready(state) {
-                        state.analog.surface.toggle_mute_mode();
-                    }
-                }
-                Control::Solo => {
-                    if debounce_ready(state) {
-                        state.analog.surface.toggle_solo_mode();
-                    }
-                }
-                Control::Arm => {
-                    if debounce_ready(state) {
-                        toggle_record(state);
-                    }
-                }
-                Control::Device => {
-                    if debounce_ready(state) {
-                        display_sleep::toggle();
-                    }
-                }
-                Control::TrackSelectLeft => {
-                    if debounce_ready(state) && state.analog.config.effect_return_count >= 3 {
-                        let on = !state.analog.config.pan_knobs_control_send_c;
-                        state.analog.set_pan_knobs_control_send_c(on);
-                    }
-                }
-                Control::SendSelectUp => {
-                    state.send_select_up = value > 0.0;
-                    if !state.send_select_up && !state.send_select_down {
-                        state.relative_main = None;
-                    }
-                }
-                Control::SendSelectDown => {
-                    state.send_select_down = value > 0.0;
-                    if !state.send_select_up && !state.send_select_down {
-                        state.relative_main = None;
-                    }
-                }
+                XlEffect::None => {}
+            }
+            // MixLink `toggleMuteMode` / `toggleSoloMode` / `toggleControl` call
+            // `pushPadLEDs` on the same MainActor turn as the button.
+            if matches!(
+                control,
+                midi_xl::Control::Mute
+                    | midi_xl::Control::Solo
+                    | midi_xl::Control::Focus(_)
+                    | midi_xl::Control::Control(_)
+                    | midi_xl::Control::Arm
+                    | midi_xl::Control::Device
+                    | midi_xl::Control::SendSelectUp
+                    | midi_xl::Control::SendSelectDown
+                    | midi_xl::Control::TrackSelectLeft
+            ) || state.analog.surface.track_control_mode != mode_before
+            {
+                push_pad_leds(state);
             }
         }
         SessionEvent::Unmapped { status, data1, data2 } => {
-            state.last_midi = format!("MIDI {status:02X} {data1} {data2}");
+            state.last_midi = format!("{status:02X} {data1:02X} {data2:02X} (unmapped)");
         }
-        SessionEvent::PadOff | SessionEvent::TemplateChanged(_) => {}
+        SessionEvent::PadOff => {}
+        SessionEvent::TemplateChanged(_) => {}
     }
     sync_rt(state);
-}
-
-fn debounce_ready(state: &mut AppState) -> bool {
-    if state.last_debounce.elapsed().as_millis() < 250 {
-        return false;
-    }
-    state.last_debounce = Instant::now();
-    true
-}
-
-fn nudge_main(state: &mut AppState, value: f32) {
-    match state.relative_main {
-        None => state.relative_main = Some((value, state.analog.mixer.main_fader)),
-        Some((last, _)) => {
-            let next = (state.analog.mixer.main_fader + (value - last)).clamp(0.0, 1.0);
-            state.analog.mixer.main_fader = next;
-            state.analog.osc.send_float(osc::output_fader_lin(state.analog.config.main_output), next);
-            state.relative_main = Some((value, next));
-        }
-    }
 }
 
 fn toggle_record(state: &mut AppState) {
@@ -675,9 +666,18 @@ fn on_press(state: &mut AppState, event_loop: &ActiveEventLoop) {
     if let Some(hit) = chrome::hit_chrome(state.page, w, h, x, y) {
         match hit {
             ChromeHit::Play => toggle_play(state),
-            ChromeHit::Rec => toggle_record(state),
-            ChromeHit::MuteMode => state.analog.surface.toggle_mute_mode(),
-            ChromeHit::SoloMode => state.analog.surface.toggle_solo_mode(),
+            ChromeHit::Rec => {
+                toggle_record(state);
+                sync_xl_leds(state, true);
+            }
+            ChromeHit::MuteMode => {
+                state.analog.surface.toggle_mute_mode();
+                sync_xl_leds(state, true);
+            }
+            ChromeHit::SoloMode => {
+                state.analog.surface.toggle_solo_mode();
+                sync_xl_leds(state, true);
+            }
             ChromeHit::Grid => state.grid_enabled = !state.grid_enabled,
             ChromeHit::Auto => state.automation_armed = !state.automation_armed,
             ChromeHit::Knobs => state.show_knobs = !state.show_knobs,
@@ -704,6 +704,7 @@ fn on_press(state: &mut AppState, event_loop: &ActiveEventLoop) {
             MixerExtraHit::ControlWithPan => {
                 let on = !state.analog.config.pan_knobs_control_send_c;
                 state.analog.set_pan_knobs_control_send_c(on);
+                sync_xl_leds(state, true);
             }
         }
         return;
@@ -1368,6 +1369,9 @@ fn handle_overlay_press(state: &mut AppState, overlay: &Overlay, x: f32, y: f32,
             if overlay::contains(hits.post_fader, x, y) {
                 let on = !state.analog.config.sends_post_fader;
                 state.analog.set_sends_post_fader(on);
+            } else if overlay::contains(hits.hardware_strips, x, y) {
+                let on = !state.analog.config.hardware_strips;
+                state.analog.set_hardware_strips(on);
             } else if overlay::contains(hits.osc_host, x, y) {
                 state.text_focus = TextFocus::OscHost;
             } else if overlay::contains(hits.osc_send, x, y) {
@@ -1945,7 +1949,11 @@ fn apply_settings(state: &mut AppState) {
     #[cfg(target_os = "macos")]
     {
         match MidiSession::connect(&state.analog.config.midi_device_contains) {
-            Ok(s) => state.midi = MidiIo::Hw(s),
+            Ok(s) => {
+                state.midi = MidiIo::Hw(s);
+                state.xl.clear_on_connect();
+                state.last_led = None;
+            }
             Err(e) => log::warn!("MIDI: {e}"),
         }
     }
@@ -2184,18 +2192,27 @@ fn publish_schedule(state: &AppState) {
     }
     schedule.taps[MASTER_TAP] = AudioTapBinding::master_mix();
 
-    for lane in analog::ALL_SEND_LANES {
-        let Some(EffectRef::Plugin(id)) = state.analog.config.effect_ref(lane) else {
-            continue;
-        };
+    for slot in 0..8 {
+        let id = slot as i32;
         let Some(plugin) = state.analog.config.plugin(id) else {
             continue;
         };
         if !plugin.is_loaded() {
             continue;
         }
-        let slot = id as usize;
-        if slot >= 8 {
+        let used = analog::ALL_SEND_LANES.iter().any(|lane| {
+            matches!(
+                state.analog.config.send_destination(*lane),
+                Some(analog::SendDestination::Plugin(pid)) if pid == id
+            )
+        }) || matches!(
+            state.analog.config.send_destination(ReturnLane::Bus1),
+            Some(analog::SendDestination::Plugin(pid)) if pid == id
+        ) || matches!(
+            state.analog.config.send_destination(ReturnLane::Bus2),
+            Some(analog::SendDestination::Plugin(pid)) if pid == id
+        );
+        if !used {
             continue;
         }
         schedule.routes[slot].enabled = true;
@@ -2203,7 +2220,7 @@ fn publish_schedule(state: &AppState) {
         for (i, strip) in state.analog.config.strips.iter().enumerate().take(8) {
             schedule.routes[slot].feeds[i] = StripFeed {
                 channel: strip.index,
-                gain: state.analog.surface.strips[i].aux(lane),
+                gain: state.analog.plugin_send_gain(id, i),
                 linked: strip.linked_stereo,
             };
         }

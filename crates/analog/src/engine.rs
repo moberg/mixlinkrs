@@ -1,9 +1,9 @@
 //! Control-surface brain. UI and MIDI call these methods; they never send OSC.
 
 use osc::{
-    balpan_to_pan_unit, fader_db, mix_balpan, mix_fader, mix_fader_lin, pan_unit_to_balpan,
-    post_fader_lin, send_lin_from_post, strip_mute, strip_solo, OscSession, OscValue, FADER_LIN_0DB,
-    LIN_EPS,
+    balpan_to_pan_unit, fader_db, fader_lin_to_amp, mix_balpan, mix_fader, mix_fader_lin,
+    pan_unit_to_balpan, post_fader_lin, send_lin_from_post, strip_mute, strip_solo, OscSession,
+    OscValue, FADER_LIN_0DB, LIN_EPS,
 };
 
 use crate::config::SessionConfig;
@@ -848,7 +848,52 @@ impl AnalogEngine {
     }
 
     pub fn persist(&mut self) {
-        self.config.save();
+        #[cfg(not(test))]
+        {
+            self.config.save();
+        }
+    }
+
+    /// MixLink `PluginHost.syncSends` gain for one plugin slot / strip.
+    #[must_use]
+    pub fn plugin_send_gain(&self, slot: i32, strip: usize) -> f32 {
+        let Some(row) = self.surface.strips.get(strip) else {
+            return 0.0;
+        };
+        if !self.config.is_strip_enabled(strip) {
+            return 0.0;
+        }
+        let mut gain = 0.0;
+        for lane in crate::types::ALL_SEND_LANES {
+            if matches!(self.config.send_destination(lane), Some(SendDestination::Plugin(id)) if id == slot)
+            {
+                let mut amount = row.aux(lane);
+                if self.config.sends_post_fader {
+                    amount *= fader_lin_to_amp(row.fader);
+                }
+                gain += amount;
+            }
+        }
+        if row.assign == MixAssign::Bus1
+            && matches!(
+                self.config.send_destination(ReturnLane::Bus1),
+                Some(SendDestination::Plugin(id)) if id == slot
+            )
+        {
+            gain += row.fader;
+        }
+        if row.assign == MixAssign::Bus2
+            && matches!(
+                self.config.send_destination(ReturnLane::Bus2),
+                Some(SendDestination::Plugin(id)) if id == slot
+            )
+        {
+            gain += row.fader;
+        }
+        if gain > 0.0 && self.config.sends_post_fader && self.strip_silenced_for_post_send(strip) {
+            return 0.0;
+        }
+        gain
     }
 
     pub fn selected_name(&self, id: ChannelID) -> String {
@@ -979,6 +1024,11 @@ impl AnalogEngine {
     pub fn set_sends_post_fader(&mut self, on: bool) {
         self.config.sends_post_fader = on;
         self.rewrite_aux_sends(None);
+        self.persist();
+    }
+
+    pub fn set_hardware_strips(&mut self, on: bool) {
+        self.config.hardware_strips = on;
         self.persist();
     }
 

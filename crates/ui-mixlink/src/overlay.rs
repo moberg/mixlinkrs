@@ -93,6 +93,15 @@ pub fn paint_settings(engine: &AnalogEngine, w: f32, h: f32, focus: &TextFocus, 
         if engine.config.sends_post_fader { "On" } else { "Off" },
     );
     y += 32.0;
+    field_label(&mut cmds, rect.x + 16.0, y, "Hardware strips");
+    widgets::checkbox(
+        &mut cmds,
+        rect.x + 160.0,
+        y + 2.0,
+        engine.config.hardware_strips,
+        if engine.config.hardware_strips { "On" } else { "Off" },
+    );
+    y += 32.0;
     field_label(&mut cmds, rect.x + 16.0, y, "OSC host");
     widgets::text_field(
         &mut cmds,
@@ -281,7 +290,7 @@ fn paint_channel_col(
 }
 
 fn field_label(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, s: &str) {
-    theme::text(cmds, Rect { x, y, w: 120.0, h: 24.0 }, s, 14.0, theme::TEXT_DIM, false);
+    theme::text(cmds, Rect { x, y, w: 140.0, h: 24.0 }, s, 14.0, theme::TEXT_DIM, false);
 }
 
 pub fn settings_hits(w: f32, h: f32) -> SettingsHits {
@@ -289,17 +298,19 @@ pub fn settings_hits(w: f32, h: f32) -> SettingsHits {
     SettingsHits {
         panel: rect,
         post_fader: Rect { x: rect.x + 160.0, y: rect.y + 40.0, w: 80.0, h: 20.0 },
-        osc_host: Rect { x: rect.x + 140.0, y: rect.y + 72.0, w: 260.0, h: 24.0 },
-        osc_send: Rect { x: rect.x + 140.0, y: rect.y + 104.0, w: 260.0, h: 24.0 },
-        osc_listen: Rect { x: rect.x + 140.0, y: rect.y + 136.0, w: 260.0, h: 24.0 },
-        midi: Rect { x: rect.x + 140.0, y: rect.y + 168.0, w: 260.0, h: 24.0 },
-        apply: Rect { x: rect.x + 140.0, y: rect.y + 208.0, w: 160.0, h: 26.0 },
+        hardware_strips: Rect { x: rect.x + 160.0, y: rect.y + 72.0, w: 80.0, h: 20.0 },
+        osc_host: Rect { x: rect.x + 140.0, y: rect.y + 104.0, w: 260.0, h: 24.0 },
+        osc_send: Rect { x: rect.x + 140.0, y: rect.y + 136.0, w: 260.0, h: 24.0 },
+        osc_listen: Rect { x: rect.x + 140.0, y: rect.y + 168.0, w: 260.0, h: 24.0 },
+        midi: Rect { x: rect.x + 140.0, y: rect.y + 200.0, w: 260.0, h: 24.0 },
+        apply: Rect { x: rect.x + 140.0, y: rect.y + 240.0, w: 160.0, h: 26.0 },
     }
 }
 
 pub struct SettingsHits {
     pub panel: Rect,
     pub post_fader: Rect,
+    pub hardware_strips: Rect,
     pub osc_host: Rect,
     pub osc_send: Rect,
     pub osc_listen: Rect,

@@ -6,7 +6,12 @@ use render::{aspect_fill_uv, DrawCmd, Rect, TextureId};
 use crate::theme::{self, Color, Layout};
 
 /// MixLink `FaderCapView`: stem, Gaussian-ish drop shadow, then the PNG.
-pub fn fader_cap(cmds: &mut Vec<DrawCmd>, rect: Rect) {
+/// `hardware` uses the icon-style cream cap with a horizontal score only.
+pub fn fader_cap(cmds: &mut Vec<DrawCmd>, rect: Rect, hardware: bool) {
+    if hardware {
+        hardware_fader_cap(cmds, rect);
+        return;
+    }
     // Stem sits under the cap and peeks out the bottom (MixLink offset y: 5).
     let stem = Rect {
         x: rect.x + rect.w * 0.5 - 2.5,
@@ -27,6 +32,18 @@ pub fn fader_cap(cmds: &mut Vec<DrawCmd>, rect: Rect) {
         rect,
         uv: aspect_fill_uv(30.0, 53.0, rect.w, rect.h),
         texture: TextureId::FaderCap,
+    });
+}
+
+/// Cap cropped from the app icon (97×192).
+const HARDWARE_CAP_SRC: (f32, f32) = (97.0, 192.0);
+
+fn hardware_fader_cap(cmds: &mut Vec<DrawCmd>, rect: Rect) {
+    soft_rect_shadow(cmds, rect, 0.85, 6.0, 0.6, 2.6, 9.0);
+    cmds.push(DrawCmd::Image {
+        rect,
+        uv: aspect_fill_uv(HARDWARE_CAP_SRC.0, HARDWARE_CAP_SRC.1, rect.w, rect.h),
+        texture: TextureId::HardwareFaderCap,
     });
 }
 

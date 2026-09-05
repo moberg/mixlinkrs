@@ -50,6 +50,7 @@ dependencies = [
 name = "analog"
 version = "0.1.0"
 dependencies = [
+ "midi-xl",
  "osc",
  "serde",
  "serde_json",

@@ -59,6 +59,16 @@ pub struct TextCmd {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextureId {
     FaderCap,
+    HardwareFaderCap,
+}
+
+impl TextureId {
+    pub fn atlas_index(self) -> usize {
+        match self {
+            Self::FaderCap => 0,
+            Self::HardwareFaderCap => 1,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

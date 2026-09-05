@@ -1,6 +1,6 @@
 //! Textured-quad pipeline for MixLink bitmaps (FaderCap.png).
 
-use crate::scene::{DrawCmd, Rect, TextureId};
+use crate::scene::{DrawCmd, Rect};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -22,6 +22,28 @@ pub struct ImageAtlas {
     pub vbo: wgpu::Buffer,
     pub vbo_cap: u64,
     pub src_size: (u32, u32),
+    /// Per-sprite UV in atlas space (0–1).
+    sprites: [Rect; 2],
+}
+
+fn decode_rgba(png_bytes: &[u8]) -> (u32, u32, Vec<u8>) {
+    let decoder = png::Decoder::new(std::io::Cursor::new(png_bytes));
+    let mut reader = decoder.read_info().expect("decode fader PNG");
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).expect("png frame");
+    let (w, h) = (info.width, info.height);
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => buf,
+        png::ColorType::Rgb => {
+            let mut out = Vec::with_capacity((w * h * 4) as usize);
+            for px in buf.chunks_exact(3) {
+                out.extend_from_slice(&[px[0], px[1], px[2], 255]);
+            }
+            out
+        }
+        other => panic!("unsupported fader PNG color type {other:?}"),
+    };
+    (w, h, rgba)
 }
 
 impl ImageAtlas {
@@ -29,28 +51,34 @@ impl ImageAtlas {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         format: wgpu::TextureFormat,
-        png_bytes: &[u8],
+        pngs: &[&[u8]],
     ) -> Self {
-        let decoder = png::Decoder::new(std::io::Cursor::new(png_bytes));
-        let mut reader = decoder.read_info().expect("decode FaderCap.png");
-        let mut buf = vec![0; reader.output_buffer_size()];
-        let info = reader.next_frame(&mut buf).expect("png frame");
-        let (w, h) = (info.width, info.height);
-        let rgba = match info.color_type {
-            png::ColorType::Rgba => buf,
-            png::ColorType::Rgb => {
-                let mut out = Vec::with_capacity((w * h * 4) as usize);
-                for px in buf.chunks_exact(3) {
-                    out.extend_from_slice(&[px[0], px[1], px[2], 255]);
-                }
-                out
+        assert_eq!(pngs.len(), 2);
+        let decoded: Vec<(u32, u32, Vec<u8>)> = pngs.iter().map(|b| decode_rgba(b)).collect();
+        let atlas_h = decoded.iter().map(|d| d.1).max().unwrap();
+        let atlas_w = decoded.iter().map(|d| d.0).sum::<u32>();
+        let mut atlas = vec![0u8; (atlas_w * atlas_h * 4) as usize];
+        let mut sprites = [Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 }; 2];
+        let mut x_off = 0u32;
+        for (i, (w, h, rgba)) in decoded.iter().enumerate() {
+            for row in 0..*h {
+                let src = (row * w * 4) as usize;
+                let dst = ((row * atlas_w + x_off) * 4) as usize;
+                atlas[dst..dst + (*w as usize * 4)]
+                    .copy_from_slice(&rgba[src..src + (*w as usize * 4)]);
             }
-            other => panic!("unsupported FaderCap color type {other:?}"),
-        };
+            sprites[i] = Rect {
+                x: x_off as f32 / atlas_w as f32,
+                y: 0.0,
+                w: *w as f32 / atlas_w as f32,
+                h: *h as f32 / atlas_h as f32,
+            };
+            x_off += w;
+        }
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("fader-cap"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            label: Some("fader-atlas"),
+            size: wgpu::Extent3d { width: atlas_w, height: atlas_h, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -65,14 +93,16 @@ impl ImageAtlas {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &rgba,
+            &atlas,
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(w * 4),
-                rows_per_image: Some(h),
+                bytes_per_row: Some(atlas_w * 4),
+                rows_per_image: Some(atlas_h),
             },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            wgpu::Extent3d { width: atlas_w, height: atlas_h, depth_or_array_layers: 1 },
         );
+        let w = atlas_w;
+        let h = atlas_h;
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("fader-cap-sampler"),
@@ -165,16 +195,24 @@ impl ImageAtlas {
             vbo,
             vbo_cap,
             src_size: (w, h),
+            sprites,
         }
     }
 
-    pub fn tessellate(scene: &[DrawCmd], viewport: (f32, f32)) -> Vec<ImageVertex> {
+    pub fn tessellate(&self, scene: &[DrawCmd], viewport: (f32, f32)) -> Vec<ImageVertex> {
         let (vw, vh) = viewport;
         let map = |x: f32, y: f32| -> [f32; 2] { [2.0 * x / vw - 1.0, 1.0 - 2.0 * y / vh] };
         let mut out = Vec::new();
         for cmd in scene {
-            if let DrawCmd::Image { rect, uv, texture: TextureId::FaderCap } = cmd {
-                push_image(&mut out, rect, uv, map);
+            if let DrawCmd::Image { rect, uv, texture } = cmd {
+                let sprite = self.sprites[texture.atlas_index()];
+                let atlas_uv = Rect {
+                    x: sprite.x + uv.x * sprite.w,
+                    y: sprite.y + uv.y * sprite.h,
+                    w: uv.w * sprite.w,
+                    h: uv.h * sprite.h,
+                };
+                push_image(&mut out, rect, &atlas_uv, map);
             }
         }
         out

@@ -35,5 +35,5 @@ hound.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 platform-mac.workspace = true
 objc2.workspace = true
-objc2-foundation.workspace = true
-objc2-app-kit.workspace = true
+objc2-foundation = { workspace = true, features = ["NSData"] }
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSImage"] }
