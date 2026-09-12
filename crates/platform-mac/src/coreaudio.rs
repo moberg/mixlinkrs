@@ -1,4 +1,5 @@
-//! Duplex CoreAudio IOProc. MixLink model: input + output on one device.
+//! CoreAudio IOProc. Prefer a duplex interface; stereo output-only devices
+//! (built-in speakers, headphones) are allowed for playback with silent inputs.
 
 use std::cell::UnsafeCell;
 use std::ffi::c_void;
@@ -31,7 +32,7 @@ pub enum CaError {
     Os(OSStatus),
     #[error("no device matching '{0}'")]
     NoDevice(String),
-    #[error("device is not duplex (in={inputs}, out={outputs})")]
+    #[error("device has no stereo output (in={inputs}, out={outputs})")]
     NotDuplex { inputs: u32, outputs: u32 },
 }
 
@@ -44,8 +45,11 @@ pub struct DeviceInfo {
 }
 
 impl DeviceInfo {
+    /// Stereo (or wider) output is enough to open a stream. Built-in speakers and
+    /// Bluetooth headphones are often output-only; input taps stay silent until a
+    /// duplex interface is selected.
     pub fn usable(&self) -> bool {
-        self.inputs >= 2 && self.outputs >= 2
+        self.outputs >= 2
     }
 }
 

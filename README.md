@@ -16,7 +16,7 @@ are shared with the Swift MixLink app.
 - TotalMix FX 2.1+ with **Global OSC** enabled
 - Network access on first VST3 build, to fetch the Steinberg SDK
 - Optional: Launch Control XL Mk2
-- Optional: RME Fireface (or any duplex device matching `audioDeviceContains`)
+- Optional: RME Fireface (or any stereo-output device matching `audioDeviceContains`)
 
 ## Run
 
