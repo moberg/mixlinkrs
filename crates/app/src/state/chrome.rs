@@ -44,6 +44,52 @@ pub(crate) struct Chrome {
     pub show_mixer: bool,
     pub show_inserts: bool,
     pub mixer_scroll: f32,
+    pub mixer_touch: Option<TouchPulse<StripKind>>,
+    pub mix_touch: Option<TouchPulse<usize>>,
+}
+
+pub(crate) struct TouchPulse<T> {
+    pub id: T,
+    pub started: Instant,
+    pub last: Instant,
+}
+
+impl Chrome {
+    pub fn note_strip(&mut self, kind: StripKind) {
+        note_pulse(&mut self.mixer_touch, kind);
+    }
+
+    pub fn note_mix_track(&mut self, track: usize) {
+        note_pulse(&mut self.mix_touch, track);
+    }
+
+    pub fn active_strip_glow(&self) -> Option<(StripKind, f32)> {
+        pulse_glow(&self.mixer_touch)
+    }
+
+    pub fn active_mix_glow(&self) -> Option<(usize, f32)> {
+        pulse_glow(&self.mix_touch)
+    }
+}
+
+fn note_pulse<T: PartialEq>(slot: &mut Option<TouchPulse<T>>, id: T) {
+    let now = Instant::now();
+    let live = ui_mixlink::mixer::STRIP_TOUCH_HOLD + ui_mixlink::mixer::STRIP_TOUCH_FADE;
+    match slot {
+        Some(pulse) if pulse.id == id && pulse.last.elapsed().as_secs_f32() < live => {
+            pulse.last = now;
+        }
+        _ => *slot = Some(TouchPulse { id, started: now, last: now }),
+    }
+}
+
+fn pulse_glow<T: Copy>(slot: &Option<TouchPulse<T>>) -> Option<(T, f32)> {
+    let pulse = slot.as_ref()?;
+    let amount = ui_mixlink::mixer::strip_touch_alpha(
+        pulse.started.elapsed().as_secs_f32(),
+        pulse.last.elapsed().as_secs_f32(),
+    );
+    (amount > 0.01).then_some((pulse.id, amount))
 }
 
 /// MixLink `Window("Channels")` — dedicated wgpu window, not a mixer overlay.

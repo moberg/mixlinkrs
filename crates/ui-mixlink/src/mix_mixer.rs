@@ -39,6 +39,7 @@ pub struct MixMixerView<'a> {
     pub control_room_fader: f32,
     pub control_room_peak: f32,
     pub engine: &'a AnalogEngine,
+    pub touch: Option<(usize, f32)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -154,6 +155,11 @@ fn paint_track(
             Rect { x, y, w, h: 2.0 },
             [theme::ORANGE[0], theme::ORANGE[1], theme::ORANGE[2], 0.85],
         );
+    }
+    if let Some((touched, amount)) = view.touch {
+        if touched == index && amount > 0.01 {
+            theme::strip_touch(cmds, Rect { x, y: view.y, w, h: view.h }, amount);
+        }
     }
 
     if view.show_knobs {

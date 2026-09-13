@@ -48,7 +48,7 @@ impl MixerLayout {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StripKind {
     Input(usize),
     Return(ReturnLane),
@@ -60,6 +60,25 @@ pub struct MixerView<'a> {
     pub peaks: &'a [f32],
     pub layout: MixerLayout,
     pub deck: crate::deck::DeckView,
+    /// Whole-strip glow for the last volume / pan / send that moved.
+    pub touch: Option<(StripKind, f32)>,
+}
+
+/// Ease in, hold while the control keeps moving, then ease out.
+pub const STRIP_TOUCH_FADE_IN: f32 = 0.16;
+pub const STRIP_TOUCH_HOLD: f32 = 0.35;
+pub const STRIP_TOUCH_FADE: f32 = 0.70;
+
+pub fn strip_touch_alpha(since_start: f32, since_last: f32) -> f32 {
+    let fade_in = (since_start / STRIP_TOUCH_FADE_IN).clamp(0.0, 1.0);
+    let fade_out = if since_last <= STRIP_TOUCH_HOLD {
+        1.0
+    } else if since_last >= STRIP_TOUCH_HOLD + STRIP_TOUCH_FADE {
+        0.0
+    } else {
+        1.0 - (since_last - STRIP_TOUCH_HOLD) / STRIP_TOUCH_FADE
+    };
+    fade_in * fade_out
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -436,6 +455,12 @@ fn paint_strip(
             theme::channel_seam(cmds, x, y0, (l.y + l.h - y0).max(0.0), false);
         }
         theme::channel_seam(cmds, x + w - 1.0, body_y, body_h, false);
+    }
+
+    if let Some((touched, amount)) = view.touch {
+        if touched == kind && amount > 0.01 {
+            theme::strip_touch(cmds, Rect { x, y: y0, w, h: l.h }, amount);
+        }
     }
 }
 
@@ -1035,6 +1060,7 @@ mod tests {
             peaks: &peaks,
             layout,
             deck: crate::deck::DeckView::default(),
+            touch: None,
         });
         let seams = cmds.iter().any(|c| {
             let rect = match c {
@@ -1089,6 +1115,7 @@ mod tests {
             peaks: &peaks,
             layout,
             deck: crate::deck::DeckView::default(),
+            touch: None,
         });
         let dark = theme::material_for(theme::SurfaceStyle::FaderBay).middle;
         let overflow = cmds.iter().any(|c| match c {
@@ -1130,6 +1157,7 @@ mod tests {
             peaks: &peaks,
             layout,
             deck: crate::deck::DeckView::default(),
+            touch: None,
         });
         let texts: Vec<&str> = cmds
             .iter()
@@ -1173,5 +1201,44 @@ mod tests {
             _ => false,
         });
         assert!(!empty_seams, "no group dividers in the empty send-stack above leftover");
+    }
+
+    #[test]
+    fn strip_touch_holds_then_fades() {
+        assert!(strip_touch_alpha(0.0, 0.0) < 0.05, "should ease in, not pop on");
+        assert!((strip_touch_alpha(STRIP_TOUCH_FADE_IN, 0.0) - 1.0).abs() < 0.001);
+        assert!((strip_touch_alpha(1.0, STRIP_TOUCH_HOLD) - 1.0).abs() < 0.001);
+        let mid = strip_touch_alpha(1.0, STRIP_TOUCH_HOLD + STRIP_TOUCH_FADE * 0.5);
+        assert!(mid > 0.4 && mid < 0.6, "mid fade {mid}");
+        assert_eq!(strip_touch_alpha(1.0, STRIP_TOUCH_HOLD + STRIP_TOUCH_FADE), 0.0);
+        assert_eq!(strip_touch_alpha(4.0, 4.0), 0.0);
+    }
+
+    #[test]
+    fn touched_strip_wash_covers_the_full_channel() {
+        let engine = test_engine();
+        let send_count = engine.config.visible_send_lanes().len();
+        let layout = MixerLayout::new(0.0, 0.0, 1600.0, 900.0, send_count);
+        let peaks = [0.0f32; 17];
+        let (sx, sw) = strip_frame(&layout, send_count, StripKind::Input(3));
+        let (cmds, _) = paint(&MixerView {
+            engine: &engine,
+            peaks: &peaks,
+            layout,
+            deck: crate::deck::DeckView::default(),
+            touch: Some((StripKind::Input(3), 1.0)),
+        });
+        let wash = cmds.iter().any(|c| match c {
+            DrawCmd::Rect { rect, color } => {
+                (rect.x - sx).abs() < 0.5
+                    && (rect.w - sw).abs() < 0.5
+                    && (rect.y - layout.y).abs() < 0.5
+                    && (rect.h - layout.h).abs() < 0.5
+                    && color[3] > 0.003
+                    && color[3] < 0.02
+            }
+            _ => false,
+        });
+        assert!(wash, "touched channel should lift the whole strip without taking over");
     }
 }

@@ -102,12 +102,14 @@ impl AppState {
         if let Some(t) = self.mix_track_mut(track) {
             t.fader = v;
         }
+        self.chrome.note_mix_track(track);
     }
 
     pub(crate) fn set_mix_pan(&mut self, track: usize, v: f32) {
         if let Some(t) = self.mix_track_mut(track) {
             t.pan = v;
         }
+        self.chrome.note_mix_track(track);
     }
 
     pub(crate) fn set_mix_knob(&mut self, track: usize, knob: usize, v: f32) {
@@ -116,6 +118,7 @@ impl AppState {
                 *slot = v;
             }
         }
+        self.chrome.note_mix_track(track);
     }
 
     pub(crate) fn rename_mix(&mut self, id: uuid::Uuid, name: String) {

@@ -85,6 +85,7 @@ impl AppState {
                     engine: &self.surface.analog,
                     peaks: &peaks,
                     layout,
+                    touch: self.chrome.active_strip_glow(),
                     deck: ui_mixlink::deck::DeckView {
                         recording: self.audio.recording,
                         take_number: take,
@@ -164,6 +165,7 @@ impl AppState {
                         self.audio.engine_handles.listen_peak.load(Ordering::Relaxed),
                     ),
                     engine: &self.surface.analog,
+                    touch: self.chrome.active_mix_glow(),
                 }));
                 scene.extend(ui_mixlink::mix_browser::paint(&self.mix_browser_view()));
             }

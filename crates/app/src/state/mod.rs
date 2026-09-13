@@ -189,6 +189,8 @@ impl AppState {
                 show_mixer: true,
                 show_inserts: false,
                 mixer_scroll: 0.0,
+                mixer_touch: None,
+                mix_touch: None,
             },
         };
         boot.surface.xl.clear_on_connect();

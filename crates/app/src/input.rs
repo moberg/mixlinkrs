@@ -292,6 +292,7 @@ impl AppState {
                 Hit::Fader { kind, rail_top, rail_bot } => {
                     if double {
                         self.surface.set_fader(kind, osc::FADER_LIN_0DB);
+                        self.chrome.note_strip(kind);
                     } else {
                         self.chrome.drag = Some(Drag::Fader { kind, rail_top, rail_bot });
                         self.apply_drag(x, y);
@@ -300,6 +301,7 @@ impl AppState {
                 Hit::Knob { kind, lane, .. } => {
                     if double && lane.is_none() {
                         self.surface.set_pan(kind, 0.5);
+                        self.chrome.note_strip(kind);
                     } else {
                         let start = self.surface.current_knob(kind, lane);
                         self.chrome.drag = Some(Drag::Knob { kind, lane, start_y: y, start });
@@ -485,6 +487,7 @@ impl AppState {
                 let h = (rail_bot - rail_top).max(1.0);
                 let t = ((rail_bot - y) / h).clamp(0.0, 1.0);
                 self.surface.set_fader(kind, t);
+                self.chrome.note_strip(kind);
             }
             Some(Drag::Knob { kind, lane, start_y, start }) => {
                 let next = (start - (y - start_y) / Layout::KNOB_DRAG_PX).clamp(0.0, 1.0);
@@ -495,6 +498,7 @@ impl AppState {
                 } else {
                     self.surface.set_pan(kind, next);
                 }
+                self.chrome.note_strip(kind);
             }
             Some(Drag::Zoom { start_ppb, start_scroll, anchor_bar, start_x, start_y, .. }) => {
                 let dx = x - start_x;
@@ -676,6 +680,7 @@ impl AppState {
                         kind,
                         (self.surface.current_fader(kind) + dy * 0.002).clamp(0.0, 1.0),
                     );
+                    self.chrome.note_strip(kind);
                     return;
                 }
                 Hit::Knob { kind, lane, .. } => {
@@ -687,6 +692,7 @@ impl AppState {
                     } else {
                         self.surface.set_pan(kind, next);
                     }
+                    self.chrome.note_strip(kind);
                     return;
                 }
                 Hit::MixFader { track, .. } => {

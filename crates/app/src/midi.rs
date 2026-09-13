@@ -161,8 +161,13 @@ impl AppState {
                             osc::output_fader_lin(self.surface.analog.config.main_output),
                             next,
                         );
+                        self.chrome.note_strip(ui_mixlink::mixer::StripKind::Main);
                     }
-                    XlEffect::None => {}
+                    XlEffect::None => {
+                        if let Some(kind) = xl_strip_touch(control) {
+                            self.chrome.note_strip(kind);
+                        }
+                    }
                 }
                 // MixLink `toggleMuteMode` / `toggleSoloMode` / `toggleControl` call
                 // `pushPadLEDs` on the same MainActor turn as the button.
@@ -189,5 +194,16 @@ impl AppState {
             SessionEvent::TemplateChanged(_) => {}
         }
         self.sync_rt();
+    }
+}
+
+fn xl_strip_touch(control: midi_xl::Control) -> Option<ui_mixlink::mixer::StripKind> {
+    use midi_xl::Control;
+    use ui_mixlink::mixer::StripKind;
+    match control {
+        Control::Fader(i) | Control::Pan(i) | Control::AuxA(i) | Control::AuxB(i) => {
+            Some(StripKind::Input(i))
+        }
+        _ => None,
     }
 }

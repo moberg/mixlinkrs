@@ -466,6 +466,22 @@ pub fn faceplate_seam(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, w: f32) {
     fill(cmds, Rect { x, y: y + 1.0, w, h: 1.0 }, SEAM_HIGHLIGHT);
 }
 
+/// Whole-strip cue while a fader, pan, or send is being turned. A whisper of
+/// lift plus 1pt rails — enough to find the column, not a takeover.
+pub fn strip_touch(cmds: &mut Vec<DrawCmd>, rect: Rect, amount: f32) {
+    if amount <= 0.01 || rect.w <= 1.0 || rect.h <= 1.0 {
+        return;
+    }
+    let a = amount.clamp(0.0, 1.0);
+    fill(cmds, rect, [1.0, 1.0, 1.0, 0.007 * a]);
+    fill(cmds, Rect { x: rect.x, y: rect.y, w: 1.0, h: rect.h }, [1.0, 0.96, 0.86, 0.04 * a]);
+    fill(
+        cmds,
+        Rect { x: rect.x + rect.w - 1.0, y: rect.y, w: 1.0, h: rect.h },
+        [1.0, 0.96, 0.86, 0.04 * a],
+    );
+}
+
 /// MixLink `ChannelSeam`: 2 pt falloff + two 1 pt lines.
 pub fn channel_seam(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, h: f32, strong: bool) {
     if h <= 1.0 {
