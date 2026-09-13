@@ -1,6 +1,6 @@
 //! Mix document types and take WAV naming. JSON keys match MixLink Codable.
 
-use analog::{ReturnLane, ALL_SEND_LANES, BUS_LANES, MAX_SEND_COUNT};
+use analog::{ChainRef, ReturnLane, ALL_SEND_LANES, BUS_LANES, MAX_SEND_COUNT};
 use serde::de::{self, Deserializer};
 use serde::ser::{SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
@@ -475,8 +475,17 @@ pub struct MixTrack {
     pub knobs: Vec<f32>,
     pub knob_maps: Vec<Option<MixKnobMap>>,
     pub clips: Vec<MixClip>,
+    #[serde(default)]
     pub inserts: Vec<MixInsert>,
+    #[serde(default)]
+    pub effect_chain: Option<ChainRef>,
+    #[serde(default = "default_hw_chain_enabled")]
+    pub hardware_chain_enabled: bool,
     pub automation: Vec<MixAutomationLane>,
+}
+
+fn default_hw_chain_enabled() -> bool {
+    true
 }
 
 impl MixTrack {
@@ -493,6 +502,8 @@ impl MixTrack {
             knob_maps: vec![None; KNOB_COUNT],
             clips: Vec::new(),
             inserts: Vec::new(),
+            effect_chain: None,
+            hardware_chain_enabled: true,
             automation: Vec::new(),
         }
     }

@@ -197,7 +197,7 @@ impl<'de> Deserialize<'de> for ReturnLane {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SendDestination {
     Output(i32),
-    Plugin(i32),
+    Plugin(uuid::Uuid),
 }
 
 impl Serialize for SendDestination {
@@ -209,9 +209,9 @@ impl Serialize for SendDestination {
                 c.serialize_field("kind", "output")?;
                 c.serialize_field("index", index)?;
             }
-            Self::Plugin(index) => {
+            Self::Plugin(id) => {
                 c.serialize_field("kind", "plugin")?;
-                c.serialize_field("index", index)?;
+                c.serialize_field("id", id)?;
             }
         }
         c.end()
@@ -240,19 +240,30 @@ impl<'de> Deserialize<'de> for SendDestination {
             fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
                 let mut kind: Option<String> = None;
                 let mut index: Option<i32> = None;
+                let mut id: Option<uuid::Uuid> = None;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "kind" => kind = Some(map.next_value()?),
                         "index" => index = Some(map.next_value()?),
+                        "id" => id = Some(map.next_value()?),
                         _ => {
                             let _: de::IgnoredAny = map.next_value()?;
                         }
                     }
                 }
-                let index = index.ok_or_else(|| de::Error::missing_field("index"))?;
                 match kind.as_deref() {
-                    Some("plugin") => Ok(SendDestination::Plugin(index)),
-                    _ => Ok(SendDestination::Output(index)),
+                    Some("plugin") => {
+                        if let Some(id) = id {
+                            Ok(SendDestination::Plugin(id))
+                        } else {
+                            let index = index.unwrap_or(0);
+                            Ok(SendDestination::Plugin(uuid::Uuid::from_u128(index as u128)))
+                        }
+                    }
+                    _ => {
+                        let index = index.ok_or_else(|| de::Error::missing_field("index"))?;
+                        Ok(SendDestination::Output(index))
+                    }
                 }
             }
         }
@@ -261,6 +272,7 @@ impl<'de> Deserialize<'de> for SendDestination {
     }
 }
 
+/// Legacy single-effect pointer. Read on load only; assignments are [`ChainRef`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EffectRef {
     Hardware(i32),
@@ -298,6 +310,184 @@ impl<'de> Deserialize<'de> for EffectRef {
             _ => Ok(Self::Hardware(raw.id)),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ChainKind {
+    Hardware,
+    Plugin,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ChainRef {
+    pub kind: ChainKind,
+    pub id: uuid::Uuid,
+}
+
+impl ChainRef {
+    pub fn hardware(id: uuid::Uuid) -> Self {
+        Self { kind: ChainKind::Hardware, id }
+    }
+
+    pub fn plugin(id: uuid::Uuid) -> Self {
+        Self { kind: ChainKind::Plugin, id }
+    }
+}
+
+impl Serialize for ChainRef {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut c = serializer.serialize_struct("ChainRef", 2)?;
+        match self.kind {
+            ChainKind::Hardware => c.serialize_field("kind", "hardware")?,
+            ChainKind::Plugin => c.serialize_field("kind", "plugin")?,
+        }
+        c.serialize_field("id", &self.id)?;
+        c.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ChainRef {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            kind: String,
+            id: uuid::Uuid,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        match raw.kind.as_str() {
+            "plugin" => Ok(Self::plugin(raw.id)),
+            _ => Ok(Self::hardware(raw.id)),
+        }
+    }
+}
+
+pub const MAX_PLUGIN_STAGES: usize = 8;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HardwarePreset {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub output: i32,
+    pub input: i32,
+}
+
+impl HardwarePreset {
+    pub fn new(name: impl Into<String>, output: i32, input: i32) -> Self {
+        Self { id: uuid::Uuid::new_v4(), name: name.into(), output, input }
+    }
+
+    pub fn title(&self) -> String {
+        if self.name.is_empty() {
+            "Device".into()
+        } else {
+            self.name.clone()
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HardwareChain {
+    pub id: uuid::Uuid,
+    pub name: String,
+    #[serde(default)]
+    pub stages: Vec<uuid::Uuid>,
+}
+
+impl HardwareChain {
+    pub fn new(name: impl Into<String>, stages: Vec<uuid::Uuid>) -> Self {
+        Self { id: uuid::Uuid::new_v4(), name: name.into(), stages }
+    }
+
+    pub fn title(&self) -> String {
+        if self.name.is_empty() {
+            "Hardware chain".into()
+        } else {
+            self.name.clone()
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginStage {
+    pub id: uuid::Uuid,
+    pub name: String,
+    #[serde(default)]
+    pub bundle_path: Option<String>,
+    #[serde(default, rename = "classUID")]
+    pub class_uid: Option<String>,
+    #[serde(default)]
+    pub bypassed: bool,
+}
+
+impl PluginStage {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4(),
+            name: name.into(),
+            bundle_path: None,
+            class_uid: None,
+            bypassed: false,
+        }
+    }
+
+    pub fn is_loaded(&self) -> bool {
+        self.bundle_path.as_ref().is_some_and(|p| !p.is_empty())
+    }
+
+    pub fn title(&self) -> String {
+        if self.name.is_empty() {
+            "Plugin".into()
+        } else {
+            self.name.clone()
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginChain {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub return_channel: i32,
+    #[serde(default)]
+    pub stages: Vec<PluginStage>,
+}
+
+impl PluginChain {
+    pub fn new(name: impl Into<String>, return_channel: i32) -> Self {
+        Self { id: uuid::Uuid::new_v4(), name: name.into(), return_channel, stages: Vec::new() }
+    }
+
+    pub fn is_loaded(&self) -> bool {
+        self.stages.iter().any(PluginStage::is_loaded)
+    }
+
+    pub fn title(&self) -> String {
+        if self.name.is_empty() {
+            "Plugin chain".into()
+        } else {
+            self.name.clone()
+        }
+    }
+}
+
+pub fn unique_copy_name(existing: &[String], base: &str) -> String {
+    let stem = if base.trim().is_empty() { "Untitled" } else { base.trim() };
+    let candidate = format!("{stem} copy");
+    if !existing.iter().any(|n| n == &candidate) {
+        return candidate;
+    }
+    for i in 2..1000 {
+        let next = format!("{stem} copy {i}");
+        if !existing.iter().any(|n| n == &next) {
+            return next;
+        }
+    }
+    format!("{stem} copy {}", uuid::Uuid::new_v4())
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -490,10 +680,10 @@ impl ReturnLaneConfig {
 
     pub fn defaults() -> Vec<Self> {
         vec![
-            Self::new(0, 16, Some(EffectRef::Hardware(0)), 0.0, 0.5, ""),
-            Self::new(1, 18, Some(EffectRef::Hardware(1)), 0.0, 0.5, ""),
-            Self::new(2, 20, Some(EffectRef::Hardware(2)), 0.0, 0.5, ""),
-            Self::new(3, 22, Some(EffectRef::Hardware(3)), 0.0, 0.5, ""),
+            Self::new(0, 16, None, 0.0, 0.5, ""),
+            Self::new(1, 18, None, 0.0, 0.5, ""),
+            Self::new(2, 20, None, 0.0, 0.5, ""),
+            Self::new(3, 22, None, 0.0, 0.5, ""),
         ]
     }
 }

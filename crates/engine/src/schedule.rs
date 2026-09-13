@@ -26,11 +26,18 @@ pub struct StripFeed {
     pub linked: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InsertStage {
+    pub instance: usize,
+    pub bypassed: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct SendRoute {
     pub enabled: bool,
     pub return_channel: i32,
     pub feeds: [StripFeed; STRIP_COUNT],
+    pub stages: Vec<InsertStage>,
 }
 
 impl Default for SendRoute {
@@ -39,11 +46,12 @@ impl Default for SendRoute {
             enabled: false,
             return_channel: -1,
             feeds: [StripFeed { channel: -1, gain: 0.0, linked: false }; STRIP_COUNT],
+            stages: Vec::new(),
         }
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct LanePlayer {
     pub active: bool,
     pub is_main: bool,
@@ -53,6 +61,10 @@ pub struct LanePlayer {
     pub gain_l: f32,
     pub gain_r: f32,
     pub insert: usize,
+    pub insert_stages: Vec<InsertStage>,
+    pub hw_out: i32,
+    pub hw_in: i32,
+    pub hw_enabled: bool,
 }
 
 impl Default for LanePlayer {
@@ -66,6 +78,10 @@ impl Default for LanePlayer {
             gain_l: 1.0,
             gain_r: 1.0,
             insert: usize::MAX,
+            insert_stages: Vec::new(),
+            hw_out: -1,
+            hw_in: -1,
+            hw_enabled: false,
         }
     }
 }
@@ -73,7 +89,7 @@ impl Default for LanePlayer {
 /// Published graph. Swapped via ArcSwap; parameter tweaks use [`RtControls`].
 #[derive(Clone, Debug)]
 pub struct Schedule {
-    pub routes: [SendRoute; 8],
+    pub routes: Vec<SendRoute>,
     pub taps: [AudioTapBinding; TAP_COUNT],
     /// TotalMix mute/solo printed onto the take. Never Mix-page mixer state.
     pub record_muted: [bool; TAP_COUNT],
@@ -97,7 +113,7 @@ impl Schedule {
             taps,
             record_muted: [false; TAP_COUNT],
             mix_gains: [MixGain::default(); TAP_COUNT],
-            lanes: [LanePlayer::default(); MIX_PLAY_MAX_LANES],
+            lanes: std::array::from_fn(|_| LanePlayer::default()),
             any_solo: false,
             listen_amp: 1.0,
         }

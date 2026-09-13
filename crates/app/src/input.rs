@@ -204,8 +204,14 @@ impl AppState {
             self.chrome.mixer_extras.iter().rev().find(|(r, _)| overlay::contains(*r, x, y))
         {
             match extra {
-                MixerExtraHit::AddReturn => self.surface.analog.add_effect_return(),
-                MixerExtraHit::RemoveReturn => self.surface.analog.remove_last_effect_return(),
+                MixerExtraHit::AddReturn => {
+                    self.surface.analog.add_effect_return();
+                    self.persist_project_meta();
+                }
+                MixerExtraHit::RemoveReturn => {
+                    self.surface.analog.remove_last_effect_return();
+                    self.persist_project_meta();
+                }
                 MixerExtraHit::ControlWithPan => {
                     let on = !self.surface.analog.config.pan_knobs_control_send_c;
                     self.surface.analog.set_pan_knobs_control_send_c(on);
@@ -315,6 +321,7 @@ impl AppState {
                         !self.surface.analog.config.strips[i].enabled;
                     self.surface.analog.apply_channel_enable(i);
                     self.surface.analog.persist();
+                    self.persist_project_meta();
                 }
                 Hit::Enable { kind: StripKind::Return(lane) } => {
                     self.surface.analog.toggle_return_enabled(lane);
@@ -735,6 +742,22 @@ impl AppState {
                         s.pop();
                     });
                 }
+                true
+            }
+            Key::Named(NamedKey::Space) => {
+                if self.chrome.edit_replace
+                    && matches!(
+                        self.chrome.text_focus,
+                        TextFocus::Tempo
+                            | TextFocus::ProjectName
+                            | TextFocus::MixName(_)
+                            | TextFocus::TakeName(_)
+                    )
+                {
+                    self.chrome.edit_buf.clear();
+                    self.chrome.edit_replace = false;
+                }
+                self.edit_focus(|s| s.push(' '));
                 true
             }
             Key::Character(c) => {

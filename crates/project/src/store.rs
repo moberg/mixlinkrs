@@ -100,6 +100,60 @@ impl ProjectStore {
         names
     }
 
+    /// Where a catalog id is referenced on disk (project name + location).
+    pub fn scan_chain_usage(config: &SessionConfig, id: uuid::Uuid) -> Vec<String> {
+        let Some(root) = Self::resolve_root(config) else {
+            return Vec::new();
+        };
+        let mut hits = Vec::new();
+        for name in Self::list_projects(config) {
+            let folder = root.join(&name);
+            let meta = Self::new().load_meta(&folder);
+            for (lane, r) in &meta.return_chains {
+                if r.id == id {
+                    let where_ = lane
+                        .parse()
+                        .ok()
+                        .and_then(analog::ReturnLane::from_i32)
+                        .map(|l| l.title().to_string())
+                        .unwrap_or_else(|| format!("Lane {lane}"));
+                    hits.push(format!("{name} · {where_}"));
+                }
+            }
+            if let Ok(rd) = fs::read_dir(&folder) {
+                for ent in rd.flatten() {
+                    let path = ent.path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                        continue;
+                    }
+                    let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if !fname.starts_with("mix-") {
+                        continue;
+                    }
+                    let Ok(data) = fs::read(&path) else { continue };
+                    let Ok(doc) = serde_json::from_slice::<MixDocument>(&data) else { continue };
+                    for track in &doc.tracks {
+                        if track.effect_chain.is_some_and(|c| c.id == id) {
+                            hits.push(format!("{name} · {} · {}", doc.name, track.name));
+                        }
+                    }
+                }
+            }
+        }
+        hits
+    }
+
+    pub fn scan_preset_usage(config: &SessionConfig, preset: uuid::Uuid) -> Vec<String> {
+        let mut hits = Vec::new();
+        for chain in &config.hardware_chains {
+            if chain.stages.contains(&preset) {
+                hits.push(format!("Chain “{}”", chain.title()));
+            }
+        }
+        hits.extend(Self::scan_chain_usage(config, preset));
+        hits
+    }
+
     /// Today’s local date (`YYYY-MM-DD`). Collisions become `YYYY-MM-DD-2`, then `-3`.
     pub fn create_project(&self, config: &mut SessionConfig) -> Result<PathBuf, StoreError> {
         let root = Self::resolve_root(config).ok_or(StoreError::NoRoot)?;
@@ -107,7 +161,10 @@ impl ProjectStore {
         let name = unique_dated_name(&root, &today_prefix());
         let url = root.join(&name);
         fs::create_dir_all(&url)?;
-        self.save_meta(&ProjectMeta::default(), &url)?;
+        let mut meta = ProjectMeta::default();
+        meta.return_chains = config.return_chains.clone();
+        meta.strips = config.strips.clone();
+        self.save_meta(&meta, &url)?;
         config.current_project_relative = Some(name);
         Ok(url)
     }
@@ -515,6 +572,68 @@ mod tests {
         let listed = ProjectStore::list_projects(&config);
         assert_eq!(listed, vec![date.clone(), format!("{date}-2"), format!("{date}-3")]);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn create_project_stores_return_chain_assignments() {
+        let root = temp_dir();
+        let mut config = test_config(&root);
+        let plugin = config.plugin_chains[0].id;
+        config.set_return_chain(analog::ReturnLane::SendB, Some(analog::ChainRef::plugin(plugin)));
+        let store = ProjectStore::new();
+        let folder = store.create_project(&mut config).unwrap();
+        let meta = store.load_meta(&folder);
+        assert_eq!(
+            meta.return_chains.get(&(analog::ReturnLane::SendB as i32).to_string()).copied(),
+            Some(analog::ChainRef::plugin(plugin))
+        );
+        store.increment_take(&folder);
+        let after_take = store.load_meta(&folder);
+        assert_eq!(after_take.return_chains, meta.return_chains);
+        assert_eq!(after_take.strips, config.strips);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn create_project_stores_strip_assignments() {
+        let root = temp_dir();
+        let mut config = test_config(&root);
+        config.strips[0].index = 12;
+        config.strips[0].enabled = false;
+        let store = ProjectStore::new();
+        let folder = store.create_project(&mut config).unwrap();
+        let meta = store.load_meta(&folder);
+        assert_eq!(meta.strips[0].index, 12);
+        assert!(!meta.strips[0].enabled);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn project_meta_roundtrips_return_chains() {
+        let dir = temp_dir();
+        let id = Uuid::new_v4();
+        let mut meta = ProjectMeta::default();
+        meta.return_chains.insert("1".into(), analog::ChainRef::plugin(id));
+        let store = ProjectStore::new();
+        store.save_meta(&meta, &dir).unwrap();
+        let loaded = store.load_meta(&dir);
+        assert_eq!(loaded.return_chains.get("1"), Some(&analog::ChainRef::plugin(id)));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_meta_roundtrips_strips() {
+        let dir = temp_dir();
+        let mut meta = ProjectMeta::default();
+        meta.strips = analog::SessionConfig::new().strips;
+        meta.strips[1].index = 6;
+        meta.strips[1].linked_stereo = false;
+        let store = ProjectStore::new();
+        store.save_meta(&meta, &dir).unwrap();
+        let loaded = store.load_meta(&dir);
+        assert_eq!(loaded.strips[1].index, 6);
+        assert!(!loaded.strips[1].linked_stereo);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

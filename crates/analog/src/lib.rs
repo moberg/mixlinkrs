@@ -13,10 +13,11 @@ pub use mixer::{apply_inbound, MixerState};
 pub use osc::OscSession;
 pub use surface::{SurfaceState, TrackControlMode};
 pub use types::{
-    ChannelID, EffectRef, HardwareEffect, MixAssign, MixEvent, MixLane, MixNode, MixerBus,
-    MixerChannel, PluginSlot, ReturnLane, ReturnLaneConfig, ReturnStrip, RoutingSlot,
+    unique_copy_name, ChainKind, ChainRef, ChannelID, EffectRef, HardwareChain, HardwareEffect,
+    HardwarePreset, MixAssign, MixEvent, MixLane, MixNode, MixerBus, MixerChannel, PluginChain,
+    PluginSlot, PluginStage, ReturnLane, ReturnLaneConfig, ReturnStrip, RoutingSlot,
     SendDestination, StripBinding, StripName, SurfaceStrip, ALL_SEND_LANES, BUS_LANES,
-    MAX_SEND_COUNT, SEND_LANES,
+    MAX_PLUGIN_STAGES, MAX_SEND_COUNT, SEND_LANES,
 };
 pub use xl::{apply_xl, XlEffect, XlRuntime};
 
@@ -160,7 +161,7 @@ mod tests {
         assert_eq!(dest, SendDestination::Output(14));
         let tagged: SendDestination =
             serde_json::from_str(r#"{"kind":"plugin","index":1}"#).unwrap();
-        assert_eq!(tagged, SendDestination::Plugin(1));
+        assert_eq!(tagged, SendDestination::Plugin(uuid::Uuid::from_u128(1)));
     }
 
     #[test]
@@ -174,8 +175,14 @@ mod tests {
         assert_eq!(engine.config.effect_return_count, 3);
         engine.remove_last_effect_return();
         assert_eq!(engine.config.effect_return_count, 2);
-        engine.add_hardware_effect();
-        assert!(engine.config.hardware_effects.len() >= 5);
+        engine.add_hardware_preset();
+        assert!(engine.config.hardware_presets.len() >= 5);
+        let added = engine.config.hardware_presets.last().unwrap();
+        assert!(engine
+            .config
+            .hardware_chains
+            .iter()
+            .any(|c| c.name == added.name && c.stages == [added.id]));
     }
 
     #[test]
@@ -200,8 +207,8 @@ mod tests {
         assert!(c.strips.iter().enumerate().all(|(i, s)| {
             s.bus == MixerBus::Input && s.index == i as i32 * 2 && s.linked_stereo && s.enabled
         }));
-        assert_eq!(c.plugins[0].name, "FX A");
-        assert_eq!(c.plugins[1].name, "FX B");
+        assert_eq!(c.plugin_chains[0].name, "FX A");
+        assert_eq!(c.plugin_chains[1].name, "FX B");
         let m = MixerState::new();
         assert_eq!((m.inputs.len(), m.playback.len(), m.outputs.len()), (32, 33, 33));
     }
@@ -224,11 +231,11 @@ mod tests {
         let mut c: SessionConfig = serde_json::from_str(json).unwrap();
         assert_eq!(c.main_output, 14);
         assert_eq!(c.aux_a, SendDestination::Output(14));
-        assert_eq!(c.aux_b, SendDestination::Plugin(0));
+        assert_eq!(c.aux_b, SendDestination::Plugin(uuid::Uuid::from_u128(0)));
         assert_eq!(c.returns[0].id, 2);
         assert!(c.returns[0].effect.is_none());
         c.normalize_after_load();
-        assert_eq!(c.plugins[0].name, "FX A");
+        assert!(c.plugin_chains.iter().any(|p| p.name == "FX A"));
         assert!(c.sends_post_fader);
         let wire = serde_json::to_value(&SessionConfig::new()).unwrap();
         assert!(wire.get("oscHost").is_some());
@@ -279,6 +286,182 @@ mod tests {
         engine.surface.strips[2].pan = 0.25;
         assert!((engine.strip_record_pan(2) - 0.25).abs() < 1e-5);
         assert!((engine.strip_main_mix_pan(2) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn project_strips_replace_the_live_session_map() {
+        let mut session = SessionConfig::new();
+        let mut project = session.strips.clone();
+        project[0].index = 12;
+        project[0].enabled = false;
+        assert!(session.apply_project_strips(&project));
+        assert_eq!(session.strips[0].index, 12);
+        assert!(!session.strips[0].enabled);
+        assert!(!session.apply_project_strips(&project));
+        assert!(!session.apply_project_strips(&[]));
+        assert_eq!(session.strips[0].index, 12);
+    }
+
+    #[test]
+    fn project_return_chains_replace_the_live_session_map() {
+        let mut session = SessionConfig::new();
+        let plugin = session.plugin_chains[0].id;
+        session.set_return_chain(ReturnLane::SendB, Some(ChainRef::plugin(plugin)));
+        let hardware = session.hardware_chains[0].id;
+        let mut project = std::collections::HashMap::new();
+        project.insert((ReturnLane::SendB as i32).to_string(), ChainRef::hardware(hardware));
+        assert!(session.apply_project_return_chains(&project));
+        assert_eq!(session.chain_ref(ReturnLane::SendB), Some(ChainRef::hardware(hardware)));
+        assert!(!session.apply_project_return_chains(&project));
+        assert!(!session.apply_project_return_chains(&std::collections::HashMap::new()));
+        assert_eq!(session.chain_ref(ReturnLane::SendB), Some(ChainRef::hardware(hardware)));
+    }
+
+    #[test]
+    fn return_chain_assignment_is_exclusive() {
+        let mut c = SessionConfig::new();
+        let id = c.hardware_chains[0].id;
+        c.set_return_chain(ReturnLane::SendA, Some(ChainRef::hardware(id)));
+        c.set_return_chain(ReturnLane::SendB, Some(ChainRef::hardware(id)));
+        assert!(c.chain_ref(ReturnLane::SendA).is_none());
+        assert_eq!(c.chain_ref(ReturnLane::SendB).map(|r| r.id), Some(id));
+    }
+
+    #[test]
+    fn reordering_hardware_chain_stages_changes_send_and_return() {
+        let mut c = SessionConfig::new();
+        let first = c.hardware_presets[0].clone();
+        let second = c.hardware_presets[1].clone();
+        let chain = c.add_hardware_chain("Compressor", vec![first.id, second.id]);
+        c.set_return_chain(ReturnLane::SendA, Some(ChainRef::hardware(chain)));
+        assert_eq!(c.send_destination(ReturnLane::SendA), Some(SendDestination::Output(first.output)));
+        assert_eq!(
+            c.return_source_id(ReturnLane::SendA).map(|id| id.index),
+            Some(second.input)
+        );
+        c.move_hardware_chain_stage(chain, 0, 1);
+        assert_eq!(
+            c.send_destination(ReturnLane::SendA),
+            Some(SendDestination::Output(second.output))
+        );
+        assert_eq!(
+            c.return_source_id(ReturnLane::SendA).map(|id| id.index),
+            Some(first.input)
+        );
+    }
+
+    #[test]
+    fn adding_a_device_creates_a_same_named_chain() {
+        let mut c = SessionConfig::new();
+        let before = c.hardware_chains.len();
+        let id = c.add_hardware_preset(4, 6, "Heat");
+        assert_eq!(c.hardware_chains.len(), before + 1);
+        assert!(c.hardware_chains.iter().any(|ch| ch.name == "Heat" && ch.stages == [id]));
+        c.rename_hardware_preset(id, "Space");
+        assert_eq!(c.hardware_preset(id).map(|p| p.name.as_str()), Some("Space"));
+        assert!(c.hardware_chains.iter().any(|ch| ch.name == "Space" && ch.stages == [id]));
+        assert!(!c.hardware_chains.iter().any(|ch| ch.name == "Heat"));
+    }
+
+    #[test]
+    fn hardware_chain_duplicate_is_shallow() {
+        let mut c = SessionConfig::new();
+        let src = c.hardware_chains[0].clone();
+        let copy = c.duplicate_hardware_chain(src.id).unwrap();
+        let copied = c.hardware_chain(copy).unwrap();
+        assert_ne!(copy, src.id);
+        assert_eq!(copied.stages, src.stages);
+        assert_eq!(copied.name, format!("{} copy", src.name));
+    }
+
+    #[test]
+    fn names_keep_internal_spaces_while_typing() {
+        let mut c = SessionConfig::new();
+        let preset = c.hardware_presets[0].id;
+        c.rename_hardware_preset(preset, "Big ");
+        assert_eq!(c.hardware_preset(preset).map(|p| p.name.as_str()), Some("Big "));
+        c.rename_hardware_preset(preset, "Big reverb");
+        assert_eq!(c.hardware_preset(preset).map(|p| p.name.as_str()), Some("Big reverb"));
+
+        let hw = c.hardware_chains[0].id;
+        c.rename_hardware_chain(hw, "Vocal ");
+        c.rename_hardware_chain(hw, "Vocal FX");
+        assert_eq!(c.hardware_chain(hw).map(|ch| ch.name.as_str()), Some("Vocal FX"));
+
+        let plugin = c.plugin_chains[0].id;
+        c.rename_plugin_chain(plugin, "Plugin ");
+        c.rename_plugin_chain(plugin, "Plugin chain");
+        assert_eq!(c.plugin_chain(plugin).map(|ch| ch.name.as_str()), Some("Plugin chain"));
+    }
+
+    #[test]
+    fn plugin_playback_skips_main_and_shows_occupants() {
+        let mut c = SessionConfig::new();
+        assert_eq!(c.mix_playback_channel(MixLane::Main), 0);
+        assert_eq!(c.playback_occupants(0), vec!["Main".to_string()]);
+        assert_eq!(c.playback_occupants(2), vec!["FX A".to_string()]);
+        assert_eq!(c.next_free_playback_pair(), 6);
+        c.set_return_chain(ReturnLane::SendB, Some(ChainRef::plugin(c.plugin_chains[0].id)));
+        assert_eq!(c.playback_occupants(2), vec!["Send B · FX A".to_string()]);
+        assert_eq!(c.playback_menu_label(2), "3/4 — Send B · FX A");
+        assert_eq!(c.playback_menu_label(8), "9/10");
+        let a = c.plugin_chains[0].id;
+        let b = c.plugin_chains[1].id;
+        assert!(c.playback_pair_selectable(2, a));
+        assert!(!c.playback_pair_selectable(0, a));
+        assert!(!c.playback_pair_selectable(4, a));
+        assert!(c.playback_pair_selectable(6, a));
+        assert!(c.playback_pair_selectable(4, b));
+    }
+
+    #[test]
+    fn plugin_chain_duplicate_deep_copies_stages() {
+        let mut c = SessionConfig::new();
+        let src_id = c.plugin_chains[0].id;
+        c.add_plugin_stage(src_id);
+        let src = c.plugin_chain(src_id).unwrap().clone();
+        let copy = c.duplicate_plugin_chain(src_id).unwrap();
+        let copied = c.plugin_chain(copy).unwrap();
+        assert_ne!(copy, src_id);
+        assert_eq!(copied.stages.len(), src.stages.len());
+        assert_ne!(copied.return_channel, src.return_channel);
+        assert_eq!(copied.return_channel, 6);
+        for (a, b) in src.stages.iter().zip(&copied.stages) {
+            assert_ne!(a.id, b.id);
+        }
+    }
+
+    #[test]
+    fn legacy_effects_migrate_once_with_stable_ids() {
+        let json = r#"{
+            "strips":[{"id":0,"bus":"input","index":0,"linkedStereo":true,"enabled":true}],
+            "mainOutput":0,
+            "auxA":14,
+            "auxB":16,
+            "mixBus1":12,
+            "mixBus2":10,
+            "oscHost":"127.0.0.1",
+            "oscSendPort":7001,
+            "oscListenPort":9001,
+            "midiDeviceContains":"Launch Control XL",
+            "hardwareEffects":[{"id":0,"name":"Heat","output":20,"input":22}],
+            "plugins":[{"id":0,"name":"Space","sendOutput":0,"inputChannel":0,"returnChannel":4,"returnDest":0,"bypassed":false}],
+            "returns":[{"id":0,"input":0,"effect":{"kind":"hardware","id":0},"fader":0,"pan":0.5,"name":""}]
+        }"#;
+        let mut c: SessionConfig = serde_json::from_str(json).unwrap();
+        c.normalize_after_load();
+        assert_eq!(c.hardware_presets.len(), 1);
+        assert_eq!(c.hardware_chains.len(), 1);
+        assert_eq!(c.plugin_chains.len(), 1);
+        assert_eq!(c.hardware_presets[0].name, "Heat");
+        assert_eq!(c.plugin_chains[0].name, "Space");
+        assert_eq!(c.plugin_chains[0].return_channel, 4);
+        let hw = c.hardware_chains[0].id;
+        assert_eq!(c.chain_ref(ReturnLane::SendA).map(|r| r.id), Some(hw));
+        assert!(c.returns.iter().all(|r| r.effect.is_none()));
+        let first = c.hardware_presets[0].id;
+        c.normalize_after_load();
+        assert_eq!(c.hardware_presets[0].id, first);
     }
 
     #[test]

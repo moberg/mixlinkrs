@@ -14,6 +14,7 @@ mod alloc;
 mod arr_drag;
 mod arrange;
 mod channels;
+mod chains;
 mod cursors;
 mod display_sleep;
 mod input;
@@ -60,9 +61,10 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         let Some(state) = self.state.as_mut() else { return };
         let is_channels = state.chrome.channels.as_ref().is_some_and(|c| c.window.id() == id);
+        let is_chains = state.chrome.chains.as_ref().is_some_and(|c| c.window.id() == id);
         let is_settings = state.chrome.settings.as_ref().is_some_and(|s| s.window.id() == id);
         let is_main = id == state.chrome.window.id();
-        if !is_main && !is_channels && !is_settings {
+        if !is_main && !is_channels && !is_chains && !is_settings {
             return;
         }
         match event {
@@ -72,6 +74,9 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested if is_channels => {
                 state.chrome.close_channels();
             }
+            WindowEvent::CloseRequested if is_chains => {
+                state.chrome.close_chains();
+            }
             WindowEvent::CloseRequested => {
                 if state.audio.recording {
                     state.toggle_record();
@@ -80,6 +85,12 @@ impl ApplicationHandler for App {
                     state.halt_mix_play();
                 }
                 state.surface.analog.config.save();
+                for inst in state.audio.plugin_refs.values() {
+                    vst3_host::retire_instance(*inst);
+                }
+                for inst in state.audio.insert_refs.values() {
+                    vst3_host::retire_instance(*inst);
+                }
                 for slot in 0..vst3_host::SLOT_COUNT {
                     vst3_host::exchange_and_retire(slot, std::ptr::null_mut());
                 }
@@ -93,6 +104,12 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Resized(size) if is_channels => {
                 if let Some(ch) = &mut state.chrome.channels {
+                    ch.renderer.resize(size.width, size.height);
+                    ch.window.request_redraw();
+                }
+            }
+            WindowEvent::Resized(size) if is_chains => {
+                if let Some(ch) = &mut state.chrome.chains {
                     ch.renderer.resize(size.width, size.height);
                     ch.window.request_redraw();
                 }
@@ -113,6 +130,12 @@ impl ApplicationHandler for App {
                     ch.cursor = (position.x as f32 / s, position.y as f32 / s);
                 }
             }
+            WindowEvent::CursorMoved { position, .. } if is_chains => {
+                if let Some(ch) = &mut state.chrome.chains {
+                    let s = ch.renderer.effective_scale();
+                    ch.cursor = (position.x as f32 / s, position.y as f32 / s);
+                }
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 let s = state.chrome.renderer.effective_scale();
                 let x = position.x as f32 / s;
@@ -126,6 +149,13 @@ impl ApplicationHandler for App {
                     state
                         .chrome
                         .channels
+                        .as_ref()
+                        .map(|c| c.renderer.effective_scale())
+                        .unwrap_or(1.0)
+                } else if is_chains {
+                    state
+                        .chrome
+                        .chains
                         .as_ref()
                         .map(|c| c.renderer.effective_scale())
                         .unwrap_or(1.0)
@@ -145,6 +175,8 @@ impl ApplicationHandler for App {
                 };
                 if is_channels {
                     state.chrome.on_channels_wheel(&state.surface.analog, dy);
+                } else if is_chains {
+                    state.chrome.on_chains_wheel(&state.surface.analog, dy);
                 } else {
                     state.on_wheel(dx, dy);
                 }
@@ -157,6 +189,11 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { state: st, button: MouseButton::Left, .. } if is_channels => {
                 if st == ElementState::Pressed {
                     state.on_channels_press();
+                }
+            }
+            WindowEvent::MouseInput { state: st, button: MouseButton::Left, .. } if is_chains => {
+                if st == ElementState::Pressed {
+                    state.on_chains_press();
                 }
             }
             WindowEvent::MouseInput { state: st, button: MouseButton::Left, .. } => match st {
@@ -192,6 +229,11 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } if is_channels => {
                 if event.state == ElementState::Pressed {
                     state.on_channels_key(&event.logical_key);
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } if is_chains => {
+                if event.state == ElementState::Pressed {
+                    state.on_chains_key(&event.logical_key);
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -282,10 +324,22 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested if is_channels => {
                 state.chrome.paint_channels_window(&state.surface.analog);
             }
+            WindowEvent::RedrawRequested if is_chains => {
+                let scopes: std::collections::HashMap<uuid::Uuid, bool> = state
+                    .audio
+                    .plugin_state_scope
+                    .iter()
+                    .map(|(id, s)| (*id, *s == crate::state::PluginStateScope::Global))
+                    .collect();
+                state.chrome.paint_chains_window(&state.surface.analog, &scopes);
+            }
             WindowEvent::RedrawRequested => {
                 tick(state);
                 state.paint();
                 if let Some(ch) = &state.chrome.channels {
+                    ch.window.request_redraw();
+                }
+                if let Some(ch) = &state.chrome.chains {
                     ch.window.request_redraw();
                 }
                 if let Some(win) = &state.chrome.settings {
@@ -309,6 +363,7 @@ fn tick(state: &mut AppState) {
     state.finish_mix_play_if_done();
     state.surface.analog.poll_osc();
     state.poll_midi_and_leds();
+    state.flush_plugin_dirty_state();
     if state.chrome.caret_at.elapsed().as_millis() > 500 {
         state.chrome.caret_on = !state.chrome.caret_on;
         state.chrome.caret_at = Instant::now();

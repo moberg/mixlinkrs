@@ -10,7 +10,7 @@ use crate::config::SessionConfig;
 use crate::mixer::{apply_inbound, MixerState};
 use crate::surface::SurfaceState;
 use crate::types::{
-    ChannelID, EffectRef, HardwareEffect, MixAssign, MixEvent, MixNode, MixerBus, MixerChannel,
+    ChainRef, ChannelID, HardwarePreset, MixAssign, MixEvent, MixNode, MixerBus, MixerChannel,
     ReturnLane, ReturnStrip, RoutingSlot, SendDestination, StripBinding, ALL_SEND_LANES,
 };
 
@@ -597,7 +597,7 @@ impl AnalogEngine {
     }
 
     fn default_fader(&self, lane: ReturnLane) -> f32 {
-        if self.config.effect_ref(lane).is_some() {
+        if self.config.chain_ref(lane).is_some() {
             FADER_LIN_0DB
         } else {
             0.0
@@ -699,27 +699,35 @@ impl AnalogEngine {
         }
     }
 
-    pub fn update_hardware_effect(&mut self, id: i32, change: impl FnOnce(&mut HardwareEffect)) {
-        let Some(i) = self.config.hardware_effects.iter().position(|h| h.id == id) else {
+    pub fn update_hardware_preset(&mut self, id: uuid::Uuid, change: impl FnOnce(&mut HardwarePreset)) {
+        let Some(i) = self.config.hardware_presets.iter().position(|h| h.id == id) else {
             return;
         };
-        let previous = self.config.hardware_effects[i].clone();
-        change(&mut self.config.hardware_effects[i]);
-        let next = self.config.hardware_effects[i].clone();
+        let previous = self.config.hardware_presets[i].clone();
+        change(&mut self.config.hardware_presets[i]);
+        let next = self.config.hardware_presets[i].clone();
         if previous.output != next.output {
             self.clear_hardware_send(previous.output);
         }
         self.config.sync_legacy_dests();
         if previous.output != next.output {
             for lane in ALL_SEND_LANES {
-                if matches!(self.config.effect_ref(lane), Some(EffectRef::Hardware(hid)) if hid == id)
-                {
+                if self.lane_uses_preset(lane, id) {
                     self.pull_send_levels_from_total_mix(None, Some(lane), true);
                 }
             }
         }
         self.rewrite_all_sends();
         self.apply_all_returns();
+    }
+
+    fn lane_uses_preset(&self, lane: ReturnLane, preset: uuid::Uuid) -> bool {
+        let Some(ChainRef { kind: crate::types::ChainKind::Hardware, id }) =
+            self.config.chain_ref(lane)
+        else {
+            return false;
+        };
+        self.config.hardware_chain(id).is_some_and(|c| c.stages.contains(&preset))
     }
 
     pub fn apply_all_returns(&mut self) {
@@ -740,11 +748,7 @@ impl AnalogEngine {
     pub fn clear_send_mix(&mut self, dest: SendDestination) {
         match dest {
             SendDestination::Output(index) => self.clear_hardware_send(index),
-            SendDestination::Plugin(id) => {
-                if let Some(out) = self.config.plugin(id).map(|p| p.send_output) {
-                    self.clear_hardware_send(out);
-                }
-            }
+            SendDestination::Plugin(_) => {}
         }
     }
 
@@ -925,9 +929,9 @@ impl AnalogEngine {
         }
     }
 
-    /// MixLink `PluginHost.syncSends` gain for one plugin slot / strip.
+    /// MixLink `PluginHost.syncSends` gain for one plugin chain / strip.
     #[must_use]
-    pub fn plugin_send_gain(&self, slot: i32, strip: usize) -> f32 {
+    pub fn plugin_send_gain(&self, chain: uuid::Uuid, strip: usize) -> f32 {
         let Some(row) = self.surface.strips.get(strip) else {
             return 0.0;
         };
@@ -936,7 +940,7 @@ impl AnalogEngine {
         }
         let mut gain = 0.0;
         for lane in crate::types::ALL_SEND_LANES {
-            if matches!(self.config.send_destination(lane), Some(SendDestination::Plugin(id)) if id == slot)
+            if matches!(self.config.send_destination(lane), Some(SendDestination::Plugin(id)) if id == chain)
             {
                 let mut amount = row.aux(lane);
                 if self.config.sends_post_fader {
@@ -948,7 +952,7 @@ impl AnalogEngine {
         if row.assign == MixAssign::Bus1
             && matches!(
                 self.config.send_destination(ReturnLane::Bus1),
-                Some(SendDestination::Plugin(id)) if id == slot
+                Some(SendDestination::Plugin(id)) if id == chain
             )
         {
             gain += row.fader;
@@ -956,7 +960,7 @@ impl AnalogEngine {
         if row.assign == MixAssign::Bus2
             && matches!(
                 self.config.send_destination(ReturnLane::Bus2),
-                Some(SendDestination::Plugin(id)) if id == slot
+                Some(SendDestination::Plugin(id)) if id == chain
             )
         {
             gain += row.fader;
@@ -971,21 +975,12 @@ impl AnalogEngine {
         self.resolved_gear_name(id).unwrap_or_else(|| self.hardware_name(id))
     }
 
-    pub fn effect_display_name(&self, ref_: EffectRef) -> String {
-        match ref_ {
-            EffectRef::Hardware(id) => self
-                .config
-                .hardware_effect(id)
-                .map(|h| h.title())
-                .unwrap_or_else(|| "Hardware".into()),
-            EffectRef::Plugin(id) => {
-                self.config.plugin(id).map(|p| p.title()).unwrap_or_else(|| "Plugin".into())
-            }
-        }
+    pub fn effect_display_name(&self, ref_: ChainRef) -> String {
+        self.config.chain_title(ref_)
     }
 
     pub fn return_display_name(&self, lane: ReturnLane) -> String {
-        match self.config.effect_ref(lane) {
+        match self.config.chain_ref(lane) {
             Some(r) => self.effect_display_name(r),
             None => "No effect".into(),
         }
@@ -998,9 +993,11 @@ impl AnalogEngine {
     pub fn destination_name(&self, dest: SendDestination) -> String {
         match dest {
             SendDestination::Output(i) => self.output_name(i),
-            SendDestination::Plugin(id) => {
-                self.config.plugin(id).map(|p| p.title()).unwrap_or_else(|| "Plugin".into())
-            }
+            SendDestination::Plugin(id) => self
+                .config
+                .plugin_chain(id)
+                .map(|p| p.title())
+                .unwrap_or_else(|| "Plugin".into()),
         }
     }
 
@@ -1012,32 +1009,52 @@ impl AnalogEngine {
         self.persist();
     }
 
+    /// Apply per-project strip sources and enable flags. Remaps TotalMix when a
+    /// strip's input changes. An empty list is ignored so older sidecars can seed.
+    pub fn apply_project_strips(&mut self, project: &[StripBinding]) -> bool {
+        if project.is_empty() {
+            return false;
+        }
+        let mut changed = false;
+        for (i, binding) in project.iter().take(self.config.strips.len()).enumerate() {
+            if self.config.strips[i] == *binding {
+                continue;
+            }
+            self.remap_strip(i, binding.channel_id(), binding.linked_stereo);
+            if self.config.strips[i].enabled != binding.enabled {
+                self.config.strips[i].enabled = binding.enabled;
+                self.apply_channel_enable(i);
+            }
+            changed = true;
+        }
+        changed
+    }
+
     pub fn set_gear_name(&mut self, id: ChannelID, name: &str) {
-        let trimmed = name.trim();
         let key = SessionConfig::gear_key(id);
-        if trimmed.is_empty() {
+        if name.is_empty() {
             self.config.gear_names.remove(&key);
         } else {
-            self.config.gear_names.insert(key, trimmed.to_string());
+            self.config.gear_names.insert(key, name.to_string());
         }
         if self.mixer.channel(id).is_some_and(|c| c.stereo) {
             let right = ChannelID::new(id.bus, id.index + 1);
             let rkey = SessionConfig::gear_key(right);
-            if trimmed.is_empty() {
+            if name.is_empty() {
                 self.config.gear_names.remove(&rkey);
             } else {
-                self.config.gear_names.insert(rkey, trimmed.to_string());
+                self.config.gear_names.insert(rkey, name.to_string());
             }
         }
         self.persist();
     }
 
-    pub fn set_return_effect(&mut self, lane: ReturnLane, ref_: Option<EffectRef>) {
+    pub fn set_return_chain(&mut self, lane: ReturnLane, ref_: Option<ChainRef>) {
         let previous_source = self.return_source(lane);
         if let Some(prev) = self.config.send_destination(lane) {
             self.clear_send_mix(prev);
         }
-        self.config.set_return_effect(lane, ref_);
+        self.config.set_return_chain(lane, ref_);
         if lane.is_send() {
             self.pull_send_levels_from_total_mix(None, Some(lane), true);
         }
@@ -1048,6 +1065,10 @@ impl AnalogEngine {
         }
         self.apply_return_mix(lane as i32);
         self.persist();
+    }
+
+    pub fn set_return_effect(&mut self, lane: ReturnLane, ref_: Option<ChainRef>) {
+        self.set_return_chain(lane, ref_);
     }
 
     pub fn add_effect_return(&mut self) {
@@ -1074,7 +1095,7 @@ impl AnalogEngine {
         for strip in &mut self.surface.strips {
             strip.set_aux(0.0, lane);
         }
-        self.config.set_return_effect(lane, None);
+        self.config.set_return_chain(lane, None);
         self.config.effect_return_count -= 1;
         self.rewrite_all_sends();
         self.surface.load_returns(&self.config);
@@ -1097,48 +1118,128 @@ impl AnalogEngine {
         self.persist();
     }
 
-    pub fn add_hardware_effect(&mut self) {
+    pub fn add_hardware_preset(&mut self) {
         let mut used_out: std::collections::HashSet<i32> =
-            self.config.hardware_effects.iter().map(|h| h.output).collect();
+            self.config.hardware_presets.iter().map(|h| h.output).collect();
         used_out.insert(self.config.main_output);
         let used_in: std::collections::HashSet<i32> =
-            self.config.hardware_effects.iter().map(|h| h.input).collect();
+            self.config.hardware_presets.iter().map(|h| h.input).collect();
         let output = next_free_pair(&used_out, 0);
         let input = next_free_pair(&used_in, 0);
-        self.config.insert_hardware_effect(output, input, "");
+        self.config.add_hardware_preset(output, input, "");
         self.persist();
     }
 
-    pub fn remove_hardware_effect(&mut self, id: i32) {
+    pub fn add_hardware_chain(&mut self) {
+        let stages = self.config.hardware_presets.first().map(|p| vec![p.id]).unwrap_or_default();
+        self.config.add_hardware_chain("", stages);
+        self.persist();
+    }
+
+    pub fn add_hardware_chain_stage(&mut self, chain: uuid::Uuid, preset: uuid::Uuid) {
+        self.apply_hardware_chain_edit(chain, |cfg| cfg.add_hardware_chain_stage(chain, preset));
+    }
+
+    pub fn remove_hardware_chain_stage_at(&mut self, chain: uuid::Uuid, index: usize) {
+        self.apply_hardware_chain_edit(chain, |cfg| {
+            cfg.remove_hardware_chain_stage_at(chain, index)
+        });
+    }
+
+    pub fn move_hardware_chain_stage(&mut self, chain: uuid::Uuid, index: usize, delta: i32) {
+        self.apply_hardware_chain_edit(chain, |cfg| {
+            cfg.move_hardware_chain_stage(chain, index, delta)
+        });
+    }
+
+    pub fn set_hardware_chain_stage(&mut self, chain: uuid::Uuid, index: usize, preset: uuid::Uuid) {
+        self.apply_hardware_chain_edit(chain, |cfg| {
+            if let Some(slot) = cfg.hardware_chain_mut(chain).and_then(|c| c.stages.get_mut(index)) {
+                *slot = preset;
+            }
+        });
+    }
+
+    fn apply_hardware_chain_edit(
+        &mut self,
+        chain: uuid::Uuid,
+        edit: impl FnOnce(&mut crate::config::SessionConfig),
+    ) {
         for lane in ReturnLane::ALL {
-            if matches!(self.config.effect_ref(lane), Some(EffectRef::Hardware(hid)) if hid == id) {
+            if self.config.chain_ref(lane).is_some_and(|r| r.id == chain) {
+                if let Some(dest) = self.config.send_destination(lane) {
+                    self.clear_send_mix(dest);
+                }
+                self.silence_return(lane as i32, None, None);
+            }
+        }
+        edit(&mut self.config);
+        self.config.sync_legacy_dests();
+        self.rewrite_all_sends();
+        self.apply_all_returns();
+        self.persist();
+    }
+
+    pub fn add_plugin_chain(&mut self) {
+        let pair = self.config.next_free_playback_pair();
+        self.config.add_plugin_chain("", pair);
+        self.persist();
+    }
+
+    pub fn remove_hardware_preset(&mut self, id: uuid::Uuid) {
+        for lane in ReturnLane::ALL {
+            if self.lane_uses_preset(lane, id) {
                 self.silence_return(lane as i32, None, None);
                 if let Some(dest) = self.config.send_destination(lane) {
                     self.clear_send_mix(dest);
                 }
             }
         }
-        self.config.remove_hardware_effect(id);
+        self.config.remove_hardware_preset(id);
         self.rewrite_all_sends();
         self.apply_all_returns();
         self.persist();
     }
 
-    pub fn set_hardware_effect_name(&mut self, id: i32, name: &str) {
-        self.update_hardware_effect(id, |h| h.name = name.trim().to_string());
+    pub fn remove_hardware_chain(&mut self, id: uuid::Uuid) {
+        for lane in ReturnLane::ALL {
+            if self.config.chain_ref(lane).is_some_and(|r| r.id == id) {
+                self.silence_return(lane as i32, None, None);
+                if let Some(dest) = self.config.send_destination(lane) {
+                    self.clear_send_mix(dest);
+                }
+            }
+        }
+        self.config.remove_hardware_chain(id);
+        self.rewrite_all_sends();
+        self.apply_all_returns();
         self.persist();
     }
 
-    pub fn set_hardware_effect_io(&mut self, id: i32, output: Option<i32>, input: Option<i32>) {
+    pub fn set_hardware_preset_name(&mut self, id: uuid::Uuid, name: &str) {
+        self.config.rename_hardware_preset(id, name);
+        self.persist();
+    }
+
+    pub fn set_hardware_chain_name(&mut self, id: uuid::Uuid, name: &str) {
+        self.config.rename_hardware_chain(id, name);
+        self.persist();
+    }
+
+    pub fn set_plugin_chain_name(&mut self, id: uuid::Uuid, name: &str) {
+        self.config.rename_plugin_chain(id, name);
+        self.persist();
+    }
+
+    pub fn set_hardware_preset_io(&mut self, id: uuid::Uuid, output: Option<i32>, input: Option<i32>) {
         if input.is_some() {
             for lane in ReturnLane::ALL {
-                if matches!(self.config.effect_ref(lane), Some(EffectRef::Hardware(hid)) if hid == id)
-                {
+                if self.lane_uses_preset(lane, id) {
                     self.silence_return(lane as i32, None, None);
                 }
             }
         }
-        self.update_hardware_effect(id, |h| {
+        self.update_hardware_preset(id, |h| {
             if let Some(o) = output {
                 h.output = o;
             }
@@ -1149,44 +1250,25 @@ impl AnalogEngine {
         self.persist();
     }
 
-    pub fn add_plugin(&mut self) {
-        let Some(id) = self.config.next_free_plugin_id() else {
-            return;
-        };
-        let used_out: std::collections::HashSet<i32> =
-            self.config.plugins.iter().map(|p| p.send_output).collect();
-        let used_ret: std::collections::HashSet<i32> =
-            self.config.plugins.iter().map(|p| p.return_channel).collect();
-        self.config.plugins.push(crate::types::PluginSlot {
-            id,
-            name: String::new(),
-            bundle_path: None,
-            class_uid: None,
-            send_output: next_free_pair(&used_out, 14),
-            input_channel: 14,
-            return_channel: next_free_pair(&used_ret, 2),
-            return_dest: 0,
-            bypassed: false,
-            return_fader: 0.75,
-            return_pan: 0.5,
-        });
-        self.persist();
-    }
-
-    pub fn remove_plugin(&mut self, id: i32) {
+    pub fn remove_plugin_chain(&mut self, id: uuid::Uuid) {
         for lane in ReturnLane::ALL {
-            if matches!(self.config.effect_ref(lane), Some(EffectRef::Plugin(pid)) if pid == id) {
+            if self.config.chain_ref(lane).is_some_and(|r| r.id == id) {
                 self.silence_return(lane as i32, None, None);
             }
         }
-        self.config.remove_plugin_slot(id);
+        self.config.remove_plugin_chain(id);
         self.rewrite_all_sends();
         self.apply_all_returns();
         self.persist();
     }
 
-    pub fn set_plugin_bundle(&mut self, id: i32, path: Option<String>, name: Option<String>) {
-        if let Some(p) = self.config.plugins.iter_mut().find(|p| p.id == id) {
+    pub fn set_plugin_stage_bundle(
+        &mut self,
+        id: uuid::Uuid,
+        path: Option<String>,
+        name: Option<String>,
+    ) {
+        if let Some(p) = self.config.plugin_stage_mut(id) {
             p.bundle_path = path;
             p.class_uid = None;
             if let Some(n) = name {
@@ -1197,27 +1279,23 @@ impl AnalogEngine {
         self.persist();
     }
 
-    pub fn set_plugin_bypass(&mut self, id: i32, bypassed: bool) {
-        if let Some(p) = self.config.plugins.iter_mut().find(|p| p.id == id) {
+    pub fn set_plugin_stage_bypass(&mut self, id: uuid::Uuid, bypassed: bool) {
+        if let Some(p) = self.config.plugin_stage_mut(id) {
             p.bypassed = bypassed;
         }
         self.persist();
     }
 
-    pub fn set_plugin_name(&mut self, id: i32, name: &str) {
-        if let Some(p) = self.config.plugins.iter_mut().find(|p| p.id == id) {
-            p.name = name.trim().to_string();
+    pub fn set_plugin_chain_playback(&mut self, id: uuid::Uuid, pair: i32) {
+        if !self.config.playback_pair_selectable(pair, id) {
+            return;
         }
-        self.persist();
-    }
-
-    pub fn set_plugin_playback(&mut self, id: i32, pair: i32) {
         for lane in ReturnLane::ALL {
-            if matches!(self.config.effect_ref(lane), Some(EffectRef::Plugin(pid)) if pid == id) {
+            if self.config.chain_ref(lane).is_some_and(|r| r.id == id) {
                 self.silence_return(lane as i32, None, None);
             }
         }
-        if let Some(p) = self.config.plugins.iter_mut().find(|p| p.id == id) {
+        if let Some(p) = self.config.plugin_chain_mut(id) {
             p.return_channel = pair;
         }
         self.apply_all_returns();

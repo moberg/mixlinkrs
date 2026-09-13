@@ -122,10 +122,7 @@ impl AppState {
             Key::Named(NamedKey::Backspace) => self.edit_focus(|s| {
                 s.pop();
             }),
-            Key::Character(c) if c.chars().all(|ch| !ch.is_control()) => {
-                let add = c.to_string();
-                self.edit_focus(|s| s.push_str(&add));
-            }
+            other if self.type_into_focus(other) => {}
             _ => {}
         }
     }

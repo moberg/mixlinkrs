@@ -227,16 +227,9 @@ fn tap_name(analog: &AnalogEngine, lane: MixLane) -> String {
             .unwrap_or_else(|| lane.title()),
         MixLane::ReturnLane(r) => analog
             .config
-            .effect_ref(r)
-            .map(|e| match e {
-                analog::EffectRef::Plugin(id) => {
-                    analog.config.plugin(id).map(|p| p.title()).unwrap_or_default()
-                }
-                analog::EffectRef::Hardware(id) => {
-                    analog.config.hardware_effect(id).map(|h| h.title()).unwrap_or_default()
-                }
-            })
-            .filter(|s| !s.is_empty())
+            .chain_ref(r)
+            .map(|e| analog.config.chain_title(e))
+            .filter(|s| !s.is_empty() && s != "Missing chain")
             .unwrap_or_else(|| lane.title()),
         MixLane::Main => "Mix".into(),
     }

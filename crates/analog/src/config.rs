@@ -6,16 +6,18 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    ChannelID, EffectRef, HardwareEffect, MixAssign, MixLane, MixerBus, PluginSlot, ReturnLane,
-    ReturnLaneConfig, RoutingSlot, SendDestination, StripBinding, ALL_SEND_LANES, MAX_SEND_COUNT,
+    unique_copy_name, ChainRef, ChannelID, EffectRef, HardwareChain, HardwareEffect,
+    HardwarePreset, MixAssign, MixLane, MixerBus, PluginChain, PluginSlot, PluginStage,
+    ReturnLane, ReturnLaneConfig, RoutingSlot, SendDestination, StripBinding, ALL_SEND_LANES,
+    MAX_PLUGIN_STAGES, MAX_SEND_COUNT,
 };
-
-const MAX_PLUGIN_SLOTS: i32 = 8;
 
 /// MixLink session. Field names are camelCase on the wire (`CodingKeys`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionConfig {
+    /// Live strip → input map while a project is open. Durable assignments
+    /// live on `project.json`; this vec is the working copy.
     pub strips: Vec<StripBinding>,
     pub main_output: i32,
     pub aux_a: SendDestination,
@@ -32,10 +34,20 @@ pub struct SessionConfig {
     pub audio_buffer_frames: Option<i32>,
     #[serde(default)]
     pub gear_names: HashMap<String, String>,
-    #[serde(default = "SessionConfig::default_plugins")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<PluginSlot>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hardware_effects: Vec<HardwareEffect>,
+    #[serde(default)]
+    pub hardware_presets: Vec<HardwarePreset>,
+    #[serde(default)]
+    pub hardware_chains: Vec<HardwareChain>,
+    #[serde(default)]
+    pub plugin_chains: Vec<PluginChain>,
+    /// Live send/bus routing while a project is open. Durable assignments
+    /// live on `project.json`; this map is the working copy.
+    #[serde(default)]
+    pub return_chains: HashMap<String, ChainRef>,
     #[serde(default = "ReturnLaneConfig::defaults")]
     pub returns: Vec<ReturnLaneConfig>,
     #[serde(default = "default_effect_return_count")]
@@ -73,6 +85,7 @@ impl Default for SessionConfig {
 
 impl SessionConfig {
     pub fn new() -> Self {
+        let (hardware_presets, hardware_chains, return_chains) = Self::default_hardware_catalog();
         Self {
             strips: (0..8).map(|i| StripBinding::new(i, MixerBus::Input, i * 2, true)).collect(),
             main_output: 0,
@@ -87,8 +100,12 @@ impl SessionConfig {
             audio_device_contains: "Fireface".into(),
             audio_buffer_frames: None,
             gear_names: HashMap::new(),
-            plugins: Self::default_plugins(),
-            hardware_effects: Self::default_hardware_effects(),
+            plugins: Vec::new(),
+            hardware_effects: Vec::new(),
+            hardware_presets,
+            hardware_chains,
+            plugin_chains: Self::default_plugin_chains(),
+            return_chains,
             returns: ReturnLaneConfig::defaults(),
             effect_return_count: 2,
             pan_knobs_control_send_c: false,
@@ -97,6 +114,29 @@ impl SessionConfig {
             projects_root_bookmark: None,
             current_project_relative: None,
         }
+    }
+
+    fn default_hardware_catalog() -> (Vec<HardwarePreset>, Vec<HardwareChain>, HashMap<String, ChainRef>)
+    {
+        let pairs = [(14, 16), (16, 18), (12, 20), (10, 22)];
+        let mut presets = Vec::new();
+        let mut chains = Vec::new();
+        let mut return_chains = HashMap::new();
+        for (i, (output, input)) in pairs.into_iter().enumerate() {
+            let preset = HardwarePreset::new(format!("Device {}", i + 1), output, input);
+            let chain = HardwareChain::new(preset.title(), vec![preset.id]);
+            return_chains.insert(i.to_string(), ChainRef::hardware(chain.id));
+            presets.push(preset);
+            chains.push(chain);
+        }
+        (presets, chains, return_chains)
+    }
+
+    pub fn default_plugin_chains() -> Vec<PluginChain> {
+        vec![
+            PluginChain::new("FX A", 2),
+            PluginChain::new("FX B", 4),
+        ]
     }
 
     pub fn default_plugins() -> Vec<PluginSlot> {
@@ -130,21 +170,40 @@ impl SessionConfig {
         ]
     }
 
-    pub fn default_hardware_effects() -> Vec<HardwareEffect> {
-        vec![
-            HardwareEffect { id: 0, name: String::new(), output: 14, input: 16 },
-            HardwareEffect { id: 1, name: String::new(), output: 16, input: 18 },
-            HardwareEffect { id: 2, name: String::new(), output: 12, input: 20 },
-            HardwareEffect { id: 3, name: String::new(), output: 10, input: 22 },
-        ]
-    }
-
     pub fn plugin(&self, id: i32) -> Option<&PluginSlot> {
         self.plugins.iter().find(|p| p.id == id)
     }
 
-    pub fn hardware_effect(&self, id: i32) -> Option<&HardwareEffect> {
-        self.hardware_effects.iter().find(|h| h.id == id)
+    pub fn hardware_preset(&self, id: uuid::Uuid) -> Option<&HardwarePreset> {
+        self.hardware_presets.iter().find(|h| h.id == id)
+    }
+
+    pub fn hardware_preset_mut(&mut self, id: uuid::Uuid) -> Option<&mut HardwarePreset> {
+        self.hardware_presets.iter_mut().find(|h| h.id == id)
+    }
+
+    pub fn hardware_chain(&self, id: uuid::Uuid) -> Option<&HardwareChain> {
+        self.hardware_chains.iter().find(|c| c.id == id)
+    }
+
+    pub fn hardware_chain_mut(&mut self, id: uuid::Uuid) -> Option<&mut HardwareChain> {
+        self.hardware_chains.iter_mut().find(|c| c.id == id)
+    }
+
+    pub fn plugin_chain(&self, id: uuid::Uuid) -> Option<&PluginChain> {
+        self.plugin_chains.iter().find(|c| c.id == id)
+    }
+
+    pub fn plugin_chain_mut(&mut self, id: uuid::Uuid) -> Option<&mut PluginChain> {
+        self.plugin_chains.iter_mut().find(|c| c.id == id)
+    }
+
+    pub fn plugin_stage(&self, id: uuid::Uuid) -> Option<&PluginStage> {
+        self.plugin_chains.iter().flat_map(|c| c.stages.iter()).find(|s| s.id == id)
+    }
+
+    pub fn plugin_stage_mut(&mut self, id: uuid::Uuid) -> Option<&mut PluginStage> {
+        self.plugin_chains.iter_mut().flat_map(|c| c.stages.iter_mut()).find(|s| s.id == id)
     }
 
     pub fn return_lane(&self, id: i32) -> Option<&ReturnLaneConfig> {
@@ -165,34 +224,124 @@ impl SessionConfig {
         self.returns.sort_by_key(|r| r.id);
     }
 
-    pub fn effect_ref(&self, lane: ReturnLane) -> Option<EffectRef> {
-        self.return_lane(lane as i32).and_then(|r| r.effect)
+    pub fn chain_ref(&self, lane: ReturnLane) -> Option<ChainRef> {
+        self.return_chains.get(&(lane as i32).to_string()).copied()
     }
 
-    /// Mix source for a return strip: plugin wet playback, or the hardware input pair.
+    pub fn chain_title(&self, ref_: ChainRef) -> String {
+        match ref_.kind {
+            crate::types::ChainKind::Hardware => self
+                .hardware_chain(ref_.id)
+                .map(|c| c.title())
+                .unwrap_or_else(|| "Missing chain".into()),
+            crate::types::ChainKind::Plugin => self
+                .plugin_chain(ref_.id)
+                .map(|c| c.title())
+                .unwrap_or_else(|| "Missing chain".into()),
+        }
+    }
+
+    pub fn lane_using_chain(&self, id: uuid::Uuid) -> Option<ReturnLane> {
+        self.return_chains.iter().find_map(|(key, r)| {
+            if r.id == id {
+                key.parse().ok().and_then(ReturnLane::from_i32)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn assigned_chain_ids(&self) -> std::collections::HashSet<uuid::Uuid> {
+        self.return_chains.values().map(|r| r.id).collect()
+    }
+
+    /// Stereo playback pairs claimed by Main or a plugin chain.
+    pub fn reserved_playback_pairs(&self) -> std::collections::HashSet<i32> {
+        let mut used = std::collections::HashSet::new();
+        used.insert(self.mix_playback_channel(MixLane::Main));
+        for chain in &self.plugin_chains {
+            used.insert(chain.return_channel);
+        }
+        used
+    }
+
+    pub fn next_free_playback_pair(&self) -> i32 {
+        next_free_pair(&self.reserved_playback_pairs(), 0)
+    }
+
+    pub fn playback_pair_label(pair: i32) -> String {
+        format!("{}/{}", pair + 1, pair + 2)
+    }
+
+    pub fn playback_occupants(&self, pair: i32) -> Vec<String> {
+        let mut names = Vec::new();
+        if pair == self.mix_playback_channel(MixLane::Main) {
+            names.push("Main".into());
+        }
+        for chain in &self.plugin_chains {
+            if chain.return_channel != pair {
+                continue;
+            }
+            let title = chain.title();
+            if let Some(lane) = self.lane_using_chain(chain.id) {
+                names.push(format!("{} · {}", lane.title(), title));
+            } else {
+                names.push(title);
+            }
+        }
+        names
+    }
+
+    pub fn playback_menu_label(&self, pair: i32) -> String {
+        let label = Self::playback_pair_label(pair);
+        let users = self.playback_occupants(pair);
+        if users.is_empty() {
+            label
+        } else {
+            format!("{label} — {}", users.join(", "))
+        }
+    }
+
+    pub fn playback_pair_selectable(&self, pair: i32, chain: uuid::Uuid) -> bool {
+        if self.plugin_chain(chain).is_some_and(|c| c.return_channel == pair) {
+            return true;
+        }
+        if pair == self.mix_playback_channel(MixLane::Main) {
+            return false;
+        }
+        !self.plugin_chains.iter().any(|c| c.id != chain && c.return_channel == pair)
+    }
+
+    /// Mix source for a return strip: plugin wet playback, or the last hardware input pair.
     pub fn return_source_id(&self, lane: ReturnLane) -> Option<ChannelID> {
-        match self.effect_ref(lane)? {
-            EffectRef::Plugin(id) => {
-                let plugin = self.plugin(id)?;
-                if !plugin.is_loaded() {
+        match self.chain_ref(lane)? {
+            ChainRef { kind: crate::types::ChainKind::Plugin, id } => {
+                let chain = self.plugin_chain(id)?;
+                if !chain.is_loaded() {
                     return None;
                 }
-                Some(ChannelID::new(MixerBus::Playback, plugin.return_channel))
+                Some(ChannelID::new(MixerBus::Playback, chain.return_channel))
             }
-            EffectRef::Hardware(id) => {
-                let hw = self.hardware_effect(id)?;
+            ChainRef { kind: crate::types::ChainKind::Hardware, id } => {
+                let chain = self.hardware_chain(id)?;
+                let last = chain.stages.last().copied()?;
+                let hw = self.hardware_preset(last)?;
                 Some(ChannelID::new(MixerBus::Input, hw.input))
             }
         }
     }
 
     pub fn send_destination(&self, lane: ReturnLane) -> Option<SendDestination> {
-        match self.effect_ref(lane)? {
-            EffectRef::Hardware(id) => {
-                let hw = self.hardware_effect(id)?;
+        match self.chain_ref(lane)? {
+            ChainRef { kind: crate::types::ChainKind::Hardware, id } => {
+                let chain = self.hardware_chain(id)?;
+                let first = chain.stages.first().copied()?;
+                let hw = self.hardware_preset(first)?;
                 Some(SendDestination::Output(hw.output))
             }
-            EffectRef::Plugin(id) => Some(SendDestination::Plugin(id)),
+            ChainRef { kind: crate::types::ChainKind::Plugin, id } => {
+                Some(SendDestination::Plugin(id))
+            }
         }
     }
 
@@ -213,16 +362,10 @@ impl SessionConfig {
                 }
             }
             MixLane::ReturnLane(ret) => {
-                if let Some(ref_) = self.effect_ref(ret) {
-                    match ref_ {
-                        EffectRef::Plugin(id) => {
-                            return self
-                                .plugin(id)
-                                .map(|p| p.return_channel)
-                                .unwrap_or(ret as i32 * 2);
-                        }
-                        EffectRef::Hardware(_) => {}
-                    }
+                if let Some(ChainRef { kind: crate::types::ChainKind::Plugin, id }) =
+                    self.chain_ref(ret)
+                {
+                    return self.plugin_chain(id).map(|p| p.return_channel).unwrap_or(ret as i32 * 2);
                 }
                 if ret == ReturnLane::Bus1 {
                     return self.mix_bus1;
@@ -230,7 +373,7 @@ impl SessionConfig {
                 if ret == ReturnLane::Bus2 {
                     return self.mix_bus2;
                 }
-                self.plugin(ret as i32).map(|p| p.return_channel).unwrap_or(16 + ret as i32 * 2)
+                16 + ret as i32 * 2
             }
             MixLane::Main => 0,
         }
@@ -248,43 +391,296 @@ impl SessionConfig {
     pub fn output_index(&self, dest: SendDestination) -> i32 {
         match dest {
             SendDestination::Output(index) => index,
-            SendDestination::Plugin(id) => {
-                self.plugin(id).map(|p| p.send_output).unwrap_or(self.main_output)
-            }
+            SendDestination::Plugin(_) => self.main_output,
         }
     }
 
     pub fn apply_destination(&mut self, dest: SendDestination, lane: ReturnLane) {
         match dest {
-            SendDestination::Plugin(id) => {
-                self.set_return_effect(lane, Some(EffectRef::Plugin(id)))
-            }
+            SendDestination::Plugin(id) => self.set_return_chain(lane, Some(ChainRef::plugin(id))),
             SendDestination::Output(index) => {
-                if let Some(EffectRef::Hardware(hid)) = self.effect_ref(lane) {
-                    if let Some(hw) = self.hardware_effects.iter_mut().find(|h| h.id == hid) {
-                        hw.output = index;
+                if let Some(ChainRef { kind: crate::types::ChainKind::Hardware, id }) =
+                    self.chain_ref(lane)
+                {
+                    if let Some(chain) = self.hardware_chain(id).cloned() {
+                        if let Some(first) = chain.stages.first().copied() {
+                            if let Some(preset) = self.hardware_preset_mut(first) {
+                                preset.output = index;
+                            }
+                        }
                     }
                 } else {
                     let input = self.return_lane(lane as i32).map(|r| r.input).unwrap_or(0);
-                    let hid = self.insert_hardware_effect(index, input, "");
-                    self.set_return_effect(lane, Some(EffectRef::Hardware(hid)));
+                    let hid = self.insert_hardware_preset(index, input, "");
+                    self.set_return_chain(lane, Some(ChainRef::hardware(hid)));
                 }
             }
         }
         self.sync_legacy_dests();
     }
 
-    pub fn set_return_effect(&mut self, lane: ReturnLane, ref_: Option<EffectRef>) {
+    pub fn set_return_chain(&mut self, lane: ReturnLane, ref_: Option<ChainRef>) {
+        let key = (lane as i32).to_string();
+        if let Some(next) = ref_ {
+            self.return_chains.retain(|k, r| k == &key || r.id != next.id);
+            self.return_chains.insert(key, next);
+        } else {
+            self.return_chains.remove(&key);
+        }
         if let Some(row) = self.returns.iter_mut().find(|r| r.id == lane as i32) {
-            row.effect = ref_;
+            row.effect = None;
         }
         self.sync_legacy_dests();
     }
 
-    pub fn insert_hardware_effect(&mut self, output: i32, input: i32, name: &str) -> i32 {
-        let id = self.hardware_effects.iter().map(|h| h.id).max().unwrap_or(-1) + 1;
-        self.hardware_effects.push(HardwareEffect { id, name: name.to_string(), output, input });
+    /// Replace the live send/bus map with the project's stored assignments.
+    /// An empty project map is left alone so a new or older sidecar can be seeded.
+    pub fn apply_project_return_chains(&mut self, project: &HashMap<String, ChainRef>) -> bool {
+        if project.is_empty() || self.return_chains == *project {
+            return false;
+        }
+        self.return_chains = project.clone();
+        self.sync_legacy_dests();
+        true
+    }
+
+    /// Replace the live strip map with the project's stored assignments.
+    /// An empty project list is left alone so a new or older sidecar can be seeded.
+    pub fn apply_project_strips(&mut self, project: &[StripBinding]) -> bool {
+        if project.is_empty() || self.strips == project {
+            return false;
+        }
+        let n = self.strips.len();
+        for (i, binding) in project.iter().take(n).enumerate() {
+            self.strips[i] = binding.clone();
+        }
+        true
+    }
+
+    pub fn set_return_effect(&mut self, lane: ReturnLane, ref_: Option<EffectRef>) {
+        let mapped = ref_.and_then(|r| self.legacy_effect_to_chain(r));
+        self.set_return_chain(lane, mapped);
+    }
+
+    fn legacy_effect_to_chain(&self, ref_: EffectRef) -> Option<ChainRef> {
+        match ref_ {
+            EffectRef::Hardware(id) => {
+                let old = self.hardware_effects.iter().find(|h| h.id == id)?;
+                self.hardware_presets
+                    .iter()
+                    .find(|p| p.output == old.output && p.input == old.input)
+                    .and_then(|p| {
+                        self.hardware_chains
+                            .iter()
+                            .find(|c| c.stages.first() == Some(&p.id))
+                            .map(|c| ChainRef::hardware(c.id))
+                    })
+            }
+            EffectRef::Plugin(id) => self
+                .plugin_chains
+                .get(id as usize)
+                .or_else(|| self.plugin_chains.first())
+                .map(|c| ChainRef::plugin(c.id)),
+        }
+    }
+
+    pub fn insert_hardware_preset(&mut self, output: i32, input: i32, name: &str) -> uuid::Uuid {
+        let title = if name.is_empty() {
+            format!("Device {}", self.hardware_presets.len() + 1)
+        } else {
+            name.to_string()
+        };
+        let preset = HardwarePreset::new(title.clone(), output, input);
+        let chain = HardwareChain::new(title, vec![preset.id]);
+        let id = chain.id;
+        self.hardware_presets.push(preset);
+        self.hardware_chains.push(chain);
         id
+    }
+
+    pub fn add_hardware_preset(&mut self, output: i32, input: i32, name: &str) -> uuid::Uuid {
+        let title = if name.is_empty() {
+            format!("Device {}", self.hardware_presets.len() + 1)
+        } else {
+            name.to_string()
+        };
+        let preset = HardwarePreset::new(title.clone(), output, input);
+        let id = preset.id;
+        self.hardware_presets.push(preset);
+        self.add_hardware_chain(&title, vec![id]);
+        id
+    }
+
+    pub fn add_hardware_chain(&mut self, name: &str, stages: Vec<uuid::Uuid>) -> uuid::Uuid {
+        let title = if name.is_empty() {
+            format!("Hardware chain {}", self.hardware_chains.len() + 1)
+        } else {
+            name.to_string()
+        };
+        let chain = HardwareChain::new(title, stages);
+        let id = chain.id;
+        self.hardware_chains.push(chain);
+        id
+    }
+
+    pub fn add_plugin_chain(&mut self, name: &str, return_channel: i32) -> uuid::Uuid {
+        let title = if name.is_empty() {
+            format!("Plugin chain {}", self.plugin_chains.len() + 1)
+        } else {
+            name.to_string()
+        };
+        let mut chain = PluginChain::new(title, return_channel);
+        chain.stages.push(PluginStage::new("Plugin"));
+        let id = chain.id;
+        self.plugin_chains.push(chain);
+        id
+    }
+
+    pub fn duplicate_hardware_preset(&mut self, id: uuid::Uuid) -> Option<uuid::Uuid> {
+        let src = self.hardware_preset(id)?.clone();
+        let names: Vec<String> = self.hardware_presets.iter().map(|p| p.name.clone()).collect();
+        let mut copy = src;
+        copy.id = uuid::Uuid::new_v4();
+        copy.name = unique_copy_name(&names, &copy.name);
+        let new_id = copy.id;
+        let chain_name = copy.name.clone();
+        self.hardware_presets.push(copy);
+        self.add_hardware_chain(&chain_name, vec![new_id]);
+        Some(new_id)
+    }
+
+    pub fn duplicate_hardware_chain(&mut self, id: uuid::Uuid) -> Option<uuid::Uuid> {
+        let src = self.hardware_chain(id)?.clone();
+        let names: Vec<String> = self.hardware_chains.iter().map(|c| c.name.clone()).collect();
+        let mut copy = src;
+        copy.id = uuid::Uuid::new_v4();
+        copy.name = unique_copy_name(&names, &copy.name);
+        let new_id = copy.id;
+        self.hardware_chains.push(copy);
+        Some(new_id)
+    }
+
+    pub fn duplicate_plugin_chain(&mut self, id: uuid::Uuid) -> Option<uuid::Uuid> {
+        let src = self.plugin_chain(id)?.clone();
+        let names: Vec<String> = self.plugin_chains.iter().map(|c| c.name.clone()).collect();
+        let mut copy = src;
+        copy.id = uuid::Uuid::new_v4();
+        copy.name = unique_copy_name(&names, &copy.name);
+        for stage in &mut copy.stages {
+            stage.id = uuid::Uuid::new_v4();
+        }
+        copy.return_channel = self.next_free_playback_pair();
+        let new_id = copy.id;
+        self.plugin_chains.push(copy);
+        Some(new_id)
+    }
+
+    pub fn rename_hardware_preset(&mut self, id: uuid::Uuid, name: &str) {
+        let old = self.hardware_preset(id).map(|p| p.name.clone());
+        let next = name.to_string();
+        if let Some(p) = self.hardware_preset_mut(id) {
+            p.name = next.clone();
+        }
+        if let Some(old) = old {
+            for chain in &mut self.hardware_chains {
+                if chain.name == old && chain.stages == [id] {
+                    chain.name = next.clone();
+                }
+            }
+        }
+    }
+
+    pub fn rename_hardware_chain(&mut self, id: uuid::Uuid, name: &str) {
+        if let Some(c) = self.hardware_chain_mut(id) {
+            c.name = name.to_string();
+        }
+    }
+
+    pub fn rename_plugin_chain(&mut self, id: uuid::Uuid, name: &str) {
+        if let Some(c) = self.plugin_chain_mut(id) {
+            c.name = name.to_string();
+        }
+    }
+
+    pub fn set_hardware_preset_io(&mut self, id: uuid::Uuid, output: Option<i32>, input: Option<i32>) {
+        if let Some(p) = self.hardware_preset_mut(id) {
+            if let Some(o) = output {
+                p.output = o;
+            }
+            if let Some(i) = input {
+                p.input = i;
+            }
+        }
+        self.sync_legacy_dests();
+    }
+
+    pub fn remove_hardware_preset(&mut self, id: uuid::Uuid) {
+        for chain in &mut self.hardware_chains {
+            chain.stages.retain(|s| *s != id);
+        }
+        self.hardware_presets.retain(|p| p.id != id);
+        self.sync_legacy_dests();
+    }
+
+    pub fn remove_hardware_chain(&mut self, id: uuid::Uuid) {
+        self.return_chains.retain(|_, r| r.id != id);
+        self.hardware_chains.retain(|c| c.id != id);
+        self.sync_legacy_dests();
+    }
+
+    pub fn remove_plugin_chain(&mut self, id: uuid::Uuid) {
+        self.return_chains.retain(|_, r| r.id != id);
+        self.plugin_chains.retain(|c| c.id != id);
+        self.sync_legacy_dests();
+    }
+
+    pub fn add_plugin_stage(&mut self, chain: uuid::Uuid) -> Option<uuid::Uuid> {
+        let c = self.plugin_chain_mut(chain)?;
+        if c.stages.len() >= MAX_PLUGIN_STAGES {
+            return None;
+        }
+        let stage = PluginStage::new("Plugin");
+        let id = stage.id;
+        c.stages.push(stage);
+        Some(id)
+    }
+
+    pub fn remove_plugin_stage(&mut self, stage: uuid::Uuid) {
+        for chain in &mut self.plugin_chains {
+            chain.stages.retain(|s| s.id != stage);
+        }
+    }
+
+    pub fn add_hardware_chain_stage(&mut self, chain: uuid::Uuid, preset: uuid::Uuid) {
+        if let Some(c) = self.hardware_chain_mut(chain) {
+            c.stages.push(preset);
+        }
+    }
+
+    pub fn remove_hardware_chain_stage_at(&mut self, chain: uuid::Uuid, index: usize) {
+        if let Some(c) = self.hardware_chain_mut(chain) {
+            if index < c.stages.len() {
+                c.stages.remove(index);
+            }
+        }
+    }
+
+    pub fn move_hardware_chain_stage(&mut self, chain: uuid::Uuid, index: usize, delta: i32) {
+        let Some(c) = self.hardware_chain_mut(chain) else { return };
+        let next = index as i32 + delta;
+        if next < 0 || next as usize >= c.stages.len() {
+            return;
+        }
+        c.stages.swap(index, next as usize);
+    }
+
+    pub fn move_plugin_stage(&mut self, chain: uuid::Uuid, index: usize, delta: i32) {
+        let Some(c) = self.plugin_chain_mut(chain) else { return };
+        let next = index as i32 + delta;
+        if next < 0 || next as usize >= c.stages.len() {
+            return;
+        }
+        c.stages.swap(index, next as usize);
     }
 
     pub fn sync_legacy_dests(&mut self) {
@@ -303,52 +699,92 @@ impl SessionConfig {
     }
 
     pub fn migrate_effects_if_needed(&mut self) {
-        let needs = self.hardware_effects.is_empty()
-            || self.returns.iter().any(|r| r.effect.is_none() && r.id < 4);
-        if !needs {
-            self.sync_legacy_dests();
-            return;
-        }
-        if self.hardware_effects.is_empty() {
-            let aux_a = self.aux_a;
-            let aux_b = self.aux_b;
-            let mix_bus1 = self.mix_bus1;
-            let mix_bus2 = self.mix_bus2;
-            self.assign_migrated(ReturnLane::SendA, aux_a, 16);
-            self.assign_migrated(ReturnLane::SendB, aux_b, 18);
-            self.assign_migrated(ReturnLane::Bus1, SendDestination::Output(mix_bus1), 20);
-            self.assign_migrated(ReturnLane::Bus2, SendDestination::Output(mix_bus2), 22);
-        } else {
-            for i in 0..self.returns.len() {
-                if self.returns[i].effect.is_some() {
-                    continue;
-                }
-                let input = self.returns[i].input;
-                if let Some(hw) = self.hardware_effects.iter().find(|h| h.input == input) {
-                    self.returns[i].effect = Some(EffectRef::Hardware(hw.id));
-                }
-            }
-        }
+        self.migrate_catalog_once();
+        self.migrate_return_assignments();
         self.sync_legacy_dests();
     }
 
-    fn assign_migrated(&mut self, lane: ReturnLane, dest: SendDestination, fallback_input: i32) {
-        let Some(i) = self.returns.iter().position(|r| r.id == lane as i32) else {
-            return;
-        };
-        if self.returns[i].effect.is_some() {
+    fn catalog_present(&self) -> bool {
+        !self.hardware_presets.is_empty()
+            || !self.hardware_chains.is_empty()
+            || !self.plugin_chains.is_empty()
+    }
+
+    fn migrate_catalog_once(&mut self) {
+        if self.catalog_present() {
             return;
         }
-        match dest {
-            SendDestination::Plugin(id) => self.returns[i].effect = Some(EffectRef::Plugin(id)),
-            SendDestination::Output(out) => {
-                let input =
-                    if self.returns[i].input != 0 { self.returns[i].input } else { fallback_input };
-                let hid = self.insert_hardware_effect(out, input, "");
-                if let Some(row) = self.returns.iter_mut().find(|r| r.id == lane as i32) {
-                    row.effect = Some(EffectRef::Hardware(hid));
+        if self.hardware_effects.is_empty() && self.plugins.is_empty() {
+            let (presets, chains, returns) = Self::default_hardware_catalog();
+            self.hardware_presets = presets;
+            self.hardware_chains = chains;
+            if self.return_chains.is_empty() {
+                self.return_chains = returns;
+            }
+            if self.plugin_chains.is_empty() {
+                self.plugin_chains = Self::default_plugin_chains();
+            }
+            return;
+        }
+        let mut hw_map: HashMap<i32, uuid::Uuid> = HashMap::new();
+        for old in self.hardware_effects.clone() {
+            let name = if old.name.is_empty() {
+                format!("Hardware {}", old.id + 1)
+            } else {
+                old.name.clone()
+            };
+            let preset = HardwarePreset { id: uuid::Uuid::new_v4(), name: name.clone(), output: old.output, input: old.input };
+            let chain = HardwareChain::new(name, vec![preset.id]);
+            hw_map.insert(old.id, chain.id);
+            self.hardware_presets.push(preset);
+            self.hardware_chains.push(chain);
+        }
+        let mut pl_map: HashMap<i32, uuid::Uuid> = HashMap::new();
+        for old in self.plugins.clone() {
+            let mut chain = PluginChain::new(old.title(), old.return_channel);
+            if old.is_loaded() || !old.name.is_empty() {
+                chain.stages.push(PluginStage {
+                    id: uuid::Uuid::new_v4(),
+                    name: old.name.clone(),
+                    bundle_path: old.bundle_path.clone(),
+                    class_uid: old.class_uid.clone(),
+                    bypassed: old.bypassed,
+                });
+            }
+            pl_map.insert(old.id, chain.id);
+            self.plugin_chains.push(chain);
+        }
+        if self.return_chains.is_empty() {
+            for row in &self.returns {
+                let Some(effect) = row.effect else { continue };
+                let mapped = match effect {
+                    EffectRef::Hardware(id) => hw_map.get(&id).copied().map(ChainRef::hardware),
+                    EffectRef::Plugin(id) => pl_map.get(&id).copied().map(ChainRef::plugin),
+                };
+                if let Some(r) = mapped {
+                    self.return_chains.insert(row.id.to_string(), r);
                 }
             }
+        }
+        self.hardware_effects.clear();
+        self.plugins.clear();
+    }
+
+    fn migrate_return_assignments(&mut self) {
+        if !self.return_chains.is_empty() {
+            for row in &mut self.returns {
+                row.effect = None;
+            }
+            return;
+        }
+        for row in self.returns.clone() {
+            let Some(effect) = row.effect else { continue };
+            if let Some(mapped) = self.legacy_effect_to_chain(effect) {
+                self.return_chains.insert(row.id.to_string(), mapped);
+            }
+        }
+        for row in &mut self.returns {
+            row.effect = None;
         }
     }
 
@@ -403,14 +839,18 @@ impl SessionConfig {
     }
 
     pub fn next_free_plugin_id(&self) -> Option<i32> {
-        let used: std::collections::HashSet<i32> = self.plugins.iter().map(|p| p.id).collect();
-        (0..MAX_PLUGIN_SLOTS).find(|id| !used.contains(id))
+        Some(self.plugin_chains.len() as i32)
     }
 
     pub fn remove_hardware_effect(&mut self, id: i32) {
-        for row in &mut self.returns {
-            if matches!(row.effect, Some(EffectRef::Hardware(hid)) if hid == id) {
-                row.effect = None;
+        if let Some(old) = self.hardware_effects.iter().find(|h| h.id == id).cloned() {
+            if let Some(preset) = self
+                .hardware_presets
+                .iter()
+                .find(|p| p.output == old.output && p.input == old.input)
+                .map(|p| p.id)
+            {
+                self.remove_hardware_preset(preset);
             }
         }
         self.hardware_effects.retain(|h| h.id != id);
@@ -418,10 +858,8 @@ impl SessionConfig {
     }
 
     pub fn remove_plugin_slot(&mut self, id: i32) {
-        for row in &mut self.returns {
-            if matches!(row.effect, Some(EffectRef::Plugin(pid)) if pid == id) {
-                row.effect = None;
-            }
+        if let Some(chain) = self.plugin_chains.get(id as usize).map(|c| c.id) {
+            self.remove_plugin_chain(chain);
         }
         self.plugins.retain(|p| p.id != id);
         self.sync_legacy_dests();
@@ -451,6 +889,7 @@ impl SessionConfig {
             return Self::new();
         };
         config.normalize_after_load();
+        config.save();
         config
     }
 
@@ -465,29 +904,13 @@ impl SessionConfig {
     }
 
     pub fn normalize_after_load(&mut self) {
-        if self.plugins.is_empty() {
-            self.plugins = Self::default_plugins();
-        }
         if self.returns.len() < ReturnLaneConfig::defaults().len() {
             let mut lanes = self.returns.clone();
             for fallback in ReturnLaneConfig::defaults() {
                 if lanes.iter().any(|r| r.id == fallback.id) {
                     continue;
                 }
-                if let Some(plugin) = self.plugins.iter().find(|p| p.id == fallback.id) {
-                    lanes.push(ReturnLaneConfig::new(
-                        fallback.id,
-                        fallback.input,
-                        None,
-                        plugin.return_fader,
-                        plugin.return_pan,
-                        plugin.name.clone(),
-                    ));
-                } else {
-                    let mut row = fallback;
-                    row.effect = None;
-                    lanes.push(row);
-                }
+                lanes.push(fallback);
             }
             lanes.sort_by_key(|r| r.id);
             self.returns = lanes;
@@ -503,6 +926,17 @@ impl SessionConfig {
         }
         self.effect_return_count = self.effect_return_count.clamp(2, MAX_SEND_COUNT);
     }
+}
+
+fn next_free_pair(used: &std::collections::HashSet<i32>, start: i32) -> i32 {
+    let mut i = start;
+    if i % 2 != 0 {
+        i += 1;
+    }
+    while used.contains(&i) {
+        i += 2;
+    }
+    i
 }
 
 /// Swift `JSONEncoder` stores `Data` as a standard Base64 string.

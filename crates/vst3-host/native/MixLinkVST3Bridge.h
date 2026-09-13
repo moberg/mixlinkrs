@@ -69,8 +69,8 @@ BOOL MixLinkVST3RestoreState(MixLinkVST3Ref instance, NSData *state);
 
 /// Called on the main thread when a plugin wants its state written. `immediate`
 /// is true when the editor closed; otherwise the host may coalesce.
-typedef void (^MixLinkVST3StateDirtyBlock)(BOOL immediate);
-void MixLinkVST3SetStateDirtyHandler(MixLinkVST3StateDirtyBlock _Nullable handler);
+typedef void (*MixLinkVST3StateDirtyFn)(MixLinkVST3Ref instance, int immediate);
+void MixLinkVST3SetStateDirtyHandler(MixLinkVST3StateDirtyFn _Nullable fn);
 
 #pragma mark - Slots
 
