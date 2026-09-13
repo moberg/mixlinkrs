@@ -434,6 +434,17 @@ impl AppState {
         let _ = self.session.project.save_meta(&meta, &folder);
     }
 
+    /// Refresh take numbers after a recording without tearing down live plugins.
+    pub(crate) fn refresh_takes(&mut self) {
+        let Some(folder) = ProjectStore::current_url(&self.surface.analog.config) else {
+            return;
+        };
+        let sr = self.audio._stream.as_ref().map(|s| s.sample_rate() as f64).unwrap_or(48_000.0);
+        self.session.take_number = self.session.project.next_take(&folder);
+        self.session.take_infos = crate::record::list_take_infos(&folder, sr);
+        self.session.takes = self.session.take_infos.iter().map(|t| t.number).collect();
+    }
+
     /// MixLink `MixStore.load`: sidecar + filesystem takes. No default mix.
 
     pub(crate) fn reload_mix(&mut self) {
@@ -974,6 +985,22 @@ mod tests {
         let dest = session.mix.as_ref().unwrap().track(MixLane::Strip(1)).unwrap();
         assert_eq!(dest.clips.len(), 1);
         assert_eq!(dest.clips[0].mix_start_frame, 96_000);
+    }
+
+    #[test]
+    #[test]
+    fn export_file_name_uses_take_title_while_viewing_a_take() {
+        let mix = MixDocument::empty("Mix 1", 2);
+        let mut session = Session {
+            mix: Some(mix),
+            viewing_take: Some(7),
+            ..Session::default()
+        };
+        assert_eq!(session.export_file_name(), "Take-7.wav");
+        session.take_names.insert(7, "Verse A".into());
+        assert_eq!(session.export_file_name(), "Verse-A.wav");
+        session.viewing_take = None;
+        assert_eq!(session.export_file_name(), "Mix-1.wav");
     }
 
     #[test]

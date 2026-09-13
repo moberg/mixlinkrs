@@ -176,21 +176,22 @@ impl AppState {
         let anchor = self.name_row_anchor(kind);
         match kind {
             StripKind::Input(i) => {
-                let current =
-                    self.surface.analog.config.strips.get(i).map(|s| s.channel_id().index);
-                let items: Vec<MenuItem> = self
-                    .surface
-                    .analog
-                    .mixer
-                    .strips(MixerBus::Input)
-                    .into_iter()
-                    .map(|ch| MenuItem {
+                let binding = self.surface.analog.config.strips.get(i);
+                let current = binding.filter(|s| s.has_input).map(|s| s.index);
+                let mut items = vec![MenuItem {
+                    id: "none".into(),
+                    label: "No input".into(),
+                    checked: current.is_none(),
+                    section: None,
+                }];
+                items.extend(self.surface.analog.mixer.strips(MixerBus::Input).into_iter().map(
+                    |ch| MenuItem {
                         id: ch.id.index.to_string(),
                         label: self.surface.analog.display_name(ch.id),
                         checked: current == Some(ch.id.index),
                         section: None,
-                    })
-                    .collect();
+                    },
+                ));
                 self.chrome.place_menu(anchor, items, MenuAction::StripSource { strip: i });
             }
             // MixLink `ReturnEffectMenu` applies to effect AND bus returns

@@ -242,7 +242,7 @@ pub fn recorder_bay(layout: &crate::mixer::MixerLayout, send_count: usize) -> Re
     let n = send_count.max(2).min(6) as f32;
     let fx_x = origin + layout.ch_w * 8.0 + 1.0;
     let w = layout.ch_w * n + 1.0 + layout.ch_w * 2.0 + 1.0 + layout.main_w;
-    let h = (crate::mixer::pan_name_bar_y(layout, send_count) - layout.y).max(0.0);
+    let h = crate::mixer::send_stack_h(send_count);
     Rect { x: fx_x, y: layout.y, w, h }
 }
 
@@ -260,12 +260,11 @@ mod tests {
     }
 
     #[test]
-    fn bay_sits_above_the_pan_title_row() {
+    fn bay_sits_in_the_send_stack() {
         let layout = MixerLayout::new(0.0, 40.0, 1800.0, 900.0, 3);
         let bay = recorder_bay(&layout, 3);
-        let bar = crate::mixer::pan_name_bar_y(&layout, 3);
         assert!((bay.y - 40.0).abs() < 0.01);
-        assert!((bay.y + bay.h - bar).abs() < 0.01);
+        assert!((bay.h - crate::mixer::send_stack_h(3)).abs() < 0.01);
         assert!(bay.w > 200.0);
     }
 

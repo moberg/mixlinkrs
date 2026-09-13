@@ -22,7 +22,12 @@ impl Chrome {
 
     pub(crate) fn body_rect(&self) -> (f32, f32, f32, f32) {
         let (w, h) = self.renderer.logical_size();
-        let side = if self.sidebar_open() { Layout::SIDEBAR_WIDTH } else { 0.0 };
+        let (w, _) = self.renderer.logical_size();
+        let side = if self.sidebar_open() {
+            sidebar::clamp_width(self.sidebar_width, w)
+        } else {
+            0.0
+        };
         (0.0, HEADER_H, w - side, h - HEADER_H - chrome::footer_height(self.page))
     }
 
@@ -131,6 +136,20 @@ impl AppState {
             if !keep {
                 self.commit_focus();
             }
+        }
+
+        if self.chrome.sidebar_open()
+            && overlay::contains(
+                sidebar::resize_hit(w, h, self.chrome.page, self.chrome.sidebar_width),
+                x,
+                y,
+            )
+        {
+            self.chrome.drag = Some(Drag::SidebarResize {
+                start_x: x,
+                start_w: sidebar::clamp_width(self.chrome.sidebar_width, w),
+            });
+            return;
         }
 
         if let Some(hit) = chrome::hit_chrome(self.chrome.page, w, h, x, y) {
@@ -450,6 +469,10 @@ impl AppState {
                 self.begin_tempo_edit();
             }
         }
+        if matches!(self.chrome.drag, Some(Drag::SidebarResize { .. })) {
+            self.surface.analog.config.sidebar_width = self.chrome.sidebar_width;
+            self.surface.analog.persist();
+        }
         self.commit_arrangement_drag();
         self.chrome.drag = None;
         self.timeline.clip_preview = None;
@@ -605,13 +628,20 @@ impl AppState {
                 self.set_tempo(next);
                 self.chrome.drag = Some(Drag::Tempo { start_y, start_bpm, live: true });
             }
+            Some(Drag::SidebarResize { start_x, start_w }) => {
+                let (ww, _) = self.chrome.renderer.logical_size();
+                let next = start_w + (start_x - x);
+                self.chrome.sidebar_width = sidebar::clamp_width(next, ww);
+                self.surface.analog.config.sidebar_width = self.chrome.sidebar_width;
+            }
             None => {}
         }
         self.sync_rt();
     }
 
     pub(crate) fn sidebar_scroll_max(&self, h: f32) -> f32 {
-        self.with_sidebar_view(|view| sidebar::max_scroll(view, h))
+        let (w, _) = self.chrome.renderer.logical_size();
+        self.with_sidebar_view(|view| sidebar::max_scroll(view, w, h))
     }
 
     pub(crate) fn on_wheel(&mut self, dx: f32, dy: f32) {
@@ -633,7 +663,8 @@ impl AppState {
             self.persist_project_meta();
             return;
         }
-        if self.chrome.sidebar_open() && x >= w - Layout::SIDEBAR_WIDTH {
+        if self.chrome.sidebar_open() && x >= w - sidebar::clamp_width(self.chrome.sidebar_width, w)
+        {
             let max = self.sidebar_scroll_max(h);
             self.chrome.sidebar_scroll = (self.chrome.sidebar_scroll - dy).clamp(0.0, max);
             return;

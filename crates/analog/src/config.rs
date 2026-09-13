@@ -63,6 +63,9 @@ pub struct SessionConfig {
     /// Cream caps, milled fader slots, and a recessed channel-strip well.
     #[serde(default)]
     pub hardware_strips: bool,
+    /// Record/Mix effects column width. Floor is the default 248 pt panel.
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: f32,
     #[serde(default, with = "opt_base64")]
     pub projects_root_bookmark: Option<Vec<u8>>,
     #[serde(default)]
@@ -79,6 +82,10 @@ fn default_effect_return_count() -> i32 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_sidebar_width() -> f32 {
+    248.0
 }
 
 impl Default for SessionConfig {
@@ -115,6 +122,7 @@ impl SessionConfig {
             pan_knobs_control_send_c: false,
             sends_post_fader: true,
             hardware_strips: false,
+            sidebar_width: default_sidebar_width(),
             projects_root_bookmark: None,
             current_project_relative: None,
         }

@@ -622,6 +622,9 @@ pub struct StripBinding {
     pub linked_stereo: bool,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// False when the strip has no hardware input.
+    #[serde(default = "default_true")]
+    pub has_input: bool,
 }
 
 fn default_true() -> bool {
@@ -630,11 +633,15 @@ fn default_true() -> bool {
 
 impl StripBinding {
     pub fn new(id: i32, bus: MixerBus, index: i32, linked_stereo: bool) -> Self {
-        Self { id, bus, index, linked_stereo, enabled: true }
+        Self { id, bus, index, linked_stereo, enabled: true, has_input: true }
     }
 
     pub fn channel_id(&self) -> ChannelID {
         ChannelID::new(self.bus, self.index)
+    }
+
+    pub fn source(&self) -> Option<ChannelID> {
+        self.has_input.then(|| self.channel_id())
     }
 
     pub fn display_name(&self) -> String {

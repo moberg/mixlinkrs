@@ -18,3 +18,17 @@ pub(crate) struct Session {
     pub undo: UndoStack<MixDocument>,
     pub pasteboard: Option<MixPasteboard>,
 }
+
+impl Session {
+    /// Bounce filename for Export: the take title while a take is open, else the mix name.
+    pub(crate) fn export_file_name(&self) -> String {
+        if let Some(n) = self.viewing_take {
+            project::export_file_name(
+                &project::ProjectMeta::take_title(n, self.take_names.get(&n).map(String::as_str)),
+                "Mix",
+            )
+        } else {
+            self.mix.as_ref().map(|m| m.export_file_name()).unwrap_or_else(|| "Mix.wav".into())
+        }
+    }
+}

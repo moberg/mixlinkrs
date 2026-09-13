@@ -122,6 +122,33 @@ mod tests {
     }
 
     #[test]
+    fn solo_zeros_other_strips_on_main() {
+        let mut engine = test_engine();
+        engine.apply_fader(0, 0.8);
+        engine.apply_fader(1, 0.7);
+        let main = engine.config.main_output;
+        let src0 = engine.config.strips[0].channel_id();
+        let src1 = engine.config.strips[1].channel_id();
+        engine.apply_solo(1, true);
+        assert_eq!(engine.mixer.send_level(src0, main), 0.0);
+        assert!((engine.mixer.send_level(src1, main) - 0.7).abs() < 1e-5);
+        engine.apply_solo(1, false);
+        assert!((engine.mixer.send_level(src0, main) - 0.8).abs() < 1e-5);
+    }
+
+    #[test]
+    fn return_solo_zeros_input_strips_on_main() {
+        let mut engine = test_engine();
+        engine.apply_fader(0, 0.8);
+        let main = engine.config.main_output;
+        let src0 = engine.config.strips[0].channel_id();
+        engine.apply_return_solo(ReturnLane::SendA, true);
+        assert_eq!(engine.mixer.send_level(src0, main), 0.0);
+        engine.apply_return_solo(ReturnLane::SendA, false);
+        assert!((engine.mixer.send_level(src0, main) - 0.8).abs() < 1e-5);
+    }
+
+    #[test]
     fn mute_clears_solo() {
         let mut engine = test_engine();
         let id = engine.config.strips[0].channel_id();
@@ -205,7 +232,11 @@ mod tests {
         assert!(!c.hardware_strips);
         assert_eq!(c.strips.len(), 8);
         assert!(c.strips.iter().enumerate().all(|(i, s)| {
-            s.bus == MixerBus::Input && s.index == i as i32 * 2 && s.linked_stereo && s.enabled
+            s.bus == MixerBus::Input
+                && s.index == i as i32 * 2
+                && s.linked_stereo
+                && s.enabled
+                && s.has_input
         }));
         assert_eq!(c.plugin_chains[0].name, "FX A");
         assert_eq!(c.plugin_chains[1].name, "FX B");
@@ -518,5 +549,62 @@ mod tests {
         assert!((engine.surface.strips[0].fader - 0.8).abs() < 1e-5);
         assert!((engine.strip_main_mix_lin(0) - 0.8).abs() < 1e-5);
         assert!(engine.osc.sent_messages().is_empty());
+    }
+
+    #[test]
+    fn missing_dump_volume_is_pushed_to_totalmix() {
+        let mut engine = test_engine();
+        engine.surface.strips[0].fader = 0.6;
+        engine.push_unreported_volumes();
+        let dest = engine.config.main_output;
+        let src = engine.config.strips[0].channel_id();
+        assert!((engine.mixer.send_level(src, dest) - 0.6).abs() < 1e-5);
+        assert!(engine.osc.sent_messages().iter().any(|m| {
+            m.address == format!("/mix/in/{}/{}/faderlin", src.index, dest)
+                && (m.values[0].float_value() - 0.6).abs() < 1e-5
+        }));
+    }
+
+    #[test]
+    fn reported_dump_volume_is_not_overwritten() {
+        let mut engine = test_engine();
+        let dest = engine.config.main_output;
+        let src = engine.config.strips[0].channel_id();
+        let addr = format!("/mix/in/{}/{}/faderlin", src.index, dest);
+        match apply_inbound(&mut engine.mixer, &addr, &osc::OscValue::Float(0.8)) {
+            Some(MixEvent::Mix(node)) => engine.apply_inbound_mix(&node),
+            other => panic!("expected mix event, got {other:?}"),
+        }
+        engine.sync_surface_from_total_mix();
+        engine.surface.strips[0].fader = 0.6;
+        engine.push_unreported_volumes();
+        assert!((engine.mixer.send_level(src, dest) - 0.8).abs() < 1e-5);
+        let echoed = format!("/mix/in/{}/{}/faderlin", src.index, dest);
+        assert!(!engine.osc.sent_messages().iter().any(|m| m.address == echoed));
+    }
+
+    #[test]
+    fn no_input_clears_hardware_and_label() {
+        let mut engine = test_engine();
+        engine.apply_fader(0, 0.6);
+        let src = engine.config.strips[0].channel_id();
+        let dest = engine.config.main_output;
+        assert!((engine.mixer.send_level(src, dest) - 0.6).abs() < 1e-5);
+        engine.clear_strip_source(0);
+        assert!(!engine.config.strips[0].has_input);
+        assert!(engine.source_ids(0).is_empty());
+        assert_eq!(engine.strip_display_name(0), "No input");
+        assert_eq!(engine.mixer.send_level(src, dest), 0.0);
+        engine.set_strip_source(0, src);
+        assert!(engine.config.strips[0].has_input);
+        assert_eq!(engine.source_ids(0), vec![src]);
+    }
+
+    #[test]
+    fn older_strip_json_defaults_to_having_input() {
+        let json = r#"{"id":0,"bus":"input","index":4,"linkedStereo":false,"enabled":true}"#;
+        let binding: StripBinding = serde_json::from_str(json).unwrap();
+        assert!(binding.has_input);
+        assert_eq!(binding.source(), Some(ChannelID::new(MixerBus::Input, 4)));
     }
 }

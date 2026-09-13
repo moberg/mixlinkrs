@@ -35,7 +35,8 @@ pub(crate) struct Audio {
     /// Per-stage Project vs Global chunk-state selection.
     pub plugin_state_scope: HashMap<uuid::Uuid, PluginStateScope>,
     /// PNG screenshots of plugin editors, keyed by stage id.
+    /// Updated when that stage's editor closes (backing-scale capture).
     pub plugin_previews: HashMap<uuid::Uuid, Vec<u8>>,
-    /// Capture a thumbnail after the editor has had time to paint.
+    /// First-open fill-in only, when this stage has no persisted thumb yet.
     pub preview_due: HashMap<uuid::Uuid, Instant>,
 }

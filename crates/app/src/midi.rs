@@ -73,9 +73,8 @@ impl AppState {
             for i in 0..8 {
                 let strip = &analog.surface.strips[i];
                 focus[i] = strip.assign == MixAssign::Bus1;
-                let id = cfg.strips[i].channel_id();
-                let muted = analog.mixer.channel(id).map(|c| c.mute).unwrap_or(false);
-                let soloed = analog.mixer.channel(id).map(|c| c.solo).unwrap_or(false);
+                let muted = analog.strip_muted(i);
+                let soloed = analog.strip_soloed(i);
                 control[i] =
                     midi_xl::control_led(mode, strip.assign == MixAssign::Bus2, muted, soloed);
             }

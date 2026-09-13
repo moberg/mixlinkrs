@@ -1,5 +1,7 @@
 //! Control-surface brain. UI and MIDI call these methods; they never send OSC.
 
+use std::time::{Duration, Instant};
+
 use osc::{
     balpan_to_pan_unit, fader_db, fader_lin_to_amp, mix_balpan, mix_fader, mix_fader_lin,
     pan_unit_to_balpan, post_fader_lin, send_lin_from_post, strip_mute, strip_solo, OscSession,
@@ -14,11 +16,15 @@ use crate::types::{
     ReturnLane, ReturnStrip, RoutingSlot, SendDestination, StripBinding, ALL_SEND_LANES,
 };
 
+/// Wait this long after the last dump mix node before writing missing volumes.
+const MIX_BACKFILL_SETTLE: Duration = Duration::from_millis(300);
+
 pub struct AnalogEngine {
     pub mixer: MixerState,
     pub surface: SurfaceState,
     pub config: SessionConfig,
     pub osc: OscSession,
+    mix_backfill_at: Option<Instant>,
 }
 
 impl AnalogEngine {
@@ -28,11 +34,12 @@ impl AnalogEngine {
         config: SessionConfig,
         osc: OscSession,
     ) -> Self {
-        Self { mixer, surface, config, osc }
+        Self { mixer, surface, config, osc, mix_backfill_at: None }
     }
 
     /// Drain inbound OSC. Sets `mixer.connected` from the session flag.
     /// TotalMix is the source of truth: dump on connect, then copy mix nodes into the UI.
+    /// After the dump goes quiet, push any on-screen volume TotalMix never reported.
     pub fn poll_osc(&mut self) {
         let was_connected = self.mixer.connected;
         if self.osc.is_connected() {
@@ -56,17 +63,100 @@ impl AnalogEngine {
         }
         if just_connected {
             self.osc.send_dump_requests();
+            self.arm_mix_backfill();
         }
         if just_connected || saw_mix {
             self.sync_surface_from_total_mix();
             self.isolate_plugin_playback_from_hardware();
         }
+        if saw_mix {
+            self.arm_mix_backfill();
+        }
+        if self.mix_backfill_at.is_some_and(|at| Instant::now() >= at) {
+            self.mix_backfill_at = None;
+            self.push_unreported_volumes();
+        }
+    }
+
+    /// Ask TotalMix for a full dump, then push any volumes it never sends back.
+    pub fn request_total_mix_dump(&mut self) {
+        self.mixer.clear_reported_sends();
+        self.osc.send_dump_requests();
+        self.arm_mix_backfill();
+    }
+
+    fn arm_mix_backfill(&mut self) {
+        self.mix_backfill_at = Some(Instant::now() + MIX_BACKFILL_SETTLE);
+    }
+
+    /// Write the on-screen volume for every mix node TotalMix did not report.
+    pub fn push_unreported_volumes(&mut self) {
+        for i in 0..self.surface.strips.len() {
+            if !self.config.is_strip_enabled(i)
+                || !self.config.strips.get(i).is_some_and(|s| s.has_input)
+            {
+                continue;
+            }
+            self.push_unreported_strip_assign(i);
+            for lane in ALL_SEND_LANES {
+                let dest = self.config.send_destination(lane);
+                let Some(SendDestination::Output(index)) = dest else {
+                    continue;
+                };
+                if self.strip_send_unreported(i, index) {
+                    let value = self.aux_write_level(i, self.surface.strips[i].aux(lane));
+                    self.write_aux(i, dest, value);
+                }
+            }
+        }
+        for lane in ReturnLane::ALL {
+            if !self.config.is_return_enabled(lane) {
+                continue;
+            }
+            let Some(source) = self.return_source(lane) else {
+                continue;
+            };
+            let id = ChannelID::new(source.0, source.1);
+            if !self.mixer.send_reported(id, self.config.main_output) {
+                self.apply_return_mix(lane as i32);
+            }
+        }
+    }
+
+    fn push_unreported_strip_assign(&mut self, strip: usize) {
+        let Some(s) = self.surface.strips.get(strip) else {
+            return;
+        };
+        let assign = s.assign;
+        if let Some(dest) = self.config.listen_output(assign) {
+            if self.strip_send_unreported(strip, dest) {
+                self.write_assign_sends(strip);
+                return;
+            }
+        }
+        for other in MixAssign::ALL {
+            if other == assign {
+                continue;
+            }
+            if let Some(dest) = self.config.listen_output(other) {
+                if self.strip_send_unreported(strip, dest) {
+                    self.zero_assign_dest(strip, dest);
+                }
+            }
+        }
+    }
+
+    fn strip_send_unreported(&self, strip: usize, dest: i32) -> bool {
+        self.osc_sources(strip).iter().all(|src| !self.mixer.send_reported(*src, dest))
     }
 
     pub fn source_ids(&self, strip: usize) -> Vec<ChannelID> {
         let Some(b) = self.config.strips.get(strip) else {
             return Vec::new();
         };
+        if !b.has_input {
+            return Vec::new();
+        }
         let mut ids = vec![b.channel_id()];
         if b.linked_stereo {
             ids.push(ChannelID::new(b.bus, b.index + 1));
@@ -180,19 +270,19 @@ impl AnalogEngine {
                 r.solo = false;
             }
         });
-        let Some(id) = self.config.return_source_id(lane) else {
-            return;
-        };
-        self.mixer.update_channel(id, |c| {
-            c.mute = on;
+        if let Some(id) = self.config.return_source_id(lane) {
+            self.mixer.update_channel(id, |c| {
+                c.mute = on;
+                if on {
+                    c.solo = false;
+                }
+            });
+            self.osc.send_float(strip_mute(id.bus.osc(), id.index), if on { 1.0 } else { 0.0 });
             if on {
-                c.solo = false;
+                self.osc.send_float(strip_solo(id.bus.osc(), id.index), 0.0);
             }
-        });
-        self.osc.send_float(strip_mute(id.bus.osc(), id.index), if on { 1.0 } else { 0.0 });
-        if on {
-            self.osc.send_float(strip_solo(id.bus.osc(), id.index), 0.0);
         }
+        self.rewrite_mix_for_solo();
     }
 
     pub fn apply_return_solo(&mut self, lane: ReturnLane, on: bool) {
@@ -202,19 +292,19 @@ impl AnalogEngine {
                 r.mute = false;
             }
         });
-        let Some(id) = self.config.return_source_id(lane) else {
-            return;
-        };
-        self.mixer.update_channel(id, |c| {
-            c.solo = on;
+        if let Some(id) = self.config.return_source_id(lane) {
+            self.mixer.update_channel(id, |c| {
+                c.solo = on;
+                if on {
+                    c.mute = false;
+                }
+            });
+            self.osc.send_float(strip_solo(id.bus.osc(), id.index), if on { 1.0 } else { 0.0 });
             if on {
-                c.mute = false;
+                self.osc.send_float(strip_mute(id.bus.osc(), id.index), 0.0);
             }
-        });
-        self.osc.send_float(strip_solo(id.bus.osc(), id.index), if on { 1.0 } else { 0.0 });
-        if on {
-            self.osc.send_float(strip_mute(id.bus.osc(), id.index), 0.0);
         }
+        self.rewrite_mix_for_solo();
     }
 
     pub fn neutralize_plugin_send_mixes(&mut self) {
@@ -262,9 +352,7 @@ impl AnalogEngine {
                 self.osc.send_float(strip_solo(id.bus.osc(), id.index), 0.0);
             }
         }
-        if self.config.sends_post_fader {
-            self.rewrite_aux_sends(None);
-        }
+        self.rewrite_mix_for_solo();
     }
 
     pub fn apply_solo(&mut self, strip: usize, on: bool) {
@@ -280,9 +368,7 @@ impl AnalogEngine {
                 self.osc.send_float(strip_mute(id.bus.osc(), id.index), 0.0);
             }
         }
-        if self.config.sends_post_fader {
-            self.rewrite_aux_sends(None);
-        }
+        self.rewrite_mix_for_solo();
     }
 
     pub fn toggle_mute(&mut self, strip: usize) {
@@ -323,12 +409,26 @@ impl AnalogEngine {
         self.apply_solo(strip, on);
     }
 
+    fn rewrite_mix_for_solo(&mut self) {
+        for i in 0..self.surface.strips.len() {
+            self.write_assign_sends(i);
+        }
+        if self.config.sends_post_fader {
+            self.rewrite_aux_sends(None);
+        }
+    }
+
     pub fn write_assign_sends(&mut self, strip: usize) {
         let Some(s) = self.surface.strips.get(strip) else {
             return;
         };
         let assign = s.assign;
-        let level = if self.config.is_strip_enabled(strip) { s.fader } else { 0.0 };
+        let level = if self.config.is_strip_enabled(strip) && !self.strip_silenced_for_post_send(strip)
+        {
+            s.fader
+        } else {
+            0.0
+        };
         if let Some(dest) = self.config.listen_output(assign) {
             self.write_send(strip, dest, level);
         }
@@ -344,7 +444,7 @@ impl AnalogEngine {
 
     pub fn apply_inbound_mix(&mut self, node: &MixNode) {
         for i in 0..self.config.strips.len() {
-            if !self.config.strips[i].enabled {
+            if !self.config.strips[i].enabled || !self.config.strips[i].has_input {
                 continue;
             }
             if self.config.strips[i].bus != node.source_bus {
@@ -666,6 +766,7 @@ impl AnalogEngine {
             index: id.index,
             linked_stereo,
             enabled: self.config.strips[strip].enabled,
+            has_input: true,
         };
         if self.config.strips[strip] == next {
             return;
@@ -1043,6 +1144,25 @@ impl AnalogEngine {
         self.persist();
     }
 
+    pub fn clear_strip_source(&mut self, strip: usize) {
+        if strip >= self.config.strips.len() {
+            return;
+        }
+        if !self.config.strips[strip].has_input {
+            return;
+        }
+        self.silence_strip(strip);
+        self.config.strips[strip].has_input = false;
+        self.persist();
+    }
+
+    pub fn strip_display_name(&self, strip: usize) -> String {
+        match self.config.strips.get(strip) {
+            Some(b) if b.has_input => self.selected_name(b.channel_id()),
+            _ => "No input".into(),
+        }
+    }
+
     /// Apply per-project strip sources and enable flags. Remaps TotalMix when a
     /// strip's input changes. An empty list is ignored so older sidecars can seed.
     pub fn apply_project_strips(&mut self, project: &[StripBinding]) -> bool {
@@ -1054,7 +1174,14 @@ impl AnalogEngine {
             if self.config.strips[i] == *binding {
                 continue;
             }
-            self.remap_strip(i, binding.channel_id(), binding.linked_stereo);
+            if binding.has_input {
+                self.remap_strip(i, binding.channel_id(), binding.linked_stereo);
+            } else {
+                if self.config.strips[i].has_input {
+                    self.silence_strip(i);
+                }
+                self.config.strips[i] = binding.clone();
+            }
             if self.config.strips[i].enabled != binding.enabled {
                 self.config.strips[i].enabled = binding.enabled;
                 self.apply_channel_enable(i);

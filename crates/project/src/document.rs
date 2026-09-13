@@ -1,5 +1,7 @@
 //! Mix document types and take WAV naming. JSON keys match MixLink Codable.
 
+use std::path::Path;
+
 use analog::{ChainRef, ReturnLane, ALL_SEND_LANES, BUS_LANES, MAX_SEND_COUNT};
 use serde::de::{self, Deserializer};
 use serde::ser::{SerializeStruct, Serializer};
@@ -886,18 +888,45 @@ impl MixDocument {
     }
 
     pub fn export_file_name(&self) -> String {
-        let trimmed = self.name.trim();
-        let mapped: String = (if trimmed.is_empty() { "Mix" } else { trimmed })
-            .chars()
-            .map(|ch| match ch {
-                '/' | ':' | '\\' | ' ' => '-',
-                c => c,
-            })
-            .collect();
-        let collapsed = collapse_dashes(&mapped);
-        let trimmed = collapsed.trim_matches('-');
-        let stem = if trimmed.is_empty() { "Mix" } else { trimmed };
-        format!("{stem}.wav")
+        export_file_name(&self.name, "Mix")
+    }
+}
+
+/// Sanitize a mix or take title into a bounce filename (`Take 7` → `Take-7.wav`).
+pub fn export_file_name(name: &str, empty: &str) -> String {
+    let trimmed = name.trim();
+    let mapped: String = (if trimmed.is_empty() { empty } else { trimmed })
+        .chars()
+        .map(|ch| match ch {
+            '/' | ':' | '\\' | ' ' => '-',
+            c => c,
+        })
+        .collect();
+    let collapsed = collapse_dashes(&mapped);
+    let trimmed = collapsed.trim_matches('-');
+    let stem = if trimmed.is_empty() { empty } else { trimmed };
+    format!("{stem}.wav")
+}
+
+/// If `desired` already exists in `folder`, append `-2`, `-3`, … until free.
+pub fn unique_export_file_name(folder: &Path, desired: &str) -> String {
+    if !folder.join(desired).exists() {
+        return desired.to_string();
+    }
+    let stem = desired
+        .strip_suffix(".wav")
+        .or_else(|| desired.strip_suffix(".WAV"))
+        .unwrap_or(desired);
+    let mut n = 2u32;
+    loop {
+        let candidate = format!("{stem}-{n}.wav");
+        if !folder.join(&candidate).exists() {
+            return candidate;
+        }
+        n = n.saturating_add(1);
+        if n == u32::MAX {
+            return candidate;
+        }
     }
 }
 
@@ -1491,6 +1520,26 @@ mod tests {
         assert_eq!(sanitize_take_name("A / B:C"), "A-B-C");
         assert_eq!(sanitize_take_name("  "), "Track");
         assert_eq!(sanitize_take_name("a  b"), "a-b");
+    }
+
+    #[test]
+    fn export_file_name_sanitizes_mix_and_take_titles() {
+        assert_eq!(MixDocument::empty("Mix 1", 2).export_file_name(), "Mix-1.wav");
+        assert_eq!(export_file_name("Take 7", "Mix"), "Take-7.wav");
+        assert_eq!(export_file_name("Verse A / B", "Mix"), "Verse-A-B.wav");
+        assert_eq!(export_file_name("   ", "Mix"), "Mix.wav");
+    }
+
+    #[test]
+    fn unique_export_file_name_increments_existing() {
+        let dir = std::env::temp_dir().join(format!("mixlink-export-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(unique_export_file_name(&dir, "Take-7.wav"), "Take-7.wav");
+        std::fs::write(dir.join("Take-7.wav"), []).unwrap();
+        assert_eq!(unique_export_file_name(&dir, "Take-7.wav"), "Take-7-2.wav");
+        std::fs::write(dir.join("Take-7-2.wav"), []).unwrap();
+        assert_eq!(unique_export_file_name(&dir, "Take-7.wav"), "Take-7-3.wav");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

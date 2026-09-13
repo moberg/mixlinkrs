@@ -52,10 +52,14 @@ impl AppState {
         let mut schedule = Schedule::empty();
         for (i, strip) in cfg.strips.iter().enumerate().take(8) {
             // Mono strips tap one input twice; record DSP pans that into a stereo file.
-            schedule.taps[i] = AudioTapBinding::hardware(
-                strip.index,
-                if strip.linked_stereo { strip.index + 1 } else { strip.index },
-            );
+            schedule.taps[i] = if strip.has_input {
+                AudioTapBinding::hardware(
+                    strip.index,
+                    if strip.linked_stereo { strip.index + 1 } else { strip.index },
+                )
+            } else {
+                AudioTapBinding::silent()
+            };
         }
         schedule.taps[MASTER_TAP] = AudioTapBinding::master_mix();
         self.publish_record_main_mix(&mut schedule);
@@ -81,7 +85,7 @@ impl AppState {
             };
             for (i, strip) in cfg.strips.iter().enumerate().take(8) {
                 route.feeds[i] = StripFeed {
-                    channel: strip.index,
+                    channel: if strip.has_input { strip.index } else { -1 },
                     gain: self.surface.analog.plugin_send_gain(chain.id, i),
                     linked: strip.linked_stereo,
                 };

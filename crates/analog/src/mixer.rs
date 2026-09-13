@@ -1,6 +1,6 @@
 //! TotalMix mirror: channels, send matrix, connection flag.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use osc::{addresses, fader_lin_from_db, OscValue};
 
@@ -25,6 +25,8 @@ pub struct MixerState {
     pub sends: HashMap<ChannelID, HashMap<i32, f32>>,
     /// source ChannelID → dest output index → TotalMix balpan (−1...+1)
     pub send_pans: HashMap<ChannelID, HashMap<i32, f32>>,
+    /// Mix nodes TotalMix has sent (local writes do not count).
+    reported_sends: HashSet<(ChannelID, i32)>,
 }
 
 impl Default for MixerState {
@@ -53,6 +55,7 @@ impl MixerState {
             last_osc_log: String::new(),
             sends: HashMap::new(),
             send_pans: HashMap::new(),
+            reported_sends: HashSet::new(),
         }
     }
 
@@ -81,9 +84,21 @@ impl MixerState {
         self.send_level_if_present(source, dest).unwrap_or(0.0)
     }
 
-    /// `None` when TotalMix has not reported this mix node.
+    /// `None` when this mix node has never been written (inbound or outbound).
     pub fn send_level_if_present(&self, source: ChannelID, dest: i32) -> Option<f32> {
         self.sends.get(&source).and_then(|row| row.get(&dest)).copied()
+    }
+
+    pub fn mark_send_reported(&mut self, source: ChannelID, dest: i32) {
+        self.reported_sends.insert((source, dest));
+    }
+
+    pub fn send_reported(&self, source: ChannelID, dest: i32) -> bool {
+        self.reported_sends.contains(&(source, dest))
+    }
+
+    pub fn clear_reported_sends(&mut self) {
+        self.reported_sends.clear();
     }
 
     pub fn set_send(&mut self, source: ChannelID, dest: i32, level: f32) {
@@ -259,6 +274,7 @@ pub fn apply_inbound(mixer: &mut MixerState, address: &str, value: &OscValue) ->
             match parts[4] {
                 "faderlin" | "volume" => {
                     mixer.set_send(id, dest, value.float_value());
+                    mixer.mark_send_reported(id, dest);
                     return Some(MixEvent::Mix(MixNode {
                         source_bus: src_bus,
                         source: src,
@@ -270,6 +286,7 @@ pub fn apply_inbound(mixer: &mut MixerState, address: &str, value: &OscValue) ->
                 "fader" => {
                     let lin = fader_lin_from_db(value.float_value());
                     mixer.set_send(id, dest, lin);
+                    mixer.mark_send_reported(id, dest);
                     return Some(MixEvent::Mix(MixNode {
                         source_bus: src_bus,
                         source: src,

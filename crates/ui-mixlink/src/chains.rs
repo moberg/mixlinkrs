@@ -666,6 +666,50 @@ mod tests {
     }
 
     #[test]
+    fn each_loaded_stage_paints_its_own_thumb() {
+        let mut engine = engine();
+        let galaxy = analog::PluginStage {
+            id: uuid::Uuid::from_u128(11),
+            name: "Galaxy".into(),
+            bundle_path: Some("/tmp/Galaxy.vst3".into()),
+            class_uid: None,
+            bypassed: false,
+        };
+        let decap = analog::PluginStage {
+            id: uuid::Uuid::from_u128(12),
+            name: "Decapitator".into(),
+            bundle_path: Some("/tmp/Decapitator.vst3".into()),
+            class_uid: None,
+            bypassed: false,
+        };
+        engine.config.plugin_chains[0].stages.extend([galaxy.clone(), decap.clone()]);
+        let mut thumbs = std::collections::HashSet::new();
+        thumbs.insert(galaxy.id);
+        thumbs.insert(decap.id);
+        let empty = std::collections::HashMap::new();
+        let (cmds, _) = paint_chains(
+            &engine,
+            CHAINS_WINDOW_W,
+            CHAINS_WINDOW_H,
+            ChainsTab::Plugins,
+            &TextFocus::None,
+            false,
+            0.0,
+            &empty,
+            &thumbs,
+        );
+        let ids: Vec<u128> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                DrawCmd::Thumb { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert!(ids.contains(&galaxy.id.as_u128()), "{ids:?}");
+        assert!(ids.contains(&decap.id.as_u128()), "{ids:?}");
+    }
+
+    #[test]
     fn loaded_stage_without_capture_paints_placeholder() {
         let mut engine = engine();
         engine.config.plugin_chains[0].stages.push(analog::PluginStage {

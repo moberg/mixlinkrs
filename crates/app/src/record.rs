@@ -192,7 +192,8 @@ fn tap_on_record_list(analog: &AnalogEngine, tap: usize) -> bool {
         return true;
     }
     if tap < 8 {
-        return analog.config.is_strip_enabled(tap);
+        return analog.config.is_strip_enabled(tap)
+            && analog.config.strips.get(tap).is_some_and(|s| s.has_input);
     }
     let Some(lane) = ReturnLane::ALL.get(tap - 8).copied() else {
         return false;
@@ -223,12 +224,7 @@ fn tap_lane(tap: usize) -> MixLane {
 
 fn tap_name(analog: &AnalogEngine, lane: MixLane) -> String {
     match lane {
-        MixLane::Strip(i) => analog
-            .config
-            .strips
-            .get(i as usize)
-            .map(|s| analog.display_name(s.channel_id()))
-            .unwrap_or_else(|| lane.title()),
+        MixLane::Strip(i) => analog.strip_display_name(i as usize),
         MixLane::ReturnLane(r) => analog
             .config
             .chain_ref(r)

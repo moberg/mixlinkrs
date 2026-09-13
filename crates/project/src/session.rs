@@ -307,5 +307,16 @@ mod tests {
             .to_str()
             .unwrap()
             .ends_with("-Presswerk.vst3.state"));
+
+        let preview = plugin_stage_preview_url(Path::new("/proj"), stage);
+        assert_eq!(
+            preview.file_name().unwrap().to_str().unwrap(),
+            &format!("plugin-stage-{}-preview.png", uuid_upper(&stage))
+        );
+        let global_preview = plugin_stage_global_preview_url(stage);
+        assert_eq!(
+            global_preview.file_name().unwrap().to_str().unwrap(),
+            &format!("plugin-stage-{}-preview.png", uuid_upper(&stage))
+        );
     }
 }

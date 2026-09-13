@@ -182,7 +182,8 @@ pub fn close_editor(instance: MixLinkVST3Ref) {
     }
 }
 
-/// PNG of the open editor, or the last snapshot from before it closed.
+/// PNG of the open editor at backing-scale pixels, or the last snapshot from
+/// before it closed. Empty / `None` means capture failed — keep the prior thumb.
 pub fn capture_editor(instance: MixLinkVST3Ref) -> Option<Vec<u8>> {
     if instance.is_null() {
         return None;
@@ -288,10 +289,13 @@ pub fn restore_state(instance: MixLinkVST3Ref, bytes: &[u8]) -> bool {
 
 use std::sync::Mutex;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct DirtyEvent {
     pub instance: MixLinkVST3Ref,
+    /// True when the editor is closing: `preview_png` was copied before teardown.
     pub immediate: bool,
+    /// Live-window screenshot taken on close. Empty when capture failed.
+    pub preview_png: Vec<u8>,
 }
 
 // Pointers are only read on the main thread after draining; the queue itself is
@@ -305,10 +309,16 @@ extern "C" fn dirty_handler(instance: MixLinkVST3Ref, immediate: i32) {
     if instance.is_null() {
         return;
     }
+    let preview_png = if immediate != 0 {
+        capture_editor(instance).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     if let Ok(mut q) = DIRTY_QUEUE.0.lock() {
         q.push(DirtyEvent {
             instance,
             immediate: immediate != 0,
+            preview_png,
         });
     }
 }
@@ -396,5 +406,26 @@ fn scan_plugins_nsarray() -> Vec<PluginInfo> {
     #[cfg(not(target_os = "macos"))]
     {
         Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_null_editor_returns_none() {
+        assert!(capture_editor(std::ptr::null_mut()).is_none());
+    }
+
+    #[test]
+    fn close_event_keeps_empty_png_when_capture_fails() {
+        let ev = DirtyEvent {
+            instance: std::ptr::null_mut(),
+            immediate: true,
+            preview_png: Vec::new(),
+        };
+        assert!(ev.immediate);
+        assert!(ev.preview_png.is_empty());
     }
 }

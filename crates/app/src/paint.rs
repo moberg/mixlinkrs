@@ -214,6 +214,7 @@ impl AppState {
             focus: &self.chrome.text_focus,
             caret: self.chrome.caret_on,
             thumbs: &thumbs,
+            width: self.chrome.sidebar_width,
         })
     }
 

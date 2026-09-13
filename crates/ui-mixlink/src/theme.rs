@@ -196,7 +196,9 @@ pub fn mixer_chassis(cmds: &mut Vec<DrawCmd>, rect: Rect, upper_height: f32) {
         h: (rect.h - upper_h - 2.0).max(0.0),
     };
     let mat = material_for(SurfaceStyle::FaderBay);
-    let used = (Layout::FADER_TRACK_H
+    let used = (Layout::SEND_NAME_BAR
+        + Layout::PAN_ROW
+        + Layout::FADER_TRACK_H
         + Layout::FADER_BAY_PAD_Y * 2.0
         + Layout::NAME_ROW
         + Layout::BUTTON_STACK)
@@ -718,9 +720,7 @@ impl Layout {
     }
 
     pub fn upper_faceplate_height(sends: &[analog::ReturnLane]) -> f32 {
-        sends.iter().map(|lane| Self::send_lane_h(*lane)).sum::<f32>()
-            + Self::PAN_ROW
-            + Self::SEND_NAME_BAR
+        sends.iter().map(|lane| Self::send_lane_h(*lane)).sum()
     }
 
     pub fn channel_width(available: f32, n_channels: f32, n_main: f32) -> f32 {

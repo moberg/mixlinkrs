@@ -34,6 +34,7 @@ pub(crate) struct Chrome {
     pub caret_on: bool,
     pub caret_at: Instant,
     pub sidebar_scroll: f32,
+    pub sidebar_width: f32,
     pub sidebar_hits: Vec<(Rect, SidebarHit)>,
     pub mixer_extras: Vec<(Rect, MixerExtraHit)>,
     pub waveforms: asset::WaveformCache,
@@ -161,5 +162,9 @@ pub(crate) enum Drag {
         start_y: f32,
         start_bpm: f64,
         live: bool,
+    },
+    SidebarResize {
+        start_x: f32,
+        start_w: f32,
     },
 }

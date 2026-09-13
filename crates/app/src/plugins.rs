@@ -51,8 +51,22 @@ impl AppState {
             .filter(|s| s.is_loaded())
             .map(|s| s.id)
             .collect();
+        let wanted: std::collections::HashSet<uuid::Uuid> = ids.iter().copied().collect();
+        let stale: Vec<uuid::Uuid> = self
+            .audio
+            .plugin_refs
+            .keys()
+            .copied()
+            .filter(|id| !wanted.contains(id))
+            .collect();
+        for id in stale {
+            self.unload_plugin_stage(id);
+        }
         for id in ids {
             self.audio.plugin_state_scope.entry(id).or_insert(PluginStateScope::Project);
+            if self.audio.plugin_refs.contains_key(&id) {
+                continue;
+            }
             self.load_plugin_stage(id);
         }
     }
@@ -72,7 +86,13 @@ impl AppState {
             .map(|s| s.title())
             .unwrap_or_else(|| "Plugin".into());
         vst3_host::show_editor(inst, &title);
-        self.audio.preview_due.insert(id, std::time::Instant::now() + std::time::Duration::from_millis(700));
+        // First-open fill-in only. Closing the editor is the authoritative shot;
+        // do not overwrite a persisted close-screenshot with a half-painted one.
+        if !self.audio.plugin_previews.contains_key(&id) {
+            self.audio
+                .preview_due
+                .insert(id, std::time::Instant::now() + std::time::Duration::from_millis(700));
+        }
     }
 
     pub(crate) fn unload_plugin_stage(&mut self, id: uuid::Uuid) {
@@ -129,7 +149,8 @@ impl AppState {
             };
             self.save_plugin_stage_state(id, ev.instance);
             if ev.immediate {
-                self.capture_plugin_preview(id, ev.instance);
+                // Bytes were copied in the close callback while the window still existed.
+                self.apply_plugin_preview(id, ev.preview_png);
             }
         }
     }
@@ -145,6 +166,9 @@ impl AppState {
             .collect();
         for id in due {
             self.audio.preview_due.remove(&id);
+            if self.audio.plugin_previews.contains_key(&id) {
+                continue;
+            }
             if let Some(&inst) = self.audio.plugin_refs.get(&id) {
                 self.capture_plugin_preview(id, inst);
             }
@@ -152,13 +176,16 @@ impl AppState {
     }
 
     fn capture_plugin_preview(&mut self, id: uuid::Uuid, inst: vst3_host::MixLinkVST3Ref) {
-        let Some(png) = vst3_host::capture_editor(inst) else {
-            return;
-        };
-        if png.is_empty() {
+        self.apply_plugin_preview(id, vst3_host::capture_editor(inst).unwrap_or_default());
+    }
+
+    fn apply_plugin_preview(&mut self, id: uuid::Uuid, png: Vec<u8>) {
+        if !store_captured_preview(&mut self.audio.plugin_previews, id, png) {
             return;
         }
-        self.audio.plugin_previews.insert(id, png.clone());
+        let Some(png) = self.audio.plugin_previews.get(&id) else {
+            return;
+        };
         if let Some(path) = self.plugin_preview_write_path(id) {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
@@ -361,5 +388,46 @@ impl AppState {
         self.session.mix.as_ref().and_then(|mix| {
             mix.tracks.iter().find(|t| t.effect_chain.is_some_and(|c| c.id == id)).map(|t| t.lane)
         })
+    }
+}
+
+/// Insert a close-screenshot. Empty / missing capture keeps the previous thumb.
+fn store_captured_preview(
+    previews: &mut std::collections::HashMap<uuid::Uuid, Vec<u8>>,
+    id: uuid::Uuid,
+    png: Vec<u8>,
+) -> bool {
+    if png.is_empty() {
+        return false;
+    }
+    previews.insert(id, png);
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::store_captured_preview;
+    use std::collections::HashMap;
+
+    #[test]
+    fn close_capture_replaces_thumb_per_stage() {
+        let galaxy = uuid::Uuid::from_u128(1);
+        let decap = uuid::Uuid::from_u128(2);
+        let mut previews = HashMap::new();
+        assert!(store_captured_preview(&mut previews, galaxy, b"galaxy-old".to_vec()));
+        assert!(store_captured_preview(&mut previews, decap, b"decap-old".to_vec()));
+
+        assert!(store_captured_preview(&mut previews, galaxy, b"galaxy-close".to_vec()));
+        assert_eq!(previews.get(&galaxy).map(Vec::as_slice), Some(b"galaxy-close".as_slice()));
+        assert_eq!(previews.get(&decap).map(Vec::as_slice), Some(b"decap-old".as_slice()));
+    }
+
+    #[test]
+    fn failed_close_capture_keeps_previous_thumb() {
+        let id = uuid::Uuid::from_u128(3);
+        let mut previews = HashMap::new();
+        assert!(store_captured_preview(&mut previews, id, b"good".to_vec()));
+        assert!(!store_captured_preview(&mut previews, id, Vec::new()));
+        assert_eq!(previews.get(&id).map(Vec::as_slice), Some(b"good".as_slice()));
     }
 }

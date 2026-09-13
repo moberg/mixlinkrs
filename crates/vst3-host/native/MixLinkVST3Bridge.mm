@@ -319,6 +319,7 @@ tresult MixLinkComponentHandler::performEdit (ParamID id, ParamValue value)
 	MixLinkVST3Instance *instance = self.instance;
 	if (instance == nullptr)
 		return;
+	// Screenshot first so Effects thumbs get the live editor, not a torn-down view.
 	MixLinkVST3CaptureEditor (instance);
 	notifyStateDirty (instance, YES);
 	if (instance->view)
@@ -1160,6 +1161,7 @@ void MixLinkVST3CloseEditor (MixLinkVST3Ref instance)
 {
 	if (instance == nullptr || instance->window == nil)
 		return;
+	MixLinkVST3CaptureEditor (instance);
 	[instance->window close];
 }
 
@@ -1167,17 +1169,60 @@ static NSData *pngFromCGImage (CGImageRef image)
 {
 	if (image == nullptr)
 		return nil;
+	const size_t w = CGImageGetWidth (image);
+	const size_t h = CGImageGetHeight (image);
+	if (w < 2 || h < 2)
+		return nil;
 	NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithCGImage:image];
+	if (rep == nil)
+		return nil;
+	// Encode native pixels (not the 72dpi point size) so a 2x window stays 2x.
+	rep.size = NSMakeSize (static_cast<CGFloat> (w), static_cast<CGFloat> (h));
+	return [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+}
+
+#ifndef kCGWindowImageBestResolution
+#define kCGWindowImageBestResolution ((CGWindowImageOption) (1 << 3))
+#endif
+
+static NSData *snapshotViewAtBackingScale (NSView *view)
+{
+	if (view == nil)
+		return nil;
+	const NSRect bounds = view.bounds;
+	if (bounds.size.width < 2.0 || bounds.size.height < 2.0)
+		return nil;
+	const NSSize backing = [view convertSizeToBacking:bounds.size];
+	const NSInteger pw = (NSInteger) llround (backing.width);
+	const NSInteger ph = (NSInteger) llround (backing.height);
+	if (pw < 2 || ph < 2)
+		return nil;
+	NSBitmapImageRep *rep = [[NSBitmapImageRep alloc]
+	    initWithBitmapDataPlanes:NULL
+	                  pixelsWide:pw
+	                 pixelsHigh:ph
+	              bitsPerSample:8
+	            samplesPerPixel:4
+	                   hasAlpha:YES
+	                   isPlanar:NO
+	             colorSpaceName:NSCalibratedRGBColorSpace
+	                bytesPerRow:0
+	               bitsPerPixel:0];
+	if (rep == nil)
+		return nil;
+	rep.size = bounds.size;
+	[view cacheDisplayInRect:bounds toBitmapImageRep:rep];
 	return [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
 }
 
 /// Prefer a window composite so we do not send `cacheDisplayInRect` into
 /// Soundtoys (it can abort). `CGWindowListCreateImage` is gone from the
-/// macOS 15 SDK, so look it up at runtime.
+/// macOS 15 SDK, so look it up at runtime. Always ask for backing-scale pixels.
 static NSData *snapshotEditorWindow (NSWindow *window)
 {
 	if (window == nil)
 		return nil;
+	[window displayIfNeeded];
 	using CreateImageFn = CGImageRef (*) (CGRect, CGWindowListOption, CGWindowID, CGWindowImageOption);
 	static CreateImageFn createImage = nullptr;
 	static bool resolved = false;
@@ -1189,9 +1234,10 @@ static NSData *snapshotEditorWindow (NSWindow *window)
 	CGWindowID wid = (CGWindowID) window.windowNumber;
 	if (createImage != nullptr && wid != kCGNullWindowID)
 	{
+		const CGWindowImageOption opts = kCGWindowImageBoundsIgnoreFraming
+		    | kCGWindowImageShouldBeOpaque | kCGWindowImageBestResolution;
 		CGImageRef image = createImage (
-		    CGRectNull, kCGWindowListOptionIncludingWindow, wid,
-		    kCGWindowImageBoundsIgnoreFraming | kCGWindowImageShouldBeOpaque);
+		    CGRectNull, kCGWindowListOptionIncludingWindow, wid, opts);
 		if (image != nullptr)
 		{
 			NSData *png = pngFromCGImage (image);
@@ -1200,17 +1246,7 @@ static NSData *snapshotEditorWindow (NSWindow *window)
 				return png;
 		}
 	}
-	NSView *view = window.contentView;
-	if (view == nil)
-		return nil;
-	NSRect bounds = view.bounds;
-	if (bounds.size.width < 2.0 || bounds.size.height < 2.0)
-		return nil;
-	NSBitmapImageRep *rep = [view bitmapImageRepForCachingDisplayInRect:bounds];
-	if (rep == nil)
-		return nil;
-	[view cacheDisplayInRect:bounds toBitmapImageRep:rep];
-	return [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+	return snapshotViewAtBackingScale (window.contentView);
 }
 
 NSData *MixLinkVST3CaptureEditor (MixLinkVST3Ref instance)

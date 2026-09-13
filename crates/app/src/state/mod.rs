@@ -179,6 +179,7 @@ impl AppState {
                 caret_on: true,
                 caret_at: Instant::now(),
                 sidebar_scroll: 0.0,
+                sidebar_width: config.sidebar_width,
                 sidebar_hits: Vec::new(),
                 mixer_extras: Vec::new(),
                 waveforms: asset::WaveformCache::new(),

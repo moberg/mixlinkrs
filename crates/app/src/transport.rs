@@ -3,7 +3,7 @@
 use std::sync::atomic::Ordering;
 
 use engine_api::{UiCommand, MIX_PLAY_MAX_LANES};
-use project::{MixAutomationTarget, MixClip, MixLane, MixTime, ProjectStore};
+use project::{MixAutomationTarget, MixClip, MixLane, MixTime, MixTrack, ProjectStore};
 use ui_mixlink::chrome::Page;
 
 use analog::AnalogEngine;
@@ -22,8 +22,7 @@ impl AppState {
             }
             if let Some(folder) = ProjectStore::current_url(&self.surface.analog.config) {
                 self.session.project.increment_take(&folder);
-                self.session.take_number = self.session.project.next_take(&folder);
-                self.reload_mix();
+                self.refresh_takes();
             }
             return;
         }
@@ -232,54 +231,16 @@ impl AppState {
     }
 
     pub(crate) fn export_mix(&mut self) {
-        let Some(mix) = self.session.mix.clone() else { return };
         let Some(folder) = ProjectStore::current_url(&self.surface.analog.config) else { return };
+        let tracks = self.session.mixer_tracks();
+        if tracks.iter().all(|t| t.lane == MixLane::Main || t.clips.is_empty()) {
+            log::warn!("export: nothing to bounce");
+            return;
+        }
         let sr = self.audio._stream.as_ref().map(|s| s.sample_rate()).unwrap_or(48_000);
-        let mut end = 0i64;
-        for t in &mix.tracks {
-            for c in &t.clips {
-                end = end.max(c.mix_end_frame());
-            }
-        }
-        let n = end.max(1) as usize;
-        let mut left = vec![0.0f32; n];
-        let mut right = vec![0.0f32; n];
-        let any_solo = mix.tracks.iter().any(|t| t.solo);
-        for track in &mix.tracks {
-            if track.lane == MixLane::Main || track.mute || (any_solo && !track.solo) {
-                continue;
-            }
-            let amp = osc::fader_lin_to_amp(track.fader);
-            let (gl, gr) = osc::stereo_pan_amps(amp, track.pan);
-            for clip in &track.clips {
-                let path = folder.join(&clip.source_file);
-                let (cl, cr) =
-                    read_clip_stereo(&path, clip.source_start_frame, clip.source_frame_count);
-                let dest = clip.mix_start_frame.max(0) as usize;
-                for i in 0..cl.len() {
-                    let d = dest + i;
-                    if d >= n {
-                        break;
-                    }
-                    left[d] += cl[i] * gl;
-                    right[d] += cr.get(i).copied().unwrap_or(cl[i]) * gr;
-                }
-            }
-        }
-        let main_amp = mix
-            .tracks
-            .iter()
-            .find(|t| t.lane == MixLane::Main)
-            .map(|t| if t.mute { 0.0 } else { osc::fader_lin_to_amp(t.fader) })
-            .unwrap_or(1.0);
-        if main_amp != 1.0 {
-            for i in 0..n {
-                left[i] *= main_amp;
-                right[i] *= main_amp;
-            }
-        }
-        let path = folder.join(format!("{}.wav", mix.name));
-        match asset::write_bounce(&path, sr, &left, &right) {
+        let name = project::unique_export_file_name(&folder, &self.session.export_file_name());
+        let path = folder.join(name);
+        match bounce_tracks(&folder, &tracks, sr, &path) {
             Ok(()) => log::info!("exported {}", path.display()),
             Err(e) => log::error!("export: {e}"),
         }
@@ -352,6 +313,57 @@ impl Timeline {
         let step = MixTime::frame_from_bar(self.grid.raw(), self.tempo, sr).max(1);
         self.locate_to(audio, (self.locate_frame + dir as i64 * step).max(0));
     }
+}
+
+fn bounce_tracks(
+    folder: &std::path::Path,
+    tracks: &[MixTrack],
+    sample_rate: u32,
+    dest: &std::path::Path,
+) -> Result<(), asset::BounceError> {
+    let mut end = 0i64;
+    for t in tracks {
+        for c in &t.clips {
+            end = end.max(c.mix_end_frame());
+        }
+    }
+    let n = end.max(1) as usize;
+    let mut left = vec![0.0f32; n];
+    let mut right = vec![0.0f32; n];
+    let any_solo = tracks.iter().any(|t| t.solo);
+    for track in tracks {
+        if track.lane == MixLane::Main || track.mute || (any_solo && !track.solo) {
+            continue;
+        }
+        let amp = osc::fader_lin_to_amp(track.fader);
+        let (gl, gr) = osc::stereo_pan_amps(amp, track.pan);
+        for clip in &track.clips {
+            let path = folder.join(&clip.source_file);
+            let (cl, cr) =
+                read_clip_stereo(&path, clip.source_start_frame, clip.source_frame_count);
+            let dest_i = clip.mix_start_frame.max(0) as usize;
+            for i in 0..cl.len() {
+                let d = dest_i + i;
+                if d >= n {
+                    break;
+                }
+                left[d] += cl[i] * gl;
+                right[d] += cr.get(i).copied().unwrap_or(cl[i]) * gr;
+            }
+        }
+    }
+    let main_amp = tracks
+        .iter()
+        .find(|t| t.lane == MixLane::Main)
+        .map(|t| if t.mute { 0.0 } else { osc::fader_lin_to_amp(t.fader) })
+        .unwrap_or(1.0);
+    if main_amp != 1.0 {
+        for i in 0..n {
+            left[i] *= main_amp;
+            right[i] *= main_amp;
+        }
+    }
+    asset::write_bounce(dest, sample_rate, &left, &right)
 }
 
 fn read_clip_stereo(path: &std::path::Path, start: i64, count: i64) -> (Vec<f32>, Vec<f32>) {

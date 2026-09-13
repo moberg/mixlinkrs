@@ -34,8 +34,20 @@ impl AppState {
                 return crate::cursors::ArrCursor::TrimRight
             }
             Some(Drag::Zoom { .. }) => return crate::cursors::ArrCursor::Zoom,
+            Some(Drag::SidebarResize { .. }) => return crate::cursors::ArrCursor::ColResize,
             Some(_) => return crate::cursors::ArrCursor::Default,
             None => {}
+        }
+        if self.chrome.sidebar_open() {
+            let (w, h) = self.chrome.renderer.logical_size();
+            let (x, y) = self.chrome.cursor;
+            if ui_mixlink::widgets::contains(
+                ui_mixlink::sidebar::resize_hit(w, h, self.chrome.page, self.chrome.sidebar_width),
+                x,
+                y,
+            ) {
+                return crate::cursors::ArrCursor::ColResize;
+            }
         }
         if self.chrome.overlay.is_some() || !self.is_editing_mix() {
             return crate::cursors::ArrCursor::Default;

@@ -70,10 +70,11 @@ pub fn hit_mixer(layout: &MixerLayout, send_count: usize, x: f32, y: f32) -> Opt
         }
         yy += lane_h;
     }
+    let pan_y = mixer::pan_name_bar_y(layout, send_count);
     let pan_lane_h = Layout::SEND_NAME_BAR + Layout::PAN_ROW;
-    if y >= yy && y < yy + pan_lane_h {
+    if y >= pan_y && y < pan_y + pan_lane_h {
         if !matches!(kind, StripKind::Main) {
-            let disc = mixer::pan_knob_rect(sx, yy + Layout::SEND_NAME_BAR, sw);
+            let disc = mixer::pan_knob_rect(sx, pan_y + Layout::SEND_NAME_BAR, sw);
             if widgets::contains(mixer::knob_hit_rect(disc), x, y) {
                 return Some(Hit::Knob { kind, lane: None, start_value: 0.0 });
             }

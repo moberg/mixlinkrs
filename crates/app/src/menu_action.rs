@@ -32,7 +32,10 @@ impl AppState {
     pub(crate) fn apply_menu(&mut self, action: MenuAction, item: &MenuItem) {
         match action {
             MenuAction::StripSource { strip } => {
-                if let Ok(idx) = item.id.parse::<i32>() {
+                if item.id == "none" {
+                    self.surface.analog.clear_strip_source(strip);
+                    self.persist_project_meta();
+                } else if let Ok(idx) = item.id.parse::<i32>() {
                     self.surface
                         .analog
                         .set_strip_source(strip, ChannelID::new(MixerBus::Input, idx));
@@ -146,7 +149,7 @@ impl AppState {
         if let Err(e) = self.surface.analog.osc.start(&host, send, listen) {
             log::warn!("OSC reconnect: {e}");
         }
-        self.surface.analog.osc.send_dump_requests();
+        self.surface.analog.request_total_mix_dump();
         self.surface.analog.persist();
         self.audio.restart_audio(&self.surface.analog.config);
         #[cfg(target_os = "macos")]

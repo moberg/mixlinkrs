@@ -1,4 +1,4 @@
-//! Record EFFECTS/SETTINGS sidebar and Mix INSERTS column. 248 pt.
+//! Record EFFECTS/SETTINGS sidebar and Mix INSERTS column. Default 248 pt.
 
 use analog::{AnalogEngine, ChainKind, ReturnLane};
 use project::{MixDocument, MixLane};
@@ -22,6 +22,7 @@ pub struct SidebarView<'a> {
     pub focus: &'a TextFocus,
     pub caret: bool,
     pub thumbs: &'a std::collections::HashSet<uuid::Uuid>,
+    pub width: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -40,20 +41,57 @@ pub enum SidebarHit {
 }
 
 const FOOT_H: f32 = 40.0;
+const RESIZE_HIT: f32 = 6.0;
+const THUMB_BASE_W: f32 = 112.0;
+const THUMB_BASE_H: f32 = 63.0;
+const INNER_PAD: f32 = 8.0;
+/// Card inset: list pad + module pad on each side.
+const CARD_INSET: f32 = INNER_PAD + Layout::MODULE_PAD;
+/// Narrowest effects column. Plugin shots stay at least 112×63 at this width.
+pub const SIDEBAR_MIN: f32 = Layout::SIDEBAR_WIDTH;
+pub const SIDEBAR_MAX: f32 = 720.0;
 
-pub fn body_rect(window_w: f32, window_h: f32, page: Page) -> Rect {
-    let x = window_w - Layout::SIDEBAR_WIDTH;
+pub fn clamp_width(width: f32, window_w: f32) -> f32 {
+    let max = (window_w - 400.0).max(SIDEBAR_MIN).min(SIDEBAR_MAX);
+    width.clamp(SIDEBAR_MIN, max)
+}
+
+pub fn thumb_size(sidebar_w: f32) -> (f32, f32) {
+    thumb_size_for_inner(stage_inner_w(sidebar_w))
+}
+
+fn stage_inner_w(sidebar_w: f32) -> f32 {
+    (sidebar_w - CARD_INSET * 2.0).max(THUMB_BASE_W)
+}
+
+fn thumb_size_for_inner(inner_w: f32) -> (f32, f32) {
+    let w = inner_w.max(THUMB_BASE_W);
+    (w, (w * 9.0 / 16.0).max(THUMB_BASE_H))
+}
+
+pub fn resize_hit(window_w: f32, window_h: f32, page: Page, width: f32) -> Rect {
+    let side = clamp_width(width, window_w);
+    let x = window_w - side;
+    let y = crate::chrome::HEADER_H;
+    let h = (window_h - crate::chrome::HEADER_H - crate::chrome::footer_height(page)).max(0.0);
+    Rect { x: x - RESIZE_HIT * 0.5, y, w: RESIZE_HIT, h }
+}
+
+pub fn body_rect(window_w: f32, window_h: f32, page: Page, width: f32) -> Rect {
+    let side = clamp_width(width, window_w);
+    let x = window_w - side;
     let y = crate::chrome::HEADER_H;
     let sh = window_h - crate::chrome::HEADER_H - crate::chrome::footer_height(page);
     let dock = if page == Page::Record { settings_dock_h() } else { 0.0 };
-    Rect { x, y, w: Layout::SIDEBAR_WIDTH, h: (sh - FOOT_H - dock).max(0.0) }
+    Rect { x, y, w: side, h: (sh - FOOT_H - dock).max(0.0) }
 }
 
-pub fn max_scroll(view: &SidebarView<'_>, window_h: f32) -> f32 {
-    let body_h = body_rect(0.0, window_h, view.page).h;
+pub fn max_scroll(view: &SidebarView<'_>, window_w: f32, window_h: f32) -> f32 {
+    let side = clamp_width(view.width, window_w);
+    let body_h = body_rect(window_w, window_h, view.page, side).h;
     let content = match view.page {
-        Page::Record => record_content_h(view),
-        Page::Mix => mix_content_h(view),
+        Page::Record => record_content_h(view, side),
+        Page::Mix => mix_content_h(view, side),
     };
     (content - body_h).max(0.0)
 }
@@ -61,70 +99,53 @@ pub fn max_scroll(view: &SidebarView<'_>, window_h: f32) -> f32 {
 pub fn paint(view: &SidebarView<'_>, w: f32, h: f32) -> (Vec<DrawCmd>, Vec<(Rect, SidebarHit)>) {
     let mut cmds = Vec::new();
     let mut hits = Vec::new();
-    let x = w - Layout::SIDEBAR_WIDTH;
+    let side = clamp_width(view.width, w);
+    let x = w - side;
     let y = crate::chrome::HEADER_H;
     let sh = h - crate::chrome::HEADER_H - crate::chrome::footer_height(view.page);
     cmds.push(DrawCmd::Layer);
-    theme::hardware_surface(
-        &mut cmds,
-        Rect { x, y, w: Layout::SIDEBAR_WIDTH, h: sh },
-        theme::SurfaceStyle::Sidebar,
-    );
+    theme::hardware_surface(&mut cmds, Rect { x, y, w: side, h: sh }, theme::SurfaceStyle::Sidebar);
     theme::seam_v(&mut cmds, x, y, sh, true);
 
-    let clip = body_rect(w, h, view.page);
-    let max_scroll = max_scroll(view, h);
+    let clip = body_rect(w, h, view.page, side);
+    let max_scroll = max_scroll(view, w, h);
     let scroll = view.scroll.clamp(0.0, max_scroll);
 
     cmds.push(DrawCmd::Layer);
     cmds.push(DrawCmd::Clip { rect: clip });
     let mut yy = clip.y + 8.0 - scroll;
     if view.page == Page::Record {
-        paint_record(view, &mut cmds, &mut hits, x, &mut yy, clip);
+        paint_record(view, &mut cmds, &mut hits, x, side, &mut yy, clip);
     } else {
-        paint_mix(view, &mut cmds, &mut hits, x, &mut yy, clip);
+        paint_mix(view, &mut cmds, &mut hits, x, side, &mut yy, clip);
     }
     hits.retain(|(r, _)| rects_overlap(*r, clip));
 
     cmds.push(DrawCmd::Layer);
     if view.page == Page::Record {
-        paint_settings_dock(view, &mut cmds, &mut hits, x, y + sh - FOOT_H - settings_dock_h());
+        paint_settings_dock(view, &mut cmds, &mut hits, x, side, y + sh - FOOT_H - settings_dock_h());
     }
     let by = y + sh - 36.0;
     theme::hardware_surface(
         &mut cmds,
-        Rect { x, y: by - 4.0, w: Layout::SIDEBAR_WIDTH, h: FOOT_H },
+        Rect { x, y: by - 4.0, w: side, h: FOOT_H },
         theme::SurfaceStyle::Sidebar,
     );
-    theme::seam_h(&mut cmds, x, by - 4.0, Layout::SIDEBAR_WIDTH, false);
-    widgets::hardware_pad(
-        &mut cmds,
-        Rect { x: x + 56.0, y: by, w: 72.0, h: 26.0 },
-        "Effects",
-        false,
-        theme::PRIMARY_TEXT,
-    );
-    widgets::hardware_pad(
-        &mut cmds,
-        Rect { x: x + 136.0, y: by, w: 72.0, h: 26.0 },
-        "Channels",
-        false,
-        theme::PRIMARY_TEXT,
-    );
-    widgets::icon_pad(&mut cmds, Rect { x: x + 214.0, y: by, w: 26.0, h: 26.0 }, "⚙", true);
-    hits.push((Rect { x: x + 56.0, y: by, w: 72.0, h: 26.0 }, SidebarHit::OpenChains));
-    hits.push((Rect { x: x + 136.0, y: by, w: 72.0, h: 26.0 }, SidebarHit::Channels));
-    hits.push((Rect { x: x + 214.0, y: by, w: 26.0, h: 26.0 }, SidebarHit::Settings));
+    theme::seam_h(&mut cmds, x, by - 4.0, side, false);
+    let gear = Rect { x: x + side - 34.0, y: by, w: 26.0, h: 26.0 };
+    let channels = Rect { x: gear.x - 80.0, y: by, w: 72.0, h: 26.0 };
+    let effects = Rect { x: channels.x - 80.0, y: by, w: 72.0, h: 26.0 };
+    widgets::hardware_pad(&mut cmds, effects, "Effects", false, theme::PRIMARY_TEXT);
+    widgets::hardware_pad(&mut cmds, channels, "Channels", false, theme::PRIMARY_TEXT);
+    widgets::icon_pad(&mut cmds, gear, "⚙", true);
+    hits.push((effects, SidebarHit::OpenChains));
+    hits.push((channels, SidebarHit::Channels));
+    hits.push((gear, SidebarHit::Settings));
 
     if max_scroll > 0.5 {
         widgets::scrollbar(
             &mut cmds,
-            Rect {
-                x: x + Layout::SIDEBAR_WIDTH - 8.0,
-                y: clip.y + 4.0,
-                w: 5.0,
-                h: (clip.h - 8.0).max(8.0),
-            },
+            Rect { x: x + side - 8.0, y: clip.y + 4.0, w: 5.0, h: (clip.h - 8.0).max(8.0) },
             scroll,
             max_scroll,
         );
@@ -136,7 +157,7 @@ fn rects_overlap(a: Rect, b: Rect) -> bool {
     a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y
 }
 
-fn record_content_h(view: &SidebarView<'_>) -> f32 {
+fn record_content_h(view: &SidebarView<'_>, sidebar_w: f32) -> f32 {
     const GAP: f32 = 8.0;
     const HEAD_GAP: f32 = 12.0;
     let mut h = 8.0;
@@ -147,6 +168,7 @@ fn record_content_h(view: &SidebarView<'_>) -> f32 {
             is_plugin_assign(chain),
             &plugin_stages(&view.engine.config, chain),
             false,
+            sidebar_w,
         ) + GAP;
     }
     h += Layout::HEADER_BUTTON + GAP;
@@ -166,13 +188,17 @@ fn settings_dock_h() -> f32 {
     8.0 + settings_heading_h() + settings_content_h() + 8.0
 }
 
-fn mix_content_h(view: &SidebarView<'_>) -> f32 {
+fn mix_content_h(view: &SidebarView<'_>, sidebar_w: f32) -> f32 {
     let mut h = 8.0;
     h += 18.0 + 12.0;
     if let Some(lane) = view.selected_lane {
         let chain = view.mix.and_then(|m| m.track(lane)).and_then(|t| t.effect_chain);
-        h += assign_row_h(false, &plugin_stages(&view.engine.config, chain), chain.is_some())
-            + CARD_GAP;
+        h += assign_row_h(
+            false,
+            &plugin_stages(&view.engine.config, chain),
+            chain.is_some(),
+            sidebar_w,
+        ) + CARD_GAP;
         if chain.is_some_and(|c| c.kind == ChainKind::Hardware) {
             h += Layout::HEADER_BUTTON + CARD_GAP;
         }
@@ -189,14 +215,14 @@ fn paint_record(
     cmds: &mut Vec<DrawCmd>,
     hits: &mut Vec<(Rect, SidebarHit)>,
     x: f32,
+    side: f32,
     y: &mut f32,
     clip: Rect,
 ) {
-    const SIDE: f32 = 8.0;
     const GAP: f32 = 8.0;
     const HEAD_GAP: f32 = 12.0;
-    let inner_x = x + SIDE;
-    let inner_w = Layout::SIDEBAR_WIDTH - SIDE * 2.0;
+    let inner_x = x + INNER_PAD;
+    let inner_w = side - INNER_PAD * 2.0;
 
     theme::text(
         cmds,
@@ -226,11 +252,13 @@ fn paint_record(
             None,
             true,
             view.thumbs,
+            side,
         );
         *y += assign_row_h(
             is_plugin_assign(chain),
             &plugin_stages(&view.engine.config, chain),
             false,
+            side,
         ) + GAP;
     }
 
@@ -244,9 +272,9 @@ const CARD_GAP: f32 = 6.0;
 const PICKER_GAP: f32 = 4.0;
 const LABEL_H: f32 = 16.0;
 const MENU_H: f32 = 24.0;
+const PLAYBACK_LABEL_W: f32 = 118.0;
+const NAME_THUMB_GAP: f32 = 4.0;
 const STAGE_GAP: f32 = 6.0;
-const THUMB_W: f32 = 112.0;
-const THUMB_H: f32 = 63.0;
 
 fn record_lanes(view: &SidebarView<'_>) -> Vec<ReturnLane> {
     let mut lanes = view.engine.config.visible_send_lanes();
@@ -254,21 +282,21 @@ fn record_lanes(view: &SidebarView<'_>) -> Vec<ReturnLane> {
     lanes
 }
 
-fn stage_row_h(stage: &analog::PluginStage) -> f32 {
+fn stage_row_h(stage: &analog::PluginStage, sidebar_w: f32) -> f32 {
     if stage.is_loaded() {
-        THUMB_H + STAGE_GAP
+        LABEL_H + NAME_THUMB_GAP + thumb_size(sidebar_w).1 + STAGE_GAP
     } else {
         MENU_H + STAGE_GAP
     }
 }
 
-fn assign_inner_h(playback: bool, stages: &[analog::PluginStage], clear: bool) -> f32 {
+fn assign_inner_h(playback: bool, stages: &[analog::PluginStage], clear: bool, sidebar_w: f32) -> f32 {
     let mut h = LABEL_H + PICKER_GAP + MENU_H;
     if playback {
-        h += 8.0 + LABEL_H + PICKER_GAP + MENU_H;
+        h += 8.0 + MENU_H;
     }
     if !stages.is_empty() {
-        h += 8.0 + stages.iter().map(stage_row_h).sum::<f32>();
+        h += 8.0 + stages.iter().map(|s| stage_row_h(s, sidebar_w)).sum::<f32>();
     }
     if clear {
         h += 14.0;
@@ -278,8 +306,8 @@ fn assign_inner_h(playback: bool, stages: &[analog::PluginStage], clear: bool) -
     h
 }
 
-fn assign_row_h(playback: bool, stages: &[analog::PluginStage], clear: bool) -> f32 {
-    Layout::MODULE_PAD * 2.0 + assign_inner_h(playback, stages, clear)
+fn assign_row_h(playback: bool, stages: &[analog::PluginStage], clear: bool, sidebar_w: f32) -> f32 {
+    Layout::MODULE_PAD * 2.0 + assign_inner_h(playback, stages, clear, sidebar_w)
 }
 
 fn is_plugin_assign(chain: Option<analog::ChainRef>) -> bool {
@@ -325,6 +353,7 @@ fn paint_assign_row(
     clear: Option<SidebarHit>,
     show_playback: bool,
     thumbs: &std::collections::HashSet<uuid::Uuid>,
+    sidebar_w: f32,
 ) {
     let (label, kind) = match chain {
         Some(r) => {
@@ -339,7 +368,7 @@ fn paint_assign_row(
     };
     let playback = show_playback && is_plugin_assign(chain);
     let stages = plugin_stages(config, chain);
-    let card_h = assign_row_h(playback, stages, clear.is_some() && chain.is_some());
+    let card_h = assign_row_h(playback, stages, clear.is_some() && chain.is_some(), sidebar_w);
     widgets::hardware_module(cmds, Rect { x, y, w, h: card_h });
     let x = x + Layout::MODULE_PAD;
     let y = y + Layout::MODULE_PAD;
@@ -364,14 +393,18 @@ fn paint_assign_row(
             if let Some(pc) = config.plugin_chain(r.id) {
                 theme::text(
                     cmds,
-                    Rect { x, y: extra_y, w, h: LABEL_H },
+                    Rect { x, y: extra_y, w: PLAYBACK_LABEL_W, h: MENU_H },
                     "Software playback",
                     11.0,
                     theme::TEXT_DIM,
                     false,
                 );
-                extra_y += LABEL_H + PICKER_GAP;
-                let pb = Rect { x, y: extra_y, w, h: MENU_H };
+                let pb = Rect {
+                    x: x + PLAYBACK_LABEL_W,
+                    y: extra_y,
+                    w: (w - PLAYBACK_LABEL_W).max(56.0),
+                    h: MENU_H,
+                };
                 widgets::channel_picker(
                     cmds,
                     pb,
@@ -383,28 +416,26 @@ fn paint_assign_row(
             }
         }
     }
+    let (thumb_w, thumb_h) = thumb_size_for_inner(w);
     for stage in stages {
         let loaded = stage.is_loaded();
-        let row_h = if loaded { THUMB_H } else { MENU_H };
         theme::text(
             cmds,
-            Rect {
-                x,
-                y: extra_y,
-                w: if loaded { (w - THUMB_W - 6.0).max(0.0) } else { w },
-                h: row_h,
-            },
+            Rect { x, y: extra_y, w, h: if loaded { LABEL_H } else { MENU_H } },
             stage_label(stage),
             11.0,
             if loaded { theme::PRIMARY_TEXT } else { theme::TEXT_DIM },
             false,
         );
         if loaded {
-            let thumb = Rect { x: x + w - THUMB_W, y: extra_y, w: THUMB_W, h: THUMB_H };
+            extra_y += LABEL_H + NAME_THUMB_GAP;
+            let thumb = Rect { x, y: extra_y, w: thumb_w, h: thumb_h };
             widgets::plugin_thumb(cmds, thumb, stage.id.as_u128(), thumbs.contains(&stage.id));
             hits.push((thumb, SidebarHit::OpenPlugin { id: stage.id }));
+            extra_y += thumb_h + STAGE_GAP;
+        } else {
+            extra_y += stage_row_h(stage, sidebar_w);
         }
-        extra_y += stage_row_h(stage);
     }
     if let Some(clear) = clear {
         if chain.is_some() {
@@ -425,17 +456,17 @@ fn paint_settings_dock(
     cmds: &mut Vec<DrawCmd>,
     hits: &mut Vec<(Rect, SidebarHit)>,
     x: f32,
+    side: f32,
     y: f32,
 ) {
-    const SIDE: f32 = 8.0;
-    let inner_x = x + SIDE;
-    let inner_w = Layout::SIDEBAR_WIDTH - SIDE * 2.0;
+    let inner_x = x + INNER_PAD;
+    let inner_w = side - INNER_PAD * 2.0;
     theme::hardware_surface(
         cmds,
-        Rect { x, y, w: Layout::SIDEBAR_WIDTH, h: settings_dock_h() },
+        Rect { x, y, w: side, h: settings_dock_h() },
         theme::SurfaceStyle::Sidebar,
     );
-    theme::seam_h(cmds, x, y, Layout::SIDEBAR_WIDTH, false);
+    theme::seam_h(cmds, x, y, side, false);
     let mut yy = y + 8.0;
     theme::text(
         cmds,
@@ -478,12 +509,12 @@ fn paint_mix(
     cmds: &mut Vec<DrawCmd>,
     hits: &mut Vec<(Rect, SidebarHit)>,
     x: f32,
+    side: f32,
     y: &mut f32,
     _clip: Rect,
 ) {
-    const SIDE: f32 = 8.0;
-    let inner_x = x + SIDE;
-    let inner_w = Layout::SIDEBAR_WIDTH - SIDE * 2.0;
+    let inner_x = x + INNER_PAD;
+    let inner_w = side - INNER_PAD * 2.0;
     let Some(lane) = view.selected_lane else {
         theme::text(
             cmds,
@@ -519,8 +550,9 @@ fn paint_mix(
         Some(SidebarHit::ClearMixChain),
         false,
         view.thumbs,
+        side,
     );
-    *y += assign_row_h(false, &plugin_stages(&view.engine.config, chain), chain.is_some())
+    *y += assign_row_h(false, &plugin_stages(&view.engine.config, chain), chain.is_some(), side)
         + CARD_GAP;
     if chain.is_some_and(|c| c.kind == ChainKind::Hardware) {
         let on = track.map(|t| t.hardware_chain_enabled).unwrap_or(true);
@@ -609,6 +641,7 @@ mod tests {
             focus,
             caret: false,
             thumbs,
+            width: SIDEBAR_MIN,
         }
     }
 
@@ -663,6 +696,16 @@ mod tests {
         let labels = texts(&cmds);
         assert!(labels.contains(&"Software playback"), "{labels:?}");
         assert!(labels.contains(&"3/4"), "{labels:?}");
+        let label_y = cmds.iter().find_map(|c| match c {
+            DrawCmd::Text(t) if t.text == "Software playback" => Some(t.rect.y),
+            _ => None,
+        });
+        let pair_y = cmds.iter().find_map(|c| match c {
+            DrawCmd::Text(t) if t.text == "3/4" => Some(t.rect.y),
+            _ => None,
+        });
+        let (label_y, pair_y) = (label_y.expect("playback label"), pair_y.expect("playback pair"));
+        assert!((label_y - pair_y).abs() < 8.0, "label y={label_y} pair y={pair_y}");
         assert!(hits.iter().any(|(_, h)| matches!(h, SidebarHit::AssignPlayback { id: hit } if *hit == id)));
         assert!(!hits.iter().any(|(_, h)| matches!(h, SidebarHit::AssignPlayback { id: hit } if *hit != id)));
     }
@@ -700,6 +743,60 @@ mod tests {
         let hardware_lane = engine.config.chain_ref(ReturnLane::SendA);
         assert!(hardware_lane.is_some_and(|r| r.kind == ChainKind::Hardware));
         assert_eq!(hits.iter().filter(|(_, h)| matches!(h, SidebarHit::OpenPlugin { .. })).count(), 1);
+        let thumb = cmds.iter().find_map(|c| match c {
+            DrawCmd::Thumb { id, rect, .. } if *id == stage.as_u128() => Some(*rect),
+            _ => None,
+        });
+        let thumb = thumb.expect("plugin screenshot");
+        let name = cmds.iter().find_map(|c| match c {
+            DrawCmd::Text(t) if t.text == "Valhalla" => Some(t.rect),
+            _ => None,
+        });
+        let name = name.expect("stage name");
+        assert!(name.y + name.h <= thumb.y + 0.5, "name should sit above the thumb");
+        assert!(name.h <= LABEL_H + 0.5, "name should stay compact, not stretch beside the shot");
+        assert!((thumb.w - 216.0).abs() < 0.5, "default thumb w={}", thumb.w);
+        assert!((thumb.h - 120.6).abs() < 0.5, "default thumb h={}", thumb.h);
+    }
+
+    #[test]
+    fn wider_sidebar_grows_plugin_thumbs() {
+        let mut engine = test_engine();
+        let chain = engine.config.plugin_chains[0].id;
+        let stage = add_named_stage(&mut engine, chain, "Valhalla");
+        engine.config.set_return_chain(ReturnLane::SendB, Some(analog::ChainRef::plugin(chain)));
+        let focus = TextFocus::None;
+        let mut thumbs = std::collections::HashSet::new();
+        thumbs.insert(stage);
+        let mut view = record_view(&engine, &focus, &thumbs);
+        view.width = SIDEBAR_MIN * 2.0;
+        let (cmds, _) = paint(&view, 1600.0, 800.0);
+        let thumb = cmds.iter().find_map(|c| match c {
+            DrawCmd::Thumb { id, rect, .. } if *id == stage.as_u128() => Some(*rect),
+            _ => None,
+        });
+        let thumb = thumb.expect("plugin screenshot");
+        let name = cmds.iter().find_map(|c| match c {
+            DrawCmd::Text(t) if t.text == "Valhalla" => Some(t.rect),
+            _ => None,
+        });
+        let name = name.expect("stage name");
+        assert!(name.y + name.h <= thumb.y + 0.5, "name should sit above the thumb");
+        assert!(name.h <= LABEL_H + 0.5, "name should stay compact, not stretch beside the shot");
+        assert!((thumb.w - 464.0).abs() < 0.5, "wide thumb w={}", thumb.w);
+        assert!((thumb.h - 260.1).abs() < 0.5, "wide thumb h={}", thumb.h);
+        assert!(
+            (thumb.x - (name.x + 1.0)).abs() < 0.5,
+            "thumb should use the full card width, not a right-hand stamp (thumb.x={} name.x={})",
+            thumb.x,
+            name.x
+        );
+        assert!(
+            (name.w - thumb.w).abs() < 3.0,
+            "no vacant column beside the thumb (name.w={} thumb.w={})",
+            name.w,
+            thumb.w
+        );
     }
 
     #[test]
@@ -727,6 +824,7 @@ mod tests {
             focus: &focus,
             caret: false,
             thumbs: &thumbs,
+            width: SIDEBAR_MIN,
         };
         let (cmds, hits) = paint(&view, 1200.0, 800.0);
         let labels = texts(&cmds);

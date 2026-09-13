@@ -94,8 +94,8 @@ pub fn paint(view: &MixerView<'_>) -> (Vec<DrawCmd>, Vec<(Rect, MixerExtraHit)>)
         Rect { x: l.x + chassis_w, y: l.y, w: (l.w - chassis_w).max(0.0), h: l.h },
     );
 
-    paint_name_bar_rails(&mut cmds, x, l.y, l.ch_w, l.main_w, &sends);
     let pan_bar_y = pan_name_bar_y(&l, sends.len());
+    paint_name_bar_rails(&mut cmds, x, l.y, l.ch_w, l.main_w, &sends, pan_bar_y);
     for i in 0..8 {
         paint_strip(
             &mut cmds,
@@ -178,8 +178,8 @@ pub fn paint(view: &MixerView<'_>) -> (Vec<DrawCmd>, Vec<(Rect, MixerExtraHit)>)
 }
 
 /// Group split (inputs | FX | bus | Main). Starts at the PAN title row so the
-/// empty send-stack above returns/Main stays one sheet, then runs through the
-/// leftover bay and the faders.
+/// empty send-stack above returns/Main stays one sheet, then runs through pans
+/// and the faders.
 fn group_divider(cmds: &mut Vec<DrawCmd>, x: f32, mixer_y: f32, mixer_h: f32, from_y: f32) {
     let y = from_y.max(mixer_y);
     let h = (mixer_y + mixer_h - y).max(0.0);
@@ -271,15 +271,16 @@ fn paint_strip(
     let (fader, pan, name, id, has_sends, dim, enabled) = match kind {
         StripKind::Input(i) => {
             let s = &view.engine.surface.strips[i];
-            let id = view.engine.config.strips[i].channel_id();
-            let enabled = view.engine.config.strips[i].enabled;
+            let binding = &view.engine.config.strips[i];
+            let enabled = binding.enabled;
+            let unused = !binding.has_input;
             (
                 s.fader,
                 s.pan,
-                view.engine.selected_name(id),
+                view.engine.strip_display_name(i),
                 format!("{}", i + 1),
                 true,
-                !enabled,
+                unused || !enabled,
                 enabled,
             )
         }
@@ -346,6 +347,7 @@ fn paint_strip(
         }
     }
 
+    y = pan_name_bar_y(&l, sends.len());
     name_bar(cmds, x, y, w, first_input, None, view.engine);
     y += Layout::SEND_NAME_BAR;
     theme::faceplate_cell(cmds, Rect { x, y, w, h: Layout::PAN_ROW }, false, true);
@@ -362,9 +364,8 @@ fn paint_strip(
         theme::SECONDARY_TEXT,
         true,
     );
-    y += Layout::PAN_ROW;
-
-    let bay_h = (l.y + l.h - y - Layout::NAME_ROW - Layout::BUTTON_STACK).max(80.0);
+    let (bay_y, bay_h) = fader_bay_frame(&l, sends.len());
+    y = bay_y;
     let used_top = FaderBay::layout(x, y, w, bay_h).track_top;
     theme::channel_bay_shading(
         cmds,
@@ -393,9 +394,8 @@ fn paint_strip(
     match kind {
         StripKind::Input(i) => {
             let assign = view.engine.surface.strips[i].assign;
-            let id = view.engine.config.strips[i].channel_id();
-            let muted = view.engine.mixer.channel(id).map(|c| c.mute).unwrap_or(false);
-            let soloed = view.engine.mixer.channel(id).map(|c| c.solo).unwrap_or(false);
+            let muted = view.engine.strip_muted(i);
+            let soloed = view.engine.strip_soloed(i);
             let (solo, mute) = button_pair_rects(x, y, w);
             widgets::hardware_pad(cmds, solo, "SOLO", soloed, theme::METER_GREEN);
             widgets::hardware_pad(cmds, mute, "MUTE", muted, theme::METER_RED);
@@ -425,8 +425,8 @@ fn paint_strip(
     }
 
     // Returns / Main have no send knobs — keep that empty faceplate seamless
-    // down to the PAN title row. Inputs keep seams through the send stack.
-    // Seams continue through the leftover above capped faders.
+    // down to the leftover above pans. Inputs keep seams through the send stack.
+    // Seams continue through leftover, pans, and faders.
     let send_area: f32 = sends.iter().copied().map(Layout::send_lane_h).sum();
     let skip_upper = !matches!(kind, StripKind::Input(_));
     let body_y = y0 + if skip_upper { send_area } else { 0.0 };
@@ -467,6 +467,7 @@ fn paint_name_bar_rails(
     ch_w: f32,
     main_w: f32,
     sends: &[ReturnLane],
+    pan_bar_y: f32,
 ) {
     let rail_x = origin;
     let inputs_w = ch_w * 8.0;
@@ -475,9 +476,9 @@ fn paint_name_bar_rails(
         name_bar_plate(cmds, rail_x, y, inputs_w);
         y += Layout::send_lane_h(*lane);
     }
-    // PAN / Effect returns / Bus returns / Main share one rail.
+    // PAN / Effect returns / Bus returns / Main share one rail, parked on the faders.
     let pan_w = inputs_w + 1.0 + ch_w * sends.len() as f32 + 1.0 + ch_w * 2.0 + 1.0 + main_w;
-    name_bar_plate(cmds, rail_x, y, pan_w);
+    name_bar_plate(cmds, rail_x, pan_bar_y, pan_w);
 }
 
 fn name_bar_plate(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, w: f32) {
@@ -794,9 +795,22 @@ pub fn send_stack_h(send_count: usize) -> f32 {
     ALL_SEND_LANES.iter().take(n).copied().map(Layout::send_lane_h).sum()
 }
 
-/// Y of the PAN / Effect returns / Bus returns / Main name bar.
+fn mixer_footer_h() -> f32 {
+    Layout::NAME_ROW + Layout::BUTTON_STACK
+}
+
+fn pan_block_h() -> f32 {
+    Layout::SEND_NAME_BAR + Layout::PAN_ROW
+}
+
+fn used_fader_bay_h() -> f32 {
+    Layout::FADER_TRACK_H + Layout::FADER_BAY_PAD_Y * 2.0
+}
+
+/// PAN title + knobs sit on the fader throw. Extra mixer height is leftover
+/// metal between the send stack and this bar.
 pub fn pan_name_bar_y(layout: &MixerLayout, send_count: usize) -> f32 {
-    layout.y + send_stack_h(send_count)
+    mixer_pack(layout, send_count).0
 }
 
 pub fn pan_row_y(layout: &MixerLayout, send_count: usize) -> f32 {
@@ -804,9 +818,22 @@ pub fn pan_row_y(layout: &MixerLayout, send_count: usize) -> f32 {
 }
 
 pub fn fader_bay_frame(layout: &MixerLayout, send_count: usize) -> (f32, f32) {
-    let y = pan_name_bar_y(layout, send_count) + Layout::SEND_NAME_BAR + Layout::PAN_ROW;
-    let h = (layout.y + layout.h - y - Layout::NAME_ROW - Layout::BUTTON_STACK).max(80.0);
-    (y, h)
+    let (_, bay_y, bay_h) = mixer_pack(layout, send_count);
+    (bay_y, bay_h)
+}
+
+fn mixer_pack(layout: &MixerLayout, send_count: usize) -> (f32, f32, f32) {
+    let send_bottom = layout.y + send_stack_h(send_count);
+    let footer_top = layout.y + layout.h - mixer_footer_h();
+    let desired_fader = used_fader_bay_h();
+    let parked_pan = footer_top - desired_fader - pan_block_h();
+    if parked_pan >= send_bottom {
+        let bay_y = parked_pan + pan_block_h();
+        (parked_pan, bay_y, desired_fader)
+    } else {
+        let bay_y = send_bottom + pan_block_h();
+        (send_bottom, bay_y, (footer_top - bay_y).max(80.0))
+    }
 }
 
 pub fn fader_rail(
@@ -960,28 +987,33 @@ mod tests {
     }
 
     #[test]
-    fn pan_name_bar_sits_below_send_stack() {
+    fn pan_name_bar_sits_on_the_fader_throw() {
         let layout = MixerLayout::new(0.0, 40.0, 1600.0, 900.0, 3);
-        let y = pan_name_bar_y(&layout, 3);
-        let expected = 40.0
+        let send_bottom = 40.0
             + Layout::send_lane_h(ReturnLane::SendA)
             + Layout::send_lane_h(ReturnLane::SendB)
             + Layout::send_lane_h(ReturnLane::SendC);
-        assert!((y - expected).abs() < 0.01);
+        let y = pan_name_bar_y(&layout, 3);
+        assert!(y + 0.01 >= send_bottom, "pans stay below the send stack");
         assert!((pan_row_y(&layout, 3) - (y + Layout::SEND_NAME_BAR)).abs() < 0.01);
-        let (bay_y, _) = fader_bay_frame(&layout, 3);
+        let (bay_y, bay_h) = fader_bay_frame(&layout, 3);
         assert!((bay_y - (y + Layout::SEND_NAME_BAR + Layout::PAN_ROW)).abs() < 0.01);
+        let footer = layout.y + layout.h - Layout::NAME_ROW - Layout::BUTTON_STACK;
+        assert!((bay_y + bay_h - footer).abs() < 0.01);
+        assert!(y - send_bottom > 20.0, "tall mixer should leave leftover above pans");
     }
 
     #[test]
     fn fader_track_caps_without_collapsing_bay() {
         let layout = MixerLayout::new(0.0, 0.0, 1600.0, 1400.0, 3);
         let (y, h) = fader_bay_frame(&layout, 3);
-        assert!(h > Layout::FADER_TRACK_H + 80.0, "fixture should leave leftover bay metal");
+        let send_bottom = send_stack_h(3);
+        let pan_y = pan_name_bar_y(&layout, 3);
+        assert!(pan_y - send_bottom > 80.0, "fixture should leave leftover above pans");
+        assert!((h - (Layout::FADER_TRACK_H + Layout::FADER_BAY_PAD_Y * 2.0)).abs() < 0.01);
         let bay = FaderBay::layout(0.0, y, 100.0, h);
         assert!((bay.track_h - Layout::FADER_TRACK_H).abs() < 0.01);
         assert!((bay.track_top + bay.track_h - (y + h - Layout::FADER_BAY_PAD_Y)).abs() < 0.01);
-        assert!(bay.track_top - y > 40.0, "channel bay stays tall above the fixed throw");
         let short = FaderBay::layout(0.0, 0.0, 100.0, 160.0);
         assert!(short.track_h < Layout::FADER_TRACK_H);
         assert!((short.track_top - Layout::FADER_BAY_PAD_Y).abs() < 0.01);
@@ -992,11 +1024,11 @@ mod tests {
         let engine = test_engine();
         let send_count = engine.config.visible_send_lanes().len();
         let layout = MixerLayout::new(0.0, 0.0, 1800.0, 1400.0, send_count);
-        let (bay_y, bay_h) = fader_bay_frame(&layout, send_count);
-        let used_top = FaderBay::layout(0.0, bay_y, 100.0, bay_h).track_top;
-        assert!(used_top - bay_y > 40.0, "fixture should leave unused bay metal");
-        let gap0 = bay_y + 8.0;
-        let gap1 = used_top - 8.0;
+        let send_bottom = send_stack_h(send_count);
+        let pan_y = pan_name_bar_y(&layout, send_count);
+        assert!(pan_y - send_bottom > 40.0, "fixture should leave unused bay metal");
+        let gap0 = send_bottom + 8.0;
+        let gap1 = pan_y - 8.0;
         let peaks = [0.0f32; 17];
         let (cmds, _) = paint(&MixerView {
             engine: &engine,
@@ -1133,12 +1165,13 @@ mod tests {
         let (bus_x, _) = strip_frame(&layout, send_count, StripKind::Return(ReturnLane::Bus1));
         assert!(plus.x + plus.w < bus_x, "plus must not sit on the Bus returns group");
         let (fx_x, _) = strip_frame(&layout, send_count, StripKind::Return(ReturnLane::SendA));
+        let send_bottom = send_stack_h(send_count);
         let empty_seams = cmds.iter().any(|c| match c {
             DrawCmd::Rect { rect, .. } => {
-                rect.w <= 1.5 && rect.x >= fx_x && rect.y + 0.5 < bar_y && rect.h > 8.0
+                rect.w <= 1.5 && rect.x >= fx_x && rect.y + 0.5 < send_bottom && rect.h > 8.0
             }
             _ => false,
         });
-        assert!(!empty_seams, "no group dividers in the empty send-stack above the title row");
+        assert!(!empty_seams, "no group dividers in the empty send-stack above leftover");
     }
 }

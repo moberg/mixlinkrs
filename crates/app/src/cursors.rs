@@ -10,6 +10,7 @@ pub enum ArrCursor {
     TrimLeft,
     TrimRight,
     Zoom,
+    ColResize,
 }
 
 #[derive(Clone)]
@@ -33,6 +34,7 @@ impl TrimCursors {
             ArrCursor::TrimLeft => window.set_cursor(self.left.clone()),
             ArrCursor::TrimRight => window.set_cursor(self.right.clone()),
             ArrCursor::Zoom => window.set_cursor(self.zoom.clone()),
+            ArrCursor::ColResize => window.set_cursor(CursorIcon::ColResize),
         }
     }
 }
@@ -43,6 +45,7 @@ pub fn apply_fallback(window: &Window, kind: ArrCursor) {
         ArrCursor::TrimLeft => CursorIcon::WResize,
         ArrCursor::TrimRight => CursorIcon::EResize,
         ArrCursor::Zoom => CursorIcon::ZoomIn,
+        ArrCursor::ColResize => CursorIcon::ColResize,
     });
 }
 
