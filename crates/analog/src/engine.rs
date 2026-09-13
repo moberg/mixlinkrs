@@ -1,5 +1,6 @@
 //! Control-surface brain. UI and MIDI call these methods; they never send OSC.
 
+use std::thread;
 use std::time::{Duration, Instant};
 
 use osc::{
@@ -18,6 +19,38 @@ use crate::types::{
 
 /// Wait this long after the last dump mix node before writing missing volumes.
 const MIX_BACKFILL_SETTLE: Duration = Duration::from_millis(300);
+/// Short cosine fade so mute/unmute is not a hard cut in TotalMix.
+const MUTE_FADE: Duration = Duration::from_millis(16);
+const MUTE_FADE_STEPS: u32 = 8;
+
+#[derive(Clone, Copy)]
+enum MuteTarget {
+    Strip(usize),
+    Return(ReturnLane),
+}
+
+struct MuteRamp {
+    target: MuteTarget,
+    started: Instant,
+    from: f32,
+    to: f32,
+}
+
+impl MuteRamp {
+    fn progress_at(&self, now: Instant) -> f32 {
+        let elapsed = now.saturating_duration_since(self.started).as_secs_f32();
+        (elapsed / MUTE_FADE.as_secs_f32()).clamp(0.0, 1.0)
+    }
+
+    fn weight_at(&self, now: Instant) -> f32 {
+        let t = 0.5 * (1.0 - (self.progress_at(now) * std::f32::consts::PI).cos());
+        self.from + (self.to - self.from) * t
+    }
+
+    fn weight(&self) -> f32 {
+        self.weight_at(Instant::now())
+    }
+}
 
 pub struct AnalogEngine {
     pub mixer: MixerState,
@@ -25,6 +58,7 @@ pub struct AnalogEngine {
     pub config: SessionConfig,
     pub osc: OscSession,
     mix_backfill_at: Option<Instant>,
+    mute_ramps: Vec<MuteRamp>,
 }
 
 impl AnalogEngine {
@@ -34,7 +68,14 @@ impl AnalogEngine {
         config: SessionConfig,
         osc: OscSession,
     ) -> Self {
-        let mut engine = Self { mixer, surface, config, osc, mix_backfill_at: None };
+        let mut engine = Self {
+            mixer,
+            surface,
+            config,
+            osc,
+            mix_backfill_at: None,
+            mute_ramps: Vec::new(),
+        };
         engine.restore_software_levels();
         engine
     }
@@ -72,6 +113,7 @@ impl AnalogEngine {
             self.mixer.connected = true;
         }
         let just_connected = self.mixer.connected && !was_connected;
+        self.tick_mute_fades();
         let log = self.osc.last_sent();
         if !log.is_empty() {
             self.mixer.last_osc_log = log;
@@ -302,6 +344,10 @@ impl AnalogEngine {
     }
 
     pub fn apply_return_mute(&mut self, lane: ReturnLane, on: bool) {
+        let was_solo = self.return_soloed(lane);
+        if !on {
+            self.write_return_mix_scaled(lane, 0.0);
+        }
         self.upsert_return(lane as i32, |r| {
             r.mute = on;
             if on {
@@ -315,12 +361,17 @@ impl AnalogEngine {
                     c.solo = false;
                 }
             });
-            self.osc.send_float(strip_mute(id.bus.osc(), id.index), if on { 1.0 } else { 0.0 });
+            if !on {
+                self.osc.send_float(strip_mute(id.bus.osc(), id.index), 0.0);
+            }
             if on {
                 self.osc.send_float(strip_solo(id.bus.osc(), id.index), 0.0);
             }
         }
-        self.rewrite_mix_for_solo();
+        if on && was_solo {
+            self.rewrite_mix_for_solo();
+        }
+        self.begin_mute_fade(MuteTarget::Return(lane), on);
     }
 
     pub fn apply_return_solo(&mut self, lane: ReturnLane, on: bool) {
@@ -378,6 +429,11 @@ impl AnalogEngine {
     }
 
     pub fn apply_mute(&mut self, strip: usize, on: bool) {
+        let was_solo = self.strip_soloed(strip);
+        if !on {
+            // Still muted in TotalMix: drop the send first so unmute is silent.
+            self.write_strip_mix_scaled(strip, 0.0);
+        }
         for id in self.osc_sources(strip) {
             self.mixer.update_channel(id, |c| {
                 c.mute = on;
@@ -385,12 +441,17 @@ impl AnalogEngine {
                     c.solo = false;
                 }
             });
-            self.osc.send_float(strip_mute(id.bus.osc(), id.index), if on { 1.0 } else { 0.0 });
+            if !on {
+                self.osc.send_float(strip_mute(id.bus.osc(), id.index), 0.0);
+            }
             if on {
                 self.osc.send_float(strip_solo(id.bus.osc(), id.index), 0.0);
             }
         }
-        self.rewrite_mix_for_solo();
+        if on && was_solo {
+            self.rewrite_mix_for_solo();
+        }
+        self.begin_mute_fade(MuteTarget::Strip(strip), on);
     }
 
     pub fn apply_solo(&mut self, strip: usize, on: bool) {
@@ -449,11 +510,170 @@ impl AnalogEngine {
 
     fn rewrite_mix_for_solo(&mut self) {
         for i in 0..self.surface.strips.len() {
+            if self.mute_fade_covers(MuteTarget::Strip(i)) {
+                continue;
+            }
             self.write_assign_sends(i);
         }
         if self.config.sends_post_fader {
             self.rewrite_aux_sends(None);
         }
+    }
+
+    fn mute_fade_covers(&self, target: MuteTarget) -> bool {
+        self.mute_ramps.iter().any(|r| match (r.target, target) {
+            (MuteTarget::Strip(a), MuteTarget::Strip(b)) => a == b,
+            (MuteTarget::Return(a), MuteTarget::Return(b)) => a == b,
+            _ => false,
+        })
+    }
+
+    fn mute_fade_weight(&self, target: MuteTarget) -> f32 {
+        self.mute_ramps
+            .iter()
+            .find(|r| match (r.target, target) {
+                (MuteTarget::Strip(a), MuteTarget::Strip(b)) => a == b,
+                (MuteTarget::Return(a), MuteTarget::Return(b)) => a == b,
+                _ => false,
+            })
+            .map(MuteRamp::weight)
+            .unwrap_or(1.0)
+    }
+
+    fn begin_mute_fade(&mut self, target: MuteTarget, fading_out: bool) {
+        let from = if self.mute_fade_covers(target) {
+            self.mute_fade_weight(target)
+        } else if fading_out {
+            1.0
+        } else {
+            0.0
+        };
+        self.mute_ramps.retain(|r| match (r.target, target) {
+            (MuteTarget::Strip(a), MuteTarget::Strip(b)) => a != b,
+            (MuteTarget::Return(a), MuteTarget::Return(b)) => a != b,
+            _ => true,
+        });
+        let started = if cfg!(test) { Instant::now() - MUTE_FADE / 4 } else { Instant::now() };
+        self.mute_ramps.push(MuteRamp {
+            target,
+            started,
+            from,
+            to: if fading_out { 0.0 } else { 1.0 },
+        });
+        if cfg!(test) {
+            self.tick_mute_fades();
+        } else {
+            self.run_mute_fade_steps();
+        }
+    }
+
+    fn run_mute_fade_steps(&mut self) {
+        let slice = MUTE_FADE / MUTE_FADE_STEPS;
+        for step in 1..=MUTE_FADE_STEPS {
+            let now = Instant::now();
+            for ramp in &mut self.mute_ramps {
+                ramp.started = now - slice * step;
+            }
+            self.tick_mute_fades();
+            if step < MUTE_FADE_STEPS && !self.mute_ramps.is_empty() {
+                thread::sleep(slice);
+            }
+        }
+    }
+
+    fn tick_mute_fades(&mut self) {
+        if self.mute_ramps.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let steps: Vec<(MuteTarget, f32, bool)> = self
+            .mute_ramps
+            .iter()
+            .map(|ramp| {
+                (
+                    ramp.target,
+                    ramp.weight_at(now),
+                    now.saturating_duration_since(ramp.started) >= MUTE_FADE,
+                )
+            })
+            .collect();
+        let mut done = Vec::new();
+        for (i, (target, gain, finished)) in steps.into_iter().enumerate() {
+            match target {
+                MuteTarget::Strip(strip) => self.write_strip_mix_scaled(strip, gain),
+                MuteTarget::Return(lane) => self.write_return_mix_scaled(lane, gain),
+            }
+            if finished {
+                done.push(i);
+            }
+        }
+        for i in done.into_iter().rev() {
+            let ramp = self.mute_ramps.remove(i);
+            if ramp.to <= 0.0 {
+                self.send_mute_osc(ramp.target, true);
+                // Put the real send back. TotalMix mute holds silence; the
+                // dump must still see the fader or a restart shows −∞.
+                match ramp.target {
+                    MuteTarget::Strip(strip) => self.write_strip_mix_scaled(strip, 1.0),
+                    MuteTarget::Return(lane) => self.write_return_mix_scaled(lane, 1.0),
+                }
+            }
+        }
+    }
+
+    fn send_mute_osc(&mut self, target: MuteTarget, on: bool) {
+        match target {
+            MuteTarget::Strip(strip) => {
+                for id in self.osc_sources(strip) {
+                    self.osc.send_float(strip_mute(id.bus.osc(), id.index), if on { 1.0 } else { 0.0 });
+                }
+            }
+            MuteTarget::Return(lane) => {
+                if let Some(id) = self.config.return_source_id(lane) {
+                    self.osc.send_float(strip_mute(id.bus.osc(), id.index), if on { 1.0 } else { 0.0 });
+                }
+            }
+        }
+    }
+
+    fn write_strip_mix_scaled(&mut self, strip: usize, gain: f32) {
+        let Some(s) = self.surface.strips.get(strip) else {
+            return;
+        };
+        let assign = s.assign;
+        let level = if self.config.is_strip_enabled(strip) { s.fader * gain } else { 0.0 };
+        if let Some(dest) = self.config.listen_output(assign) {
+            self.write_send(strip, dest, level);
+        }
+        if !self.config.sends_post_fader {
+            return;
+        }
+        for lane in ALL_SEND_LANES {
+            let dest = self.config.send_destination(lane);
+            let send = self.surface.strips[strip].aux(lane);
+            self.write_aux(strip, dest, post_fader_lin(send, self.surface.strips[strip].fader) * gain);
+        }
+    }
+
+    fn write_return_mix_scaled(&mut self, lane: ReturnLane, gain: f32) {
+        let level = self
+            .surface
+            .returns
+            .iter()
+            .find(|r| r.id == lane as i32)
+            .map(|r| r.fader)
+            .unwrap_or(0.0)
+            * gain;
+        self.write_return_fader(lane as i32, level, None, None);
+    }
+
+    #[cfg(test)]
+    pub fn finish_mute_fades(&mut self) {
+        let past = Instant::now() - MUTE_FADE;
+        for ramp in &mut self.mute_ramps {
+            ramp.started = past;
+        }
+        self.tick_mute_fades();
     }
 
     pub fn write_assign_sends(&mut self, strip: usize) {
@@ -494,7 +714,7 @@ impl AnalogEngine {
             }
             let assigned = self.config.listen_output(self.surface.strips[i].assign);
             if let (Some(assigned), Some(v)) = (assigned, node.fader_lin) {
-                if node.dest == assigned {
+                if node.dest == assigned && !self.mute_fade_covers(MuteTarget::Strip(i)) {
                     self.surface.strips[i].fader = v;
                 }
             }
@@ -515,7 +735,8 @@ impl AnalogEngine {
                 continue;
             }
             if let Some(v) = node.fader_lin {
-                if self.config.is_return_enabled(lane) {
+                if self.config.is_return_enabled(lane) && !self.mute_fade_covers(MuteTarget::Return(lane))
+                {
                     self.set_return_fader_state(lane as i32, v);
                 }
             }
@@ -635,6 +856,9 @@ impl AnalogEngine {
 
     pub fn pull_return_faders_from_sends(&mut self) {
         for lane in ReturnLane::ALL {
+            if self.mute_fade_covers(MuteTarget::Return(lane)) {
+                continue;
+            }
             if !self.config.is_return_enabled(lane) {
                 continue;
             }
@@ -650,6 +874,9 @@ impl AnalogEngine {
 
     pub fn pull_strip_faders_from_sends(&mut self) {
         for i in 0..self.surface.strips.len() {
+            if self.mute_fade_covers(MuteTarget::Strip(i)) {
+                continue;
+            }
             if !self.config.is_strip_enabled(i) {
                 continue;
             }
@@ -806,7 +1033,7 @@ impl AnalogEngine {
             None => (0..self.surface.strips.len()).collect(),
         };
         for i in strips {
-            if i < self.surface.strips.len() {
+            if i < self.surface.strips.len() && !self.mute_fade_covers(MuteTarget::Strip(i)) {
                 self.write_all_aux(i);
             }
         }
@@ -992,9 +1219,8 @@ impl AnalogEngine {
         let Some(id) = self.osc_sources(strip).first().copied() else {
             return true;
         };
-        if self.mixer.channel(id).is_some_and(|c| c.mute) {
-            return true;
-        }
+        // Mute is `/mute` in TotalMix. Writing 0 into the send would wipe the
+        // stored fader (Take went to −∞ after a muted restart).
         if self.any_solo_active() && !self.mixer.channel(id).is_some_and(|c| c.solo) {
             return true;
         }
@@ -1186,7 +1412,10 @@ impl AnalogEngine {
         {
             gain += row.fader;
         }
-        if gain > 0.0 && self.config.sends_post_fader && self.strip_silenced_for_post_send(strip) {
+        if gain > 0.0
+            && (self.strip_muted(strip)
+                || (self.config.sends_post_fader && self.strip_silenced_for_post_send(strip)))
+        {
             return 0.0;
         }
         gain

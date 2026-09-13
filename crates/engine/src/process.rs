@@ -4,7 +4,9 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use atomic_float::AtomicF32;
 use dsp_core::MAX_INTERNAL_BLOCK;
-use engine_api::{EngineEvent, UiCommand, MASTER_PLUGIN_SLOT, MIX_PLAY_MAX_LANES, TAP_COUNT};
+use engine_api::{
+    EngineEvent, UiCommand, MASTER_PLUGIN_SLOT, MIX_PLAY_MAX_LANES, STRIP_COUNT, TAP_COUNT,
+};
 use rt_utils::spsc::{spsc_bounded, Consumer, Producer};
 
 use crate::schedule::{MixGain, RtControls, Schedule};
@@ -12,6 +14,7 @@ use crate::taps::display_level;
 
 const MAX_FRAMES: usize = 4096;
 const RING_SECONDS: f32 = 8.0;
+const MAX_SEND_ROUTES: usize = 8;
 
 pub struct Engine {
     schedule: Arc<ArcSwap<Schedule>>,
@@ -43,6 +46,8 @@ pub struct Engine {
     master_r: Vec<f32>,
     /// First IOProc on a thread may touch TLS (ArcSwap, no-alloc depth).
     rt_tls_warmed: bool,
+    /// Last plugin-feed gain, ramped across the block so mute is not a click.
+    feed_gain: [[f32; STRIP_COUNT]; MAX_SEND_ROUTES],
 }
 
 pub struct EngineHandles {
@@ -100,6 +105,7 @@ impl Engine {
             master_l: vec![0.0; MAX_FRAMES],
             master_r: vec![0.0; MAX_FRAMES],
             rt_tls_warmed: false,
+            feed_gain: [[0.0; STRIP_COUNT]; MAX_SEND_ROUTES],
         };
         (
             engine,
@@ -271,14 +277,20 @@ impl Engine {
                 }
                 self.scratch_in_l[..frames].fill(0.0);
                 self.scratch_in_r[..frames].fill(0.0);
-                for feed in &route.feeds {
-                    if feed.gain <= 0.0001 || feed.channel < 0 {
+                for (fi, feed) in route.feeds.iter().enumerate() {
+                    let prev = if slot < MAX_SEND_ROUTES { self.feed_gain[slot][fi] } else { feed.gain };
+                    let next = feed.gain;
+                    if slot < MAX_SEND_ROUTES {
+                        self.feed_gain[slot][fi] = next;
+                    }
+                    if feed.channel < 0 || (prev <= 0.0001 && next <= 0.0001) {
                         continue;
                     }
                     mix_input_channel(
                         &input,
                         feed.channel,
-                        feed.gain,
+                        prev,
+                        next,
                         feed.linked,
                         frames,
                         &mut self.scratch_in_l,
@@ -463,13 +475,16 @@ fn zero_output(output: &BufferList<'_>, frames: usize) {
 fn mix_input_channel(
     input: &BufferList<'_>,
     channel: i32,
-    gain: f32,
+    gain_from: f32,
+    gain_to: f32,
     linked: bool,
     frames: usize,
     dest_l: &mut [f32],
     dest_r: &mut [f32],
 ) {
+    let n = frames.max(1) as f32;
     for i in 0..frames {
+        let gain = gain_from + (gain_to - gain_from) * (i as f32 / n);
         let s = input.locate_sample(channel, i) * gain;
         dest_l[i] += s;
         if linked {
@@ -814,6 +829,34 @@ mod tests {
         assert!((out[0] - 0.5).abs() < 1e-6);
         assert!((out[1] + 0.25).abs() < 1e-6);
         assert!(handles.peaks[0].load(Ordering::Relaxed) > 0.2);
+    }
+
+    #[test]
+    fn plugin_feed_mute_ramps_across_the_block() {
+        let (mut engine, handles) = Engine::new(48_000);
+        let mut schedule = Schedule::empty();
+        let mut route = crate::schedule::SendRoute::default();
+        route.enabled = true;
+        route.return_channel = 2;
+        route.feeds[0] = crate::schedule::StripFeed { channel: 0, gain: 1.0, linked: true };
+        schedule.routes.push(route);
+        handles.schedule.store(std::sync::Arc::new(schedule.clone()));
+        let (_keep, input) = interleaved(32, 1.0, 1.0);
+        let mut out = vec![0.0f32; 128];
+        let out_buf = AudioBuf { data: out.as_mut_ptr(), channels: 4, frames: 32 };
+        let output = BufferList { buffers: &[out_buf] };
+        engine.process(input, output, 32, 0);
+        schedule.routes[0].feeds[0].gain = 0.0;
+        handles.schedule.store(std::sync::Arc::new(schedule));
+        out.fill(0.0);
+        engine.process(input, output, 32, 0);
+        let first = out[2];
+        let last = out[31 * 4 + 2];
+        assert!(
+            first > 0.8,
+            "mute must start from the previous gain, got first={first}"
+        );
+        assert!(last < 0.1, "mute must reach silence by the end of the block, got last={last}");
     }
 
     #[test]

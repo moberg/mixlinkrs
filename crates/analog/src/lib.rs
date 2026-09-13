@@ -168,6 +168,68 @@ mod tests {
     }
 
     #[test]
+    fn mute_fades_send_before_totalmix_mute() {
+        let mut engine = test_engine();
+        engine.apply_fader(0, 0.8);
+        let src = engine.config.strips[0].channel_id();
+        let main = engine.config.main_output;
+        engine.osc.sent_messages(); // drain constructor noise if any
+        engine.apply_mute(0, true);
+        let after_press = engine.osc.sent_messages();
+        assert!(
+            !after_press.iter().any(|m| m.address.contains("/mute") && m.values[0].float_value() > 0.5),
+            "mute OSC must wait until the fade finishes: {:?}",
+            after_press.iter().map(|m| &m.address).collect::<Vec<_>>()
+        );
+        let mid = engine.mixer.send_level(src, main);
+        assert!(mid > 0.0 && mid < 0.8, "first mute step should be a partial fade, got {mid}");
+        engine.finish_mute_fades();
+        assert!(
+            (engine.mixer.send_level(src, main) - 0.8).abs() < 1e-5,
+            "after mute, TotalMix must keep the fader so a dump can restore it"
+        );
+        assert!(engine.osc.sent_messages().iter().any(|m| {
+            m.address.contains("/mute") && m.values[0].float_value() > 0.5
+        }));
+    }
+
+    #[test]
+    fn unmute_opens_totalmix_before_fading_up() {
+        let mut engine = test_engine();
+        engine.apply_fader(0, 0.8);
+        engine.apply_mute(0, true);
+        engine.finish_mute_fades();
+        assert!((engine.mixer.send_level(engine.config.strips[0].channel_id(), engine.config.main_output) - 0.8).abs() < 1e-5);
+        engine.apply_mute(0, false);
+        assert!(engine.osc.sent_messages().iter().any(|m| {
+            m.address.contains("/mute") && m.values[0].float_value() < 0.5
+        }));
+        let src = engine.config.strips[0].channel_id();
+        let main = engine.config.main_output;
+        let mid = engine.mixer.send_level(src, main);
+        assert!(mid > 0.0 && mid < 0.8, "first unmute step should be a partial fade, got {mid}");
+        engine.finish_mute_fades();
+        assert!((engine.mixer.send_level(src, main) - 0.8).abs() < 1e-5);
+    }
+
+    #[test]
+    fn dump_restores_muted_strip_fader() {
+        let mut engine = test_engine();
+        engine.apply_fader(0, 0.8);
+        engine.apply_mute(0, true);
+        engine.finish_mute_fades();
+        let src = engine.config.strips[0].channel_id();
+        let main = engine.config.main_output;
+        let json = serde_json::to_string(&engine.config).unwrap();
+        let mut restarted = engine_from_config(serde_json::from_str(&json).unwrap());
+        ingest_mix(&mut restarted, &format!("/mix/in/{}/{}/faderlin", src.index, main), 0.8);
+        apply_inbound(&mut restarted.mixer, "/input/0/mute", &osc::OscValue::Float(1.0));
+        restarted.sync_surface_from_total_mix();
+        assert!((restarted.surface.strips[0].fader - 0.8).abs() < 1e-5);
+        assert!(restarted.strip_muted(0));
+    }
+
+    #[test]
     fn mute_clears_solo() {
         let mut engine = test_engine();
         let id = engine.config.strips[0].channel_id();
