@@ -11,8 +11,8 @@ use crate::widgets::{self, KnobKind};
 
 /// Footer control in the mix browser when the mixer is hidden.
 pub const HANDLE_H: f32 = 24.0;
-/// Record-like fader travel so names, ticks, and caps stay readable.
-const MIN_FADER_BAY: f32 = 200.0;
+/// Bay tall enough for the fixed fader throw.
+const MIN_FADER_BAY: f32 = Layout::FADER_TRACK_H + Layout::FADER_BAY_PAD_Y * 2.0;
 const PAD_BOTTOM: f32 = 8.0;
 pub const HEIGHT: f32 = Layout::SEND_NAME_BAR
     + Layout::PAN_ROW
@@ -219,9 +219,10 @@ fn paint_track(
 
     let bay_h =
         (view.y + view.h - y - Layout::NAME_ROW - Layout::BUTTON_H - PAD_BOTTOM).max(MIN_FADER_BAY);
+    let used_top = FaderBay::layout(x, y, w, bay_h).track_top;
     theme::channel_bay_shading(
         cmds,
-        Rect { x, y, w, h: bay_h + Layout::NAME_ROW + Layout::BUTTON_H + PAD_BOTTOM },
+        Rect { x, y: used_top, w, h: (view.y + view.h - used_top).max(0.0) },
     );
     mixer::paint_fader(
         cmds,
@@ -281,9 +282,10 @@ fn paint_bus_strip(
     y += Layout::PAN_ROW;
     let bay_h =
         (view.y + view.h - y - Layout::NAME_ROW - Layout::BUTTON_H - PAD_BOTTOM).max(MIN_FADER_BAY);
+    let used_top = FaderBay::layout(x, y, w, bay_h).track_top;
     theme::channel_bay_shading(
         cmds,
-        Rect { x, y, w, h: bay_h + Layout::NAME_ROW + Layout::BUTTON_H + PAD_BOTTOM },
+        Rect { x, y: used_top, w, h: (view.y + view.h - used_top).max(0.0) },
     );
     mixer::paint_fader(cmds, x, y, w, bay_h, fader, peak, view.engine.config.hardware_strips);
     y += bay_h;

@@ -53,11 +53,13 @@ impl AppState {
             MenuAction::HardwarePresetOutput { id } => {
                 if let Ok(idx) = item.id.parse::<i32>() {
                     self.surface.analog.set_hardware_preset_io(id, Some(idx), None);
+                    self.persist_project_meta();
                 }
             }
             MenuAction::HardwarePresetInput { id } => {
                 if let Ok(idx) = item.id.parse::<i32>() {
                     self.surface.analog.set_hardware_preset_io(id, None, Some(idx));
+                    self.persist_project_meta();
                 }
             }
             MenuAction::MixOut => {
@@ -79,20 +81,24 @@ impl AppState {
                 let path = if item.id.is_empty() { None } else { Some(item.id.clone()) };
                 let name = if item.label == "None" { None } else { Some(item.label.clone()) };
                 self.surface.analog.set_plugin_stage_bundle(id, path, name);
+                self.audio.plugin_previews.remove(&id);
                 if item.id.is_empty() {
                     self.unload_plugin_stage(id);
                 } else {
                     self.load_plugin_stage(id);
                 }
+                self.persist_project_meta();
             }
             MenuAction::PluginChainPlayback { id } => {
                 if let Ok(pair) = item.id.parse::<i32>() {
                     self.surface.analog.set_plugin_chain_playback(id, pair);
+                    self.persist_project_meta();
                 }
             }
             MenuAction::HardwareStagePreset { chain, index } => {
                 if let Ok(preset) = item.id.parse::<uuid::Uuid>() {
                     self.surface.analog.set_hardware_chain_stage(chain, index, preset);
+                    self.persist_project_meta();
                 }
             }
             MenuAction::MixContext { id } => {

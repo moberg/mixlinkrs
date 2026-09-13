@@ -303,6 +303,24 @@ mod tests {
     }
 
     #[test]
+    fn project_catalog_replaces_the_live_session() {
+        let mut session = SessionConfig::new();
+        let mut presets = session.hardware_presets.clone();
+        presets[0].name = "1176".into();
+        let mut hardware = session.hardware_chains.clone();
+        hardware[0].name = "Comp chain".into();
+        let mut plugins = session.plugin_chains.clone();
+        plugins[0].name = "Verb".into();
+        assert!(session.apply_project_catalog(&presets, &hardware, &plugins));
+        assert_eq!(session.hardware_presets[0].name, "1176");
+        assert_eq!(session.hardware_chains[0].name, "Comp chain");
+        assert_eq!(session.plugin_chains[0].name, "Verb");
+        assert!(!session.apply_project_catalog(&presets, &hardware, &plugins));
+        assert!(!session.apply_project_catalog(&[], &[], &[]));
+        assert_eq!(session.hardware_presets[0].name, "1176");
+    }
+
+    #[test]
     fn project_return_chains_replace_the_live_session_map() {
         let mut session = SessionConfig::new();
         let plugin = session.plugin_chains[0].id;
@@ -412,6 +430,28 @@ mod tests {
         assert!(!c.playback_pair_selectable(4, a));
         assert!(c.playback_pair_selectable(6, a));
         assert!(c.playback_pair_selectable(4, b));
+        assert!(!c.playback_pair_selectable(12, a), "Bus 1 / hardware I/O is not a playback pair");
+        assert!(c.playback_occupants(12).iter().any(|n| n.contains("Device")));
+    }
+
+    #[test]
+    fn plugin_playback_is_cut_from_hardware_fx() {
+        let mut engine = test_engine();
+        let heat = engine.config.mix_bus1;
+        engine.config.plugin_chains[0].return_channel = heat;
+        let src = ChannelID::new(MixerBus::Playback, heat);
+        engine.mixer.set_send(src, heat, 1.0);
+        engine.mixer.set_send(src, engine.config.main_output, 0.75);
+        engine.apply_all_returns();
+        assert_eq!(
+            engine.mixer.send_level(src, heat),
+            0.0,
+            "plugin wet must not 1:1 onto Heat / Bus 1"
+        );
+        assert!(
+            (engine.mixer.send_level(src, engine.config.main_output) - 0.75).abs() < 1e-5,
+            "Main mix of the playback pair stays under the return fader"
+        );
     }
 
     #[test]

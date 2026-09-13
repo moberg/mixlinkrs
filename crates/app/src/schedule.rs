@@ -57,18 +57,10 @@ impl AppState {
                 if strip.linked_stereo { strip.index + 1 } else { strip.index },
             );
         }
-        for lane in analog::ReturnLane::ALL {
-            let tap = 8 + lane as usize;
-            if tap >= TAP_COUNT {
-                continue;
-            }
-            if let Some(id) = cfg.return_source_id(lane) {
-                schedule.taps[tap] = AudioTapBinding::hardware(id.index, id.index + 1);
-            }
-        }
         schedule.taps[MASTER_TAP] = AudioTapBinding::master_mix();
         self.publish_record_main_mix(&mut schedule);
 
+        let mut plugin_slots = std::collections::HashMap::new();
         for chain in &cfg.plugin_chains {
             if !chain.is_loaded() {
                 continue;
@@ -102,7 +94,27 @@ impl AppState {
                     Some(InsertStage { instance: inst as usize, bypassed: stage.bypassed })
                 })
                 .collect();
+            plugin_slots.insert(chain.id, schedule.routes.len() as i32);
             schedule.routes.push(route);
+        }
+        for lane in analog::ReturnLane::ALL {
+            let tap = 8 + lane as usize;
+            if tap >= TAP_COUNT {
+                continue;
+            }
+            match cfg.chain_ref(lane) {
+                Some(r) if r.kind == ChainKind::Plugin => {
+                    if let Some(&slot) = plugin_slots.get(&r.id) {
+                        schedule.taps[tap] = AudioTapBinding::plugin(slot);
+                    }
+                }
+                Some(_) => {
+                    if let Some(id) = cfg.return_source_id(lane) {
+                        schedule.taps[tap] = AudioTapBinding::hardware(id.index, id.index + 1);
+                    }
+                }
+                None => {}
+            }
         }
 
         let play_tracks = self.mixer_tracks();

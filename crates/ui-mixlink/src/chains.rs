@@ -15,6 +15,8 @@ const ROW: f32 = 24.0;
 const GAP: f32 = 6.0;
 const TAB_H: f32 = 26.0;
 const SCROLL_GUTTER: f32 = 14.0;
+const THUMB_W: f32 = 128.0;
+const THUMB_H: f32 = 72.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChainsTab {
@@ -49,6 +51,7 @@ pub enum ChainsHit {
     PluginStageEdit(uuid::Uuid),
     PluginStageBypass(uuid::Uuid),
     PluginStageScope(uuid::Uuid),
+    PluginStageThumb(uuid::Uuid),
     RemovePluginStage(uuid::Uuid),
     MovePluginStage { chain: uuid::Uuid, index: usize, delta: i32 },
 }
@@ -62,6 +65,7 @@ pub fn paint_chains(
     caret: bool,
     scroll: f32,
     scope_global: &std::collections::HashMap<uuid::Uuid, bool>,
+    thumbs: &std::collections::HashSet<uuid::Uuid>,
 ) -> (Vec<DrawCmd>, Vec<(Rect, ChainsHit)>) {
     let mut cmds = Vec::new();
     let mut hits = Vec::new();
@@ -91,9 +95,18 @@ pub fn paint_chains(
     let mut y = clip.y + 4.0 - scroll;
     match tab {
         ChainsTab::Hardware => paint_hardware(engine, &mut cmds, &mut hits, clip.x, list_w, &mut y, focus, caret),
-        ChainsTab::Plugins => {
-            paint_plugins(engine, &mut cmds, &mut hits, clip.x, list_w, &mut y, focus, caret, scope_global)
-        }
+        ChainsTab::Plugins => paint_plugins(
+            engine,
+            &mut cmds,
+            &mut hits,
+            clip.x,
+            list_w,
+            &mut y,
+            focus,
+            caret,
+            scope_global,
+            thumbs,
+        ),
     }
     hits.retain(|(r, hit)| {
         matches!(hit, ChainsHit::Tab(_)) || (r.y + r.h > clip.y && r.y < clip.y + clip.h)
@@ -163,12 +176,20 @@ fn hardware_chain_h(stages: usize) -> f32 {
         + stages as f32 * (ROW + GAP)
 }
 
+fn plugin_stage_h(stage: &analog::PluginStage) -> f32 {
+    if stage.is_loaded() {
+        THUMB_H + GAP
+    } else {
+        ROW * 2.0 + GAP
+    }
+}
+
 fn plugin_chain_h(chain: &analog::PluginChain) -> f32 {
     Layout::MODULE_PAD * 2.0
         + Layout::HEADER_BUTTON
         + GAP
         + ROW
-        + chain.stages.len() as f32 * (ROW * 2.0 + GAP)
+        + chain.stages.iter().map(plugin_stage_h).sum::<f32>()
         + GAP
 }
 
@@ -207,11 +228,24 @@ fn paint_plugins(
     focus: &TextFocus,
     caret: bool,
     scope_global: &std::collections::HashMap<uuid::Uuid, bool>,
+    thumbs: &std::collections::HashSet<uuid::Uuid>,
 ) {
     section_plus(cmds, hits, x, *y, w, "Plugin chains", ChainsHit::AddPluginChain);
     *y += ROW + GAP;
     for chain in &engine.config.plugin_chains {
-        paint_plugin_chain(engine, cmds, hits, x, *y, w, chain, focus, caret, scope_global);
+        paint_plugin_chain(
+            engine,
+            cmds,
+            hits,
+            x,
+            *y,
+            w,
+            chain,
+            focus,
+            caret,
+            scope_global,
+            thumbs,
+        );
         *y += plugin_chain_h(chain) + GAP;
     }
 }
@@ -349,6 +383,7 @@ fn paint_plugin_chain(
     focus: &TextFocus,
     caret: bool,
     scope_global: &std::collections::HashMap<uuid::Uuid, bool>,
+    thumbs: &std::collections::HashSet<uuid::Uuid>,
 ) {
     let card = Rect { x, y, w, h: plugin_chain_h(chain) };
     widgets::hardware_module(cmds, card);
@@ -381,6 +416,8 @@ fn paint_plugin_chain(
             .and_then(|p| std::path::Path::new(p).file_stem().and_then(|s| s.to_str()))
             .unwrap_or("No plugin");
         let kind = if stage.is_loaded() { "Plugin" } else { "Empty" };
+        let thumb_slot = stage.is_loaded();
+        let right = if thumb_slot { THUMB_W + 8.0 } else { 0.0 };
         theme::text(
             cmds,
             Rect { x: cx, y: cy, w: 56.0, h: ROW },
@@ -389,12 +426,13 @@ fn paint_plugin_chain(
             theme::SECONDARY_TEXT,
             true,
         );
-        let menu = Rect { x: cx + 60.0, y: cy, w: cw - 160.0, h: ROW };
+        let menu = Rect { x: cx + 60.0, y: cy, w: (cw - 160.0 - right).max(80.0), h: ROW };
         widgets::channel_picker(cmds, menu, bundle, widgets::ChannelPickerStyle::plugin());
         hits.push((menu, ChainsHit::PluginStageBundle(stage.id)));
-        let up = Rect { x: cx + cw - 96.0, y: cy, w: 20.0, h: ROW };
-        let down = Rect { x: cx + cw - 74.0, y: cy, w: 20.0, h: ROW };
-        let minus = Rect { x: cx + cw - 52.0, y: cy, w: 24.0, h: ROW };
+        let tools_r = cx + cw - right;
+        let up = Rect { x: tools_r - 96.0, y: cy, w: 20.0, h: ROW };
+        let down = Rect { x: tools_r - 74.0, y: cy, w: 20.0, h: ROW };
+        let minus = Rect { x: tools_r - 52.0, y: cy, w: 24.0, h: ROW };
         widgets::icon_pad(cmds, up, "↑", i > 0);
         widgets::icon_pad(cmds, down, "↓", i + 1 < chain.stages.len());
         widgets::icon_pad(cmds, minus, "−", true);
@@ -405,6 +443,11 @@ fn paint_plugin_chain(
             hits.push((down, ChainsHit::MovePluginStage { chain: chain.id, index: i, delta: 1 }));
         }
         hits.push((minus, ChainsHit::RemovePluginStage(stage.id)));
+        if thumb_slot {
+            let thumb = Rect { x: cx + cw - THUMB_W, y: cy, w: THUMB_W, h: THUMB_H };
+            widgets::plugin_thumb(cmds, thumb, stage.id.as_u128(), thumbs.contains(&stage.id));
+            hits.push((thumb, ChainsHit::PluginStageThumb(stage.id)));
+        }
         cy += ROW + GAP;
         let edit = Rect { x: cx + 60.0, y: cy, w: 72.0, h: ROW };
         let bypass = Rect { x: cx + 140.0, y: cy, w: 72.0, h: ROW };
@@ -419,7 +462,7 @@ fn paint_plugin_chain(
         if stage.is_loaded() {
             hits.push((scope, ChainsHit::PluginStageScope(stage.id)));
         }
-        cy += ROW + GAP;
+        cy += if thumb_slot { (THUMB_H - ROW).max(ROW) } else { ROW + GAP };
         let _ = engine;
     }
 }
@@ -541,6 +584,7 @@ mod tests {
             false,
             0.0,
             &empty,
+            &std::collections::HashSet::new(),
         );
         let labels = texts(&cmds);
         assert!(!labels.contains(&"Chains"), "{labels:?}");
@@ -573,6 +617,7 @@ mod tests {
             false,
             0.0,
             &empty,
+            &std::collections::HashSet::new(),
         );
         let thumb = short.iter().find_map(|c| match c {
             DrawCmd::RoundedRect { rect, .. } if rect.w <= 6.0 && rect.h >= 18.0 => Some(*rect),
@@ -592,6 +637,70 @@ mod tests {
     }
 
     #[test]
+    fn loaded_stage_paints_editor_thumb() {
+        let mut engine = engine();
+        let stage = analog::PluginStage {
+            id: uuid::Uuid::from_u128(7),
+            name: "Rack".into(),
+            bundle_path: Some("/tmp/EffectRack.vst3".into()),
+            class_uid: None,
+            bypassed: false,
+        };
+        engine.config.plugin_chains[0].stages.push(stage.clone());
+        let mut thumbs = std::collections::HashSet::new();
+        thumbs.insert(stage.id);
+        let empty = std::collections::HashMap::new();
+        let (cmds, hits) = paint_chains(
+            &engine,
+            CHAINS_WINDOW_W,
+            CHAINS_WINDOW_H,
+            ChainsTab::Plugins,
+            &TextFocus::None,
+            false,
+            0.0,
+            &empty,
+            &thumbs,
+        );
+        assert!(cmds.iter().any(|c| matches!(c, DrawCmd::Thumb { id, .. } if *id == stage.id.as_u128())));
+        assert!(hits.iter().any(|(_, h)| matches!(h, ChainsHit::PluginStageThumb(id) if *id == stage.id)));
+    }
+
+    #[test]
+    fn loaded_stage_without_capture_paints_placeholder() {
+        let mut engine = engine();
+        engine.config.plugin_chains[0].stages.push(analog::PluginStage {
+            id: uuid::Uuid::from_u128(8),
+            name: "Rack".into(),
+            bundle_path: Some("/tmp/EffectRack.vst3".into()),
+            class_uid: None,
+            bypassed: false,
+        });
+        let thumbs = std::collections::HashSet::new();
+        let empty = std::collections::HashMap::new();
+        let (cmds, hits) = paint_chains(
+            &engine,
+            CHAINS_WINDOW_W,
+            CHAINS_WINDOW_H,
+            ChainsTab::Plugins,
+            &TextFocus::None,
+            false,
+            0.0,
+            &empty,
+            &thumbs,
+        );
+        let labels: Vec<_> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                DrawCmd::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(labels.contains(&"Edit"), "{labels:?}");
+        assert!(!cmds.iter().any(|c| matches!(c, DrawCmd::Thumb { .. })));
+        assert!(hits.iter().any(|(_, h)| matches!(h, ChainsHit::PluginStageThumb(_))));
+    }
+
+    #[test]
     fn plugins_tab_paints_return_and_duplicate() {
         let engine = engine();
         let empty = std::collections::HashMap::new();
@@ -604,6 +713,7 @@ mod tests {
             false,
             0.0,
             &empty,
+            &std::collections::HashSet::new(),
         );
         let labels = texts(&cmds);
         assert!(labels.iter().any(|t| t.contains("FX A")), "{labels:?}");
@@ -628,6 +738,7 @@ mod tests {
             true,
             0.0,
             &empty,
+            &std::collections::HashSet::new(),
         );
         let labels = texts(&cmds);
         assert!(labels.contains(&"|"), "{labels:?}");

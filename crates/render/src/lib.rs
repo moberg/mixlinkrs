@@ -16,6 +16,7 @@ use winit::window::Window;
 pub mod image;
 pub mod scene;
 pub mod text;
+pub mod thumbs;
 pub use scene::{
     aspect_fill_uv, srgb_to_gpu, srgb_to_linear, Align, Color, DrawCmd, Rect, TextCmd, TextureId,
     Vertex,
@@ -40,6 +41,7 @@ pub struct Renderer {
     pub clear_color: wgpu::Color,
     pub text: TextSystem,
     images: image::ImageAtlas,
+    thumbs: thumbs::ThumbCache,
     num_image_verts: u32,
 }
 
@@ -147,6 +149,7 @@ impl Renderer {
                 include_bytes!("../../../assets/HardwareFaderCap.png") as &[u8],
             ],
         );
+        let thumbs = thumbs::ThumbCache::new(&device);
 
         Self {
             window,
@@ -169,8 +172,19 @@ impl Renderer {
             },
             text,
             images,
+            thumbs,
             num_image_verts: 0,
         }
+    }
+
+    pub fn sync_thumbs(&mut self, pngs: &[(u128, &[u8])]) {
+        self.thumbs.sync(
+            &self.device,
+            &self.queue,
+            &self.images.bind_layout,
+            &self.images.sampler,
+            pngs,
+        );
     }
 
     /// Rebuild the vertex buffer from a scene and submit a frame.
@@ -182,12 +196,18 @@ impl Renderer {
         let layers = split_layers(scene);
         let mut all_verts = Vec::new();
         let mut all_images = Vec::new();
+        let mut all_thumbs = Vec::new();
+        let mut all_thumb_ids = Vec::new();
         let mut packed: Vec<LayerBatch> = Vec::with_capacity(layers.len());
         for layer in &layers {
             let v0 = all_verts.len() as u32;
             all_verts.extend(scene::tessellate(layer, (lw, lh)));
             let i0 = all_images.len() as u32;
             all_images.extend(self.images.tessellate(layer, (lw, lh)));
+            let (thumb_verts, thumb_ids) = self.thumbs.tessellate(layer, (lw, lh));
+            let t0 = all_thumb_ids.len();
+            all_thumbs.extend(thumb_verts);
+            all_thumb_ids.extend(thumb_ids);
             let clip = layer.iter().find_map(|c| match c {
                 DrawCmd::Clip { rect } => Some(*rect),
                 _ => None,
@@ -213,6 +233,8 @@ impl Renderer {
                 vert_count: all_verts.len() as u32 - v0,
                 image_start: i0,
                 image_count: all_images.len() as u32 - i0,
+                thumb_start: t0,
+                thumb_count: all_thumb_ids.len().saturating_sub(t0),
                 texts,
                 clip,
             });
@@ -232,6 +254,7 @@ impl Renderer {
             &mut self.images.vbo_cap,
             bytemuck::cast_slice(&all_images),
         );
+        self.thumbs.upload(&self.device, &self.queue, &all_thumbs);
         self.num_verts = all_verts.len() as u32;
         self.num_image_verts = all_images.len() as u32;
 
@@ -283,6 +306,15 @@ impl Renderer {
                     pass.set_bind_group(0, &self.images.bind_group, &[]);
                     pass.set_vertex_buffer(0, self.images.vbo.slice(..));
                     pass.draw(layer.image_start..layer.image_start + layer.image_count, 0..1);
+                }
+                if layer.thumb_count > 0 {
+                    let ids = &all_thumb_ids[layer.thumb_start..layer.thumb_start + layer.thumb_count];
+                    self.thumbs.draw(
+                        &mut pass,
+                        ids,
+                        (layer.thumb_start * 6) as u32,
+                        &self.images.pipeline,
+                    );
                 }
                 if let Err(e) = self.text.render_pass(&mut pass, i) {
                     log::error!("text render failed: {e:?}");
@@ -337,6 +369,8 @@ struct LayerBatch {
     vert_count: u32,
     image_start: u32,
     image_count: u32,
+    thumb_start: usize,
+    thumb_count: usize,
     texts: Vec<TextCmd>,
     clip: Option<Rect>,
 }
@@ -429,7 +463,7 @@ mod tests {
     }
 }
 
-fn upload_vbo(
+pub(crate) fn upload_vbo(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     vbo: &mut wgpu::Buffer,

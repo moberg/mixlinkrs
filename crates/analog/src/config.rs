@@ -1,4 +1,7 @@
 //! Session map: `~/Library/Application Support/MixLink/session.mixlinkmap`.
+//!
+//! The chain catalog and send/strip assignments are working copies. Durable
+//! copies live on `{project}/project.json` so a folder can move between machines.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -38,6 +41,7 @@ pub struct SessionConfig {
     pub plugins: Vec<PluginSlot>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hardware_effects: Vec<HardwareEffect>,
+    /// Live catalog while a project is open. Durable copies live on `project.json`.
     #[serde(default)]
     pub hardware_presets: Vec<HardwarePreset>,
     #[serde(default)]
@@ -255,9 +259,22 @@ impl SessionConfig {
         self.return_chains.values().map(|r| r.id).collect()
     }
 
-    /// Stereo playback pairs claimed by Main or a plugin chain.
-    pub fn reserved_playback_pairs(&self) -> std::collections::HashSet<i32> {
+    /// Hardware send/return pairs. Plugin wet must not share these — TotalMix
+    /// 1:1 would dump software playback onto the box (Heat on 5/6, etc.).
+    pub fn hardware_io_pairs(&self) -> std::collections::HashSet<i32> {
         let mut used = std::collections::HashSet::new();
+        for hw in &self.hardware_presets {
+            used.insert(hw.output);
+            used.insert(hw.input);
+        }
+        used.insert(self.mix_bus1);
+        used.insert(self.mix_bus2);
+        used
+    }
+
+    /// Stereo playback pairs claimed by Main, a plugin chain, or hardware I/O.
+    pub fn reserved_playback_pairs(&self) -> std::collections::HashSet<i32> {
+        let mut used = self.hardware_io_pairs();
         used.insert(self.mix_playback_channel(MixLane::Main));
         for chain in &self.plugin_chains {
             used.insert(chain.return_channel);
@@ -289,6 +306,16 @@ impl SessionConfig {
                 names.push(title);
             }
         }
+        for hw in &self.hardware_presets {
+            if hw.output != pair && hw.input != pair {
+                continue;
+            }
+            if let Some(chain) = self.hardware_chains.iter().find(|c| c.stages.contains(&hw.id)) {
+                names.push(chain.title());
+            } else {
+                names.push(hw.title());
+            }
+        }
         names
     }
 
@@ -307,6 +334,9 @@ impl SessionConfig {
             return true;
         }
         if pair == self.mix_playback_channel(MixLane::Main) {
+            return false;
+        }
+        if self.hardware_io_pairs().contains(&pair) {
             return false;
         }
         !self.plugin_chains.iter().any(|c| c.id != chain && c.return_channel == pair)
@@ -431,6 +461,30 @@ impl SessionConfig {
             row.effect = None;
         }
         self.sync_legacy_dests();
+    }
+
+    /// Replace the live chain catalog with the project's stored definitions.
+    /// An empty project catalog is left alone so a new or older sidecar can be seeded.
+    pub fn apply_project_catalog(
+        &mut self,
+        presets: &[HardwarePreset],
+        hardware_chains: &[HardwareChain],
+        plugin_chains: &[PluginChain],
+    ) -> bool {
+        if presets.is_empty() && hardware_chains.is_empty() && plugin_chains.is_empty() {
+            return false;
+        }
+        if self.hardware_presets == presets
+            && self.hardware_chains == hardware_chains
+            && self.plugin_chains == plugin_chains
+        {
+            return false;
+        }
+        self.hardware_presets = presets.to_vec();
+        self.hardware_chains = hardware_chains.to_vec();
+        self.plugin_chains = plugin_chains.to_vec();
+        self.sync_legacy_dests();
+        true
     }
 
     /// Replace the live send/bus map with the project's stored assignments.

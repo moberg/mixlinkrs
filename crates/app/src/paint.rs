@@ -185,6 +185,13 @@ impl AppState {
             let hover = overlay::menu_at(*rect, items, self.chrome.cursor.0, self.chrome.cursor.1);
             scene.extend(overlay::paint_menu(overlay, hover));
         }
+        let pngs: Vec<(u128, &[u8])> = self
+            .audio
+            .plugin_previews
+            .iter()
+            .map(|(id, png)| (id.as_u128(), png.as_slice()))
+            .collect();
+        self.chrome.renderer.sync_thumbs(&pngs);
         let _ = self.chrome.renderer.render_scene(&scene);
     }
 
@@ -192,6 +199,8 @@ impl AppState {
         let sample_rate = self.audio._stream.as_ref().map(|s| s.sample_rate()).unwrap_or(48_000);
         let buffer_frames = self.audio._stream.as_ref().map(|s| s.buffer_frames()).unwrap_or(128);
         let latency_ms = buffer_frames as f32 / sample_rate as f32 * 1000.0;
+        let thumbs: std::collections::HashSet<uuid::Uuid> =
+            self.audio.plugin_previews.keys().copied().collect();
         f(&sidebar::SidebarView {
             page: self.chrome.page,
             engine: &self.surface.analog,
@@ -204,6 +213,7 @@ impl AppState {
             scroll: self.chrome.sidebar_scroll,
             focus: &self.chrome.text_focus,
             caret: self.chrome.caret_on,
+            thumbs: &thumbs,
         })
     }
 

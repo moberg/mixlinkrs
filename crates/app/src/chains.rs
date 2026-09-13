@@ -71,9 +71,14 @@ impl Chrome {
         &mut self,
         analog: &AnalogEngine,
         scope_global: &std::collections::HashMap<uuid::Uuid, bool>,
+        previews: &std::collections::HashMap<uuid::Uuid, Vec<u8>>,
     ) {
+        let thumbs: std::collections::HashSet<uuid::Uuid> = previews.keys().copied().collect();
+        let pngs: Vec<(u128, &[u8])> =
+            previews.iter().map(|(id, png)| (id.as_u128(), png.as_slice())).collect();
         let (cmds, scroll) = {
-            let Some(ch) = self.chains.as_ref() else { return };
+            let Some(ch) = self.chains.as_mut() else { return };
+            ch.renderer.sync_thumbs(&pngs);
             let (w, h) = ch.renderer.logical_size();
             let max = chains::chains_max_scroll(analog, ch.tab, w, h);
             let scroll = ch.scroll.min(max);
@@ -86,6 +91,7 @@ impl Chrome {
                 self.caret_on,
                 scroll,
                 scope_global,
+                &thumbs,
             );
             if let Some(menu) = &ch.menu {
                 let Overlay::Menu { rect, items } = menu;
@@ -165,6 +171,8 @@ impl AppState {
             .iter()
             .map(|(id, s)| (*id, *s == crate::state::PluginStateScope::Global))
             .collect();
+        let thumbs: std::collections::HashSet<uuid::Uuid> =
+            self.audio.plugin_previews.keys().copied().collect();
         let (_, hits) = chains::paint_chains(
             &self.surface.analog,
             w,
@@ -174,6 +182,7 @@ impl AppState {
             false,
             scroll,
             &scopes,
+            &thumbs,
         );
         if let Some((rect, hit)) = hits.into_iter().rev().find(|(r, _)| overlay::contains(*r, x, y))
         {
@@ -197,20 +206,32 @@ impl AppState {
                 }
             }
             ChainsHit::Close => self.chrome.close_chains(),
-            ChainsHit::AddPreset => self.surface.analog.add_hardware_preset(),
-            ChainsHit::AddHardwareChain => self.surface.analog.add_hardware_chain(),
-            ChainsHit::AddPluginChain => self.surface.analog.add_plugin_chain(),
+            ChainsHit::AddPreset => {
+                self.surface.analog.add_hardware_preset();
+                self.persist_project_meta();
+            }
+            ChainsHit::AddHardwareChain => {
+                self.surface.analog.add_hardware_chain();
+                self.persist_project_meta();
+            }
+            ChainsHit::AddPluginChain => {
+                self.surface.analog.add_plugin_chain();
+                self.persist_project_meta();
+            }
             ChainsHit::DuplicatePreset(id) => {
                 self.surface.analog.config.duplicate_hardware_preset(id);
                 self.surface.analog.persist();
+                self.persist_project_meta();
             }
             ChainsHit::DuplicateHardwareChain(id) => {
                 self.surface.analog.config.duplicate_hardware_chain(id);
                 self.surface.analog.persist();
+                self.persist_project_meta();
             }
             ChainsHit::DuplicatePluginChain(id) => {
                 self.surface.analog.config.duplicate_plugin_chain(id);
                 self.surface.analog.persist();
+                self.persist_project_meta();
             }
             ChainsHit::RemovePreset(id) => self.confirm_or_delete(DeleteKind::Preset, id, anchor),
             ChainsHit::RemoveHardwareChain(id) => {
@@ -238,25 +259,31 @@ impl AppState {
                 if let Some(first) = self.surface.analog.config.hardware_presets.first().map(|p| p.id)
                 {
                     self.surface.analog.add_hardware_chain_stage(id, first);
+                    self.persist_project_meta();
                 }
             }
             ChainsHit::AddPluginStage(id) => {
                 self.surface.analog.config.add_plugin_stage(id);
                 self.surface.analog.persist();
+                self.persist_project_meta();
             }
             ChainsHit::HardwareStagePreset { chain, index } => {
                 self.open_preset_menu(chain, index, anchor)
             }
             ChainsHit::RemoveHardwareStage { chain, index } => {
                 self.surface.analog.remove_hardware_chain_stage_at(chain, index);
+                self.persist_project_meta();
             }
             ChainsHit::MoveHardwareStage { chain, index, delta } => {
                 self.surface.analog.move_hardware_chain_stage(chain, index, delta);
+                self.persist_project_meta();
             }
             ChainsHit::PluginStageBundle(id) => {
                 self.open_plugin_menu(MenuAction::PluginStageBundle { id }, anchor)
             }
-            ChainsHit::PluginStageEdit(id) => self.open_plugin_editor(id),
+            ChainsHit::PluginStageEdit(id) | ChainsHit::PluginStageThumb(id) => {
+                self.open_plugin_editor(id)
+            }
             ChainsHit::PluginStageBypass(id) => {
                 let on = self
                     .surface
@@ -266,16 +293,19 @@ impl AppState {
                     .map(|s| !s.bypassed)
                     .unwrap_or(true);
                 self.surface.analog.set_plugin_stage_bypass(id, on);
+                self.persist_project_meta();
             }
             ChainsHit::PluginStageScope(id) => self.toggle_plugin_state_scope(id),
             ChainsHit::RemovePluginStage(id) => {
                 self.unload_plugin_stage(id);
                 self.surface.analog.config.remove_plugin_stage(id);
                 self.surface.analog.persist();
+                self.persist_project_meta();
             }
             ChainsHit::MovePluginStage { chain, index, delta } => {
                 self.surface.analog.config.move_plugin_stage(chain, index, delta);
                 self.surface.analog.persist();
+                self.persist_project_meta();
             }
         }
     }

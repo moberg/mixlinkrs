@@ -11,7 +11,8 @@ use std::path::PathBuf;
 
 use analog::ChainKind;
 use project::{
-    plugin_stage_global_state_url, plugin_stage_state_url, MixLane, ProjectStore,
+    plugin_stage_global_preview_url, plugin_stage_global_state_url, plugin_stage_preview_url,
+    plugin_stage_state_url, MixLane, ProjectStore,
 };
 
 use crate::state::{AppState, PluginStateScope};
@@ -36,6 +37,7 @@ impl AppState {
         vst3_host::set_tempo(inst, self.timeline.tempo);
         self.audio.plugin_refs.insert(id, inst);
         self.restore_plugin_stage_state(id);
+        self.load_plugin_preview(id);
     }
 
     pub(crate) fn load_configured_plugins(&mut self) {
@@ -70,6 +72,7 @@ impl AppState {
             .map(|s| s.title())
             .unwrap_or_else(|| "Plugin".into());
         vst3_host::show_editor(inst, &title);
+        self.audio.preview_due.insert(id, std::time::Instant::now() + std::time::Duration::from_millis(700));
     }
 
     pub(crate) fn unload_plugin_stage(&mut self, id: uuid::Uuid) {
@@ -125,7 +128,73 @@ impl AppState {
                 continue;
             };
             self.save_plugin_stage_state(id, ev.instance);
+            if ev.immediate {
+                self.capture_plugin_preview(id, ev.instance);
+            }
         }
+    }
+
+    pub(crate) fn poll_plugin_previews(&mut self) {
+        let now = std::time::Instant::now();
+        let due: Vec<uuid::Uuid> = self
+            .audio
+            .preview_due
+            .iter()
+            .filter(|(_, at)| now >= **at)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in due {
+            self.audio.preview_due.remove(&id);
+            if let Some(&inst) = self.audio.plugin_refs.get(&id) {
+                self.capture_plugin_preview(id, inst);
+            }
+        }
+    }
+
+    fn capture_plugin_preview(&mut self, id: uuid::Uuid, inst: vst3_host::MixLinkVST3Ref) {
+        let Some(png) = vst3_host::capture_editor(inst) else {
+            return;
+        };
+        if png.is_empty() {
+            return;
+        }
+        self.audio.plugin_previews.insert(id, png.clone());
+        if let Some(path) = self.plugin_preview_write_path(id) {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(path, png);
+        }
+    }
+
+    fn load_plugin_preview(&mut self, id: uuid::Uuid) {
+        if self.audio.plugin_previews.contains_key(&id) {
+            return;
+        }
+        for path in self.plugin_preview_read_paths(id) {
+            if let Ok(bytes) = std::fs::read(&path) {
+                if !bytes.is_empty() {
+                    self.audio.plugin_previews.insert(id, bytes);
+                    return;
+                }
+            }
+        }
+    }
+
+    fn plugin_preview_write_path(&self, id: uuid::Uuid) -> Option<PathBuf> {
+        if let Some(folder) = ProjectStore::current_url(&self.surface.analog.config) {
+            return Some(plugin_stage_preview_url(&folder, id));
+        }
+        Some(plugin_stage_global_preview_url(id))
+    }
+
+    fn plugin_preview_read_paths(&self, id: uuid::Uuid) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        if let Some(folder) = ProjectStore::current_url(&self.surface.analog.config) {
+            paths.push(plugin_stage_preview_url(&folder, id));
+        }
+        paths.push(plugin_stage_global_preview_url(id));
+        paths
     }
 
     fn restore_plugin_stage_state(&mut self, id: uuid::Uuid) {
@@ -232,6 +301,7 @@ impl AppState {
         self.session.mix = Some(mix);
         if changed {
             self.surface.analog.persist();
+            self.persist_project_meta();
             self.persist_mix();
             self.load_configured_plugins();
         }

@@ -26,11 +26,11 @@ pub struct ImageAtlas {
     sprites: [Rect; 2],
 }
 
-fn decode_rgba(png_bytes: &[u8]) -> (u32, u32, Vec<u8>) {
+pub fn decode_rgba_png(png_bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     let decoder = png::Decoder::new(std::io::Cursor::new(png_bytes));
-    let mut reader = decoder.read_info().expect("decode fader PNG");
+    let mut reader = decoder.read_info().ok()?;
     let mut buf = vec![0; reader.output_buffer_size()];
-    let info = reader.next_frame(&mut buf).expect("png frame");
+    let info = reader.next_frame(&mut buf).ok()?;
     let (w, h) = (info.width, info.height);
     let rgba = match info.color_type {
         png::ColorType::Rgba => buf,
@@ -41,9 +41,13 @@ fn decode_rgba(png_bytes: &[u8]) -> (u32, u32, Vec<u8>) {
             }
             out
         }
-        other => panic!("unsupported fader PNG color type {other:?}"),
+        _ => return None,
     };
-    (w, h, rgba)
+    Some((w, h, rgba))
+}
+
+fn decode_rgba(png_bytes: &[u8]) -> (u32, u32, Vec<u8>) {
+    decode_rgba_png(png_bytes).expect("decode fader PNG")
 }
 
 impl ImageAtlas {

@@ -319,7 +319,7 @@ impl Engine {
             let (gain_l, gain_r) =
                 if muted { (0.0, 0.0) } else { stereo_pan_amps(mix.gain, mix.pan) };
             let peak = if tap.channel_l >= 0 {
-                peak_from_input(&input, tap.channel_l, tap.channel_r, frames) * gain_l.max(gain_r)
+                peak_from_input(&input, tap.channel_l, tap.channel_r, frames)
             } else {
                 0.0
             };
@@ -539,8 +539,7 @@ fn hold_plugin_taps(
         let mix = mix_gain(schedule, tap_i);
         let muted = record_muted(schedule, tap_i) || mix.muted;
         let (gain_l, gain_r) = if muted { (0.0, 0.0) } else { stereo_pan_amps(mix.gain, mix.pan) };
-        let peak = peak_of(&engine.scratch_out_l[..frames], &engine.scratch_out_r[..frames])
-            * gain_l.max(gain_r);
+        let peak = peak_of(&engine.scratch_out_l[..frames], &engine.scratch_out_r[..frames]);
         hold_peak(&engine.peaks[tap_i], peak);
         if recording && engine.ring_enabled[tap_i] {
             if gain_l > 0.0 || gain_r > 0.0 {
@@ -815,6 +814,43 @@ mod tests {
         assert!((out[0] - 0.5).abs() < 1e-6);
         assert!((out[1] + 0.25).abs() < 1e-6);
         assert!(handles.peaks[0].load(Ordering::Relaxed) > 0.2);
+    }
+
+    #[test]
+    fn plugin_return_tap_meters_wet() {
+        let (mut engine, handles) = Engine::new(48_000);
+        let mut schedule = Schedule::empty();
+        let mut route = crate::schedule::SendRoute::default();
+        route.enabled = true;
+        route.return_channel = 2;
+        route.feeds[0] = crate::schedule::StripFeed { channel: 0, gain: 1.0, linked: true };
+        schedule.routes.push(route);
+        schedule.taps[12] = AudioTapBinding::plugin(0);
+        handles.schedule.store(std::sync::Arc::new(schedule));
+        let (_keep, input) = interleaved(32, 0.8, -0.8);
+        let mut out = vec![0.0f32; 128];
+        let out_buf = AudioBuf { data: out.as_mut_ptr(), channels: 4, frames: 32 };
+        let output = BufferList { buffers: &[out_buf] };
+        engine.process(input, output, 32, 0);
+        assert!(
+            handles.peaks[12].load(Ordering::Relaxed) > 0.7,
+            "plugin return VU must read wet scratch, not a hardware input"
+        );
+    }
+
+    #[test]
+    fn strip_meters_are_pre_fader() {
+        let (mut engine, handles) = Engine::new(48_000);
+        let mut schedule = Schedule::empty();
+        schedule.mix_gains[0] = MixGain { gain: 0.0, pan: 0.5, muted: true, into_master: false };
+        schedule.record_muted[0] = true;
+        handles.schedule.store(std::sync::Arc::new(schedule));
+        let (_keep, input) = interleaved(32, 0.8, -0.8);
+        let mut out = vec![0.0f32; 64];
+        let out_buf = AudioBuf { data: out.as_mut_ptr(), channels: 2, frames: 32 };
+        let output = BufferList { buffers: &[out_buf] };
+        engine.process(input, output, 32, 0);
+        assert!(handles.peaks[0].load(Ordering::Relaxed) > 0.7);
     }
 
     #[test]

@@ -227,6 +227,24 @@ pub fn recessed_field(cmds: &mut Vec<DrawCmd>, rect: Rect) {
     theme::fill(cmds, Rect { x: rect.x, y: rect.y, w: rect.w, h: 1.0 }, [0.0, 0.0, 0.0, 0.48]);
 }
 
+/// Editor screenshot, or a recessed "Edit" slot when none has been captured.
+pub fn plugin_thumb(cmds: &mut Vec<DrawCmd>, rect: Rect, id: u128, has_image: bool) {
+    recessed_field(cmds, rect);
+    if has_image {
+        cmds.push(DrawCmd::Thumb {
+            rect: Rect {
+                x: rect.x + 1.0,
+                y: rect.y + 1.0,
+                w: (rect.w - 2.0).max(0.0),
+                h: (rect.h - 2.0).max(0.0),
+            },
+            id,
+        });
+    } else {
+        theme::text_center(cmds, rect, "Edit", 10.0, theme::TEXT_DIM, false);
+    }
+}
+
 fn stroke_border(cmds: &mut Vec<DrawCmd>, rect: Rect, color: Color) {
     if rect.w <= 0.0 || rect.h <= 0.0 {
         return;

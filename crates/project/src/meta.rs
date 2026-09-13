@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use analog::{ChainRef, StripBinding};
+use analog::{ChainRef, HardwareChain, HardwarePreset, PluginChain, StripBinding};
 
 use crate::document::{MixArrangement, MixGrid, MixLane};
 
@@ -50,6 +50,14 @@ pub struct ProjectMeta {
     /// Mixer strip → hardware input assignments for this project.
     #[serde(default)]
     pub strips: Vec<StripBinding>,
+    /// Hardware devices, hardware chains, and plugin chains for this project.
+    /// Definitions travel with the folder so assignments resolve on another machine.
+    #[serde(default)]
+    pub hardware_presets: Vec<HardwarePreset>,
+    #[serde(default)]
+    pub hardware_chains: Vec<HardwareChain>,
+    #[serde(default)]
+    pub plugin_chains: Vec<PluginChain>,
 }
 
 fn default_next_take() -> i32 {
@@ -84,11 +92,20 @@ impl Default for ProjectMeta {
             pixels_per_bar: 48.0,
             return_chains: HashMap::new(),
             strips: Vec::new(),
+            hardware_presets: Vec::new(),
+            hardware_chains: Vec::new(),
+            plugin_chains: Vec::new(),
         }
     }
 }
 
 impl ProjectMeta {
+    pub fn catalog_is_empty(&self) -> bool {
+        self.hardware_presets.is_empty()
+            && self.hardware_chains.is_empty()
+            && self.plugin_chains.is_empty()
+    }
+
     pub fn normalize(&mut self) {
         self.next_take = self.next_take.max(1);
         if self.tempo < 20.0 {

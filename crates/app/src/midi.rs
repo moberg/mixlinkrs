@@ -42,8 +42,7 @@ impl AppState {
             return;
         }
         if refresh_due {
-            self.surface.led_refresh_at = None;
-            self.surface.send_led_frame(frame);
+            self.surface.send_led_refresh(frame);
         }
     }
 

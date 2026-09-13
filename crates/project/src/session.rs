@@ -52,6 +52,16 @@ pub fn insert_state_url(
     ))
 }
 
+/// `{project}/plugin-stage-{stageUUID}-preview.png`
+pub fn plugin_stage_preview_url(project: &Path, stage_id: Uuid) -> PathBuf {
+    project.join(format!("plugin-stage-{}-preview.png", uuid_upper(&stage_id)))
+}
+
+/// `~/Library/Application Support/MixLink/plugin-stage-{stageUUID}-preview.png`
+pub fn plugin_stage_global_preview_url(stage_id: Uuid) -> PathBuf {
+    app_support_dir().join(format!("plugin-stage-{}-preview.png", uuid_upper(&stage_id)))
+}
+
 /// `{project}/plugin-stage-{stageUUID}-{bundleName}.state`
 pub fn plugin_stage_state_url(
     project: &Path,

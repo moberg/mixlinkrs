@@ -1,7 +1,8 @@
 //! MixLink project documents, take WAV names, undo, and folder store.
 //!
 //! Session load/save lives in [`analog::SessionConfig`]. This crate owns mix
-//! JSON, `project.json`, take numbering, and security-scoped project bookmarks.
+//! JSON, `project.json` (including the chain catalog), take numbering, and
+//! security-scoped project bookmarks.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
@@ -22,7 +23,8 @@ pub use document::{
 pub use meta::{MixListEntry, ProjectMeta};
 pub use session::{
     app_support_dir, bookmark_from_path, insert_state_url, plugin_slot_state_url,
-    plugin_stage_global_state_url, plugin_stage_state_url, resolve_bookmark, uuid_upper,
+    plugin_stage_global_preview_url, plugin_stage_global_state_url, plugin_stage_preview_url,
+    plugin_stage_state_url, resolve_bookmark, uuid_upper,
     BookmarkError,
 };
 pub use store::{delete_take_files, scan_take_infos, scan_takes, ProjectStore, StoreError};

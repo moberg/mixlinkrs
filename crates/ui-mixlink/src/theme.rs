@@ -195,8 +195,32 @@ pub fn mixer_chassis(cmds: &mut Vec<DrawCmd>, rect: Rect, upper_height: f32) {
         w: rect.w,
         h: (rect.h - upper_h - 2.0).max(0.0),
     };
-    hardware_surface(cmds, bay, SurfaceStyle::FaderBay);
+    let mat = material_for(SurfaceStyle::FaderBay);
+    let used = (Layout::FADER_TRACK_H
+        + Layout::FADER_BAY_PAD_Y * 2.0
+        + Layout::NAME_ROW
+        + Layout::BUTTON_STACK)
+        .min(bay.h);
+    let unused_h = (bay.h - used).max(0.0);
+    // Leftover above capped faders stays one sheet — no grain, metal bands, or sheen.
+    if unused_h > 1.0 {
+        fill(cmds, Rect { x: bay.x, y: bay.y, w: bay.w, h: unused_h }, mat.middle);
+    }
+    let used_rect = Rect { x: bay.x, y: bay.y + unused_h, w: bay.w, h: used };
+    if used_rect.h > 1.0 {
+        stacked_fill(cmds, used_rect, mat);
+        stacked_grain(cmds, used_rect, mat);
+        fader_bay_metal(cmds, used_rect);
+        stacked_sheen(cmds, used_rect, mat);
+    }
     fader_bay_inset_shadow(cmds, bay);
+}
+
+/// Unused mixer width past the last strip (right of Main / the recorder).
+pub fn mixer_overflow(cmds: &mut Vec<DrawCmd>, rect: Rect) {
+    if rect.w > 1.0 && rect.h > 1.0 {
+        fill(cmds, rect, material_for(SurfaceStyle::FaderBay).middle);
+    }
 }
 
 /// MixLink `MixerUpperPanelBackground`. White stop alphas are lower than MixLink
@@ -228,8 +252,35 @@ fn upper_faceplate(cmds: &mut Vec<DrawCmd>, rect: Rect) {
     brushed_texture(cmds, rect);
 }
 
+/// MixLink `MixerUpperPanelBackground.brushedTexture` — 1.15 pt sin-hash grain.
+fn brushed_texture(cmds: &mut Vec<DrawCmd>, rect: Rect) {
+    let mut local = 0.0f32;
+    while local < rect.h {
+        let f = grain_fraction(local);
+        let use_light = f > 0.5;
+        let opacity = if use_light { 0.003 + f * 0.003 } else { 0.008 + f * 0.012 };
+        let color = if use_light { [1.0, 1.0, 1.0, opacity] } else { [0.0, 0.0, 0.0, opacity] };
+        cmds.push(DrawCmd::Line {
+            a: (rect.x, rect.y + local),
+            b: (rect.x + rect.w, rect.y + local),
+            color,
+            thickness: 0.5,
+        });
+        local += 1.15;
+    }
+}
+
 /// MixLink `HardwareSurface.stackedSurface`.
 fn stacked_surface(cmds: &mut Vec<DrawCmd>, rect: Rect, mat: &Material, fader_bay: bool) {
+    stacked_fill(cmds, rect, mat);
+    stacked_grain(cmds, rect, mat);
+    if fader_bay {
+        fader_bay_metal(cmds, rect);
+    }
+    stacked_sheen(cmds, rect, mat);
+}
+
+fn stacked_fill(cmds: &mut Vec<DrawCmd>, rect: Rect, mat: &Material) {
     let mid_h = rect.h * 0.45;
     cmds.push(DrawCmd::VertGradient {
         rect: Rect { x: rect.x, y: rect.y, w: rect.w, h: mid_h },
@@ -241,10 +292,9 @@ fn stacked_surface(cmds: &mut Vec<DrawCmd>, rect: Rect, mat: &Material, fader_ba
         top: mat.middle,
         bottom: mat.bottom,
     });
-    stacked_grain(cmds, rect, mat);
-    if fader_bay {
-        fader_bay_metal(cmds, rect);
-    }
+}
+
+fn stacked_sheen(cmds: &mut Vec<DrawCmd>, rect: Rect, mat: &Material) {
     let half = rect.h * 0.5;
     cmds.push(DrawCmd::VertGradient {
         rect: Rect { x: rect.x, y: rect.y, w: rect.w, h: half },
@@ -268,24 +318,6 @@ fn stacked_surface(cmds: &mut Vec<DrawCmd>, rect: Rect, mat: &Material, fader_ba
         left: [0.0, 0.0, 0.0, 0.0],
         right: [0.0, 0.0, 0.0, 0.06],
     });
-}
-
-/// MixLink `MixerUpperPanelBackground.brushedTexture` — 1.15 pt sin-hash grain.
-fn brushed_texture(cmds: &mut Vec<DrawCmd>, rect: Rect) {
-    let mut local = 0.0f32;
-    while local < rect.h {
-        let f = grain_fraction(local);
-        let use_light = f > 0.5;
-        let opacity = if use_light { 0.003 + f * 0.003 } else { 0.008 + f * 0.012 };
-        let color = if use_light { [1.0, 1.0, 1.0, opacity] } else { [0.0, 0.0, 0.0, opacity] };
-        cmds.push(DrawCmd::Line {
-            a: (rect.x, rect.y + local),
-            b: (rect.x + rect.w, rect.y + local),
-            color,
-            thickness: 0.5,
-        });
-        local += 1.15;
-    }
 }
 
 /// MixLink stacked-surface grain — 1.5 pt spacing, light and dark.
@@ -434,6 +466,9 @@ pub fn faceplate_seam(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, w: f32) {
 
 /// MixLink `ChannelSeam`: 2 pt falloff + two 1 pt lines.
 pub fn channel_seam(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, h: f32, strong: bool) {
+    if h <= 1.0 {
+        return;
+    }
     cmds.push(DrawCmd::HorzGradient {
         rect: Rect { x: x - 2.0, y, w: 2.0, h },
         left: [0.0, 0.0, 0.0, 0.0],
@@ -634,6 +669,8 @@ impl Layout {
     pub const FADER_SLOT: f32 = 7.5;
     pub const FADER_CAP_W: f32 = 30.0;
     pub const FADER_CAP_H: f32 = 48.0;
+    /// Fixed cap + throw. Extra bay height is leftover metal, not a longer slider.
+    pub const FADER_TRACK_H: f32 = 280.0;
     /// MixLink `DecibelScaleView` leading column (ticks only).
     pub const SCALE_LEADING: f32 = 12.0;
     /// MixLink `Layout.scaleWidth` trailing column (ticks + numeric labels).

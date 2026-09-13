@@ -22,6 +22,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <vector>
+#include <dlfcn.h>
 
 #include "pluginterfaces/base/funknownimpl.h"
 #include "pluginterfaces/gui/iplugview.h"
@@ -160,6 +161,7 @@ struct MixLinkVST3Instance
 
 	NSWindow *window = nil;
 	MixLinkEditorWindowDelegate *windowDelegate = nil;
+	NSData *previewPNG = nil;
 	/// True while the host is applying a plug-in-requested size, so windowDidResize
 	/// does not call onSize re-entrantly.
 	bool resizingEditor = false;
@@ -317,6 +319,7 @@ tresult MixLinkComponentHandler::performEdit (ParamID id, ParamValue value)
 	MixLinkVST3Instance *instance = self.instance;
 	if (instance == nullptr)
 		return;
+	MixLinkVST3CaptureEditor (instance);
 	notifyStateDirty (instance, YES);
 	if (instance->view)
 	{
@@ -1158,6 +1161,74 @@ void MixLinkVST3CloseEditor (MixLinkVST3Ref instance)
 	if (instance == nullptr || instance->window == nil)
 		return;
 	[instance->window close];
+}
+
+static NSData *pngFromCGImage (CGImageRef image)
+{
+	if (image == nullptr)
+		return nil;
+	NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithCGImage:image];
+	return [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+}
+
+/// Prefer a window composite so we do not send `cacheDisplayInRect` into
+/// Soundtoys (it can abort). `CGWindowListCreateImage` is gone from the
+/// macOS 15 SDK, so look it up at runtime.
+static NSData *snapshotEditorWindow (NSWindow *window)
+{
+	if (window == nil)
+		return nil;
+	using CreateImageFn = CGImageRef (*) (CGRect, CGWindowListOption, CGWindowID, CGWindowImageOption);
+	static CreateImageFn createImage = nullptr;
+	static bool resolved = false;
+	if (!resolved)
+	{
+		createImage = reinterpret_cast<CreateImageFn> (dlsym (RTLD_DEFAULT, "CGWindowListCreateImage"));
+		resolved = true;
+	}
+	CGWindowID wid = (CGWindowID) window.windowNumber;
+	if (createImage != nullptr && wid != kCGNullWindowID)
+	{
+		CGImageRef image = createImage (
+		    CGRectNull, kCGWindowListOptionIncludingWindow, wid,
+		    kCGWindowImageBoundsIgnoreFraming | kCGWindowImageShouldBeOpaque);
+		if (image != nullptr)
+		{
+			NSData *png = pngFromCGImage (image);
+			CGImageRelease (image);
+			if (png.length > 0)
+				return png;
+		}
+	}
+	NSView *view = window.contentView;
+	if (view == nil)
+		return nil;
+	NSRect bounds = view.bounds;
+	if (bounds.size.width < 2.0 || bounds.size.height < 2.0)
+		return nil;
+	NSBitmapImageRep *rep = [view bitmapImageRepForCachingDisplayInRect:bounds];
+	if (rep == nil)
+		return nil;
+	[view cacheDisplayInRect:bounds toBitmapImageRep:rep];
+	return [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+}
+
+NSData *MixLinkVST3CaptureEditor (MixLinkVST3Ref instance)
+{
+	if (instance == nullptr)
+		return nil;
+	NSWindow *window = instance->window;
+	if (window != nil)
+	{
+		@try
+		{
+			NSData *png = snapshotEditorWindow (window);
+			if (png.length > 0)
+				instance->previewPNG = png;
+		} @catch (...) {
+		}
+	}
+	return instance->previewPNG;
 }
 
 #pragma mark - State

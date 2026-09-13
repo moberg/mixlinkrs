@@ -134,6 +134,11 @@ pub enum DrawCmd {
         uv: Rect,
         texture: TextureId,
     },
+    /// Dynamic PNG (plugin editor preview). `id` is a stable key (stage UUID).
+    Thumb {
+        rect: Rect,
+        id: u128,
+    },
     /// Bipolar `(min, max)` in −1…1. Consecutive pairs are joined as a strip
     /// (trapezoids), so zooming in interpolates instead of repeating a column.
     /// `bins[i]` sits at `x0 + i * bar_w`. Arrangement clips pass linear
@@ -177,7 +182,11 @@ pub fn tessellate(scene: &[DrawCmd], viewport_size: (f32, f32)) -> Vec<Vertex> {
     let mut out = Vec::with_capacity(scene.len() * 6);
     for cmd in scene {
         match cmd {
-            DrawCmd::Text(_) | DrawCmd::Image { .. } | DrawCmd::Layer | DrawCmd::Clip { .. } => {
+            DrawCmd::Text(_)
+            | DrawCmd::Image { .. }
+            | DrawCmd::Thumb { .. }
+            | DrawCmd::Layer
+            | DrawCmd::Clip { .. } => {
                 /* other pipelines */
             }
             DrawCmd::Rect { rect, color } => {

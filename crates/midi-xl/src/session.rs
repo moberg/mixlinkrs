@@ -21,6 +21,10 @@ pub const DEVICE_NAME_NEEDLE: &str = "Launch Control XL";
 /// Hardware needs a second full write after connect / pad flash.
 pub const LED_REFRESH_DELAY_MS: u64 = 80;
 pub const LED_REFRESH_DELAY: Duration = Duration::from_millis(LED_REFRESH_DELAY_MS);
+/// Loopback of Focus/Control LED note-ons arrives within a few milliseconds.
+/// Keep this much shorter than the 80 ms refresh so the follow-up write
+/// cannot keep eating pad presses.
+pub const LED_ECHO_WINDOW: Duration = Duration::from_millis(16);
 
 /// Delay before the follow-up full LED write (XL momentary flash).
 #[must_use]
@@ -287,7 +291,7 @@ impl<S: MidiSink> MidiSession<S> {
     }
 
     fn is_led_note_echo(&self, note: u8) -> bool {
-        self.led_note_echo.iter().any(|(n, at)| *n == note && at.elapsed() < LED_REFRESH_DELAY)
+        self.led_note_echo.iter().any(|(n, at)| *n == note && at.elapsed() < LED_ECHO_WINDOW)
     }
 
     /// Byte-wise ingest. Channel-status bytes abort an incomplete SysEx so
@@ -596,6 +600,9 @@ mod tests {
         assert_control(&mut session, &[0x90, 107, 127], Control::Solo);
         assert_control(&mut session, &[0xB0, 111, 127], Control::Mute);
         assert_control(&mut session, &[0xB0, 112, 127], Control::Solo);
+        std::thread::sleep(LED_ECHO_WINDOW + Duration::from_millis(4));
+        assert_control(&mut session, &[0x90, FOCUS_NOTES[0], 127], Control::Focus(0));
+        assert_control(&mut session, &[0x90, CONTROL_NOTES[0], 127], Control::Control(0));
     }
 
     #[test]

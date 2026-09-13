@@ -629,6 +629,7 @@ impl AppState {
                     self.surface.analog.config.hardware_preset(id).map(|h| h.name.trim().to_string())
                 {
                     self.surface.analog.set_hardware_preset_name(id, &name);
+                    self.persist_project_meta();
                 }
             }
             TextFocus::HardwareChainName(id) => {
@@ -636,6 +637,7 @@ impl AppState {
                     self.surface.analog.config.hardware_chain(id).map(|h| h.name.trim().to_string())
                 {
                     self.surface.analog.set_hardware_chain_name(id, &name);
+                    self.persist_project_meta();
                 }
             }
             TextFocus::PluginChainName(id) => {
@@ -643,6 +645,7 @@ impl AppState {
                     self.surface.analog.config.plugin_chain(id).map(|h| h.name.trim().to_string())
                 {
                     self.surface.analog.set_plugin_chain_name(id, &name);
+                    self.persist_project_meta();
                 }
             }
             TextFocus::GearAlias(id) => {

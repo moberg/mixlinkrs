@@ -331,7 +331,11 @@ impl ApplicationHandler for App {
                     .iter()
                     .map(|(id, s)| (*id, *s == crate::state::PluginStateScope::Global))
                     .collect();
-                state.chrome.paint_chains_window(&state.surface.analog, &scopes);
+                state.chrome.paint_chains_window(
+                    &state.surface.analog,
+                    &scopes,
+                    &state.audio.plugin_previews,
+                );
             }
             WindowEvent::RedrawRequested => {
                 tick(state);
@@ -364,6 +368,7 @@ fn tick(state: &mut AppState) {
     state.surface.analog.poll_osc();
     state.poll_midi_and_leds();
     state.flush_plugin_dirty_state();
+    state.poll_plugin_previews();
     if state.chrome.caret_at.elapsed().as_millis() > 500 {
         state.chrome.caret_on = !state.chrome.caret_on;
         state.chrome.caret_at = Instant::now();

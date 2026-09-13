@@ -164,6 +164,9 @@ impl ProjectStore {
         let mut meta = ProjectMeta::default();
         meta.return_chains = config.return_chains.clone();
         meta.strips = config.strips.clone();
+        meta.hardware_presets = config.hardware_presets.clone();
+        meta.hardware_chains = config.hardware_chains.clone();
+        meta.plugin_chains = config.plugin_chains.clone();
         self.save_meta(&meta, &url)?;
         config.current_project_relative = Some(name);
         Ok(url)
@@ -609,6 +612,23 @@ mod tests {
     }
 
     #[test]
+    fn create_project_stores_chain_catalog() {
+        let root = temp_dir();
+        let mut config = test_config(&root);
+        config.hardware_presets[0].name = "1176".into();
+        config.hardware_chains[0].name = "Comp chain".into();
+        config.plugin_chains[0].name = "Verb".into();
+        let store = ProjectStore::new();
+        let folder = store.create_project(&mut config).unwrap();
+        let meta = store.load_meta(&folder);
+        assert_eq!(meta.hardware_presets[0].id, config.hardware_presets[0].id);
+        assert_eq!(meta.hardware_presets[0].name, "1176");
+        assert_eq!(meta.hardware_chains[0].name, "Comp chain");
+        assert_eq!(meta.plugin_chains[0].name, "Verb");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn project_meta_roundtrips_return_chains() {
         let dir = temp_dir();
         let id = Uuid::new_v4();
@@ -633,6 +653,25 @@ mod tests {
         let loaded = store.load_meta(&dir);
         assert_eq!(loaded.strips[1].index, 6);
         assert!(!loaded.strips[1].linked_stereo);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_meta_roundtrips_chain_catalog() {
+        let dir = temp_dir();
+        let session = analog::SessionConfig::new();
+        let mut meta = ProjectMeta::default();
+        meta.hardware_presets = session.hardware_presets.clone();
+        meta.hardware_chains = session.hardware_chains.clone();
+        meta.plugin_chains = session.plugin_chains.clone();
+        meta.hardware_presets[0].name = "1176".into();
+        let store = ProjectStore::new();
+        store.save_meta(&meta, &dir).unwrap();
+        let loaded = store.load_meta(&dir);
+        assert_eq!(loaded.hardware_presets[0].id, meta.hardware_presets[0].id);
+        assert_eq!(loaded.hardware_presets[0].name, "1176");
+        assert_eq!(loaded.hardware_chains, meta.hardware_chains);
+        assert_eq!(loaded.plugin_chains, meta.plugin_chains);
         let _ = fs::remove_dir_all(&dir);
     }
 

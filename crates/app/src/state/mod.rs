@@ -65,7 +65,8 @@ impl AppState {
             log::warn!("OSC: {e}");
         }
         osc.send_dump_requests();
-        let analog = AnalogEngine::new(mixer, surface_state, config.clone(), osc);
+        let mut analog = AnalogEngine::new(mixer, surface_state, config.clone(), osc);
+        analog.apply_all_returns();
 
         let (engine, handles) = Engine::new(48_000);
         let engine_leaked: &'static mut Engine = Box::leak(Box::new(engine));
@@ -128,6 +129,8 @@ impl AppState {
                 plugin_refs: HashMap::new(),
                 insert_refs: HashMap::new(),
                 plugin_state_scope: HashMap::new(),
+                plugin_previews: HashMap::new(),
+                preview_due: HashMap::new(),
             },
             session: Session {
                 project: ProjectStore::new(),

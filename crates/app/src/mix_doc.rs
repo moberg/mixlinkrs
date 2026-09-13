@@ -428,6 +428,9 @@ impl AppState {
         }
         meta.return_chains = self.surface.analog.config.return_chains.clone();
         meta.strips = self.surface.analog.config.strips.clone();
+        meta.hardware_presets = self.surface.analog.config.hardware_presets.clone();
+        meta.hardware_chains = self.surface.analog.config.hardware_chains.clone();
+        meta.plugin_chains = self.surface.analog.config.plugin_chains.clone();
         let _ = self.session.project.save_meta(&meta, &folder);
     }
 
@@ -457,7 +460,14 @@ impl AppState {
         }
         let sr = self.audio._stream.as_ref().map(|s| s.sample_rate() as f64).unwrap_or(48_000.0);
         let meta = self.session.project.load_meta(&folder);
-        if self.surface.analog.config.apply_project_return_chains(&meta.return_chains) {
+        let catalog_changed = self.surface.analog.config.apply_project_catalog(
+            &meta.hardware_presets,
+            &meta.hardware_chains,
+            &meta.plugin_chains,
+        );
+        let returns_changed =
+            self.surface.analog.config.apply_project_return_chains(&meta.return_chains);
+        if catalog_changed || returns_changed {
             self.surface.analog.rewrite_all_sends();
             self.surface.analog.apply_all_returns();
             self.surface.analog.persist();
@@ -529,8 +539,15 @@ impl AppState {
         self.convert_mix_inserts_to_chains();
         self.reset_plugin_scopes_for_project();
         self.load_configured_plugins();
+        let catalog_seed = meta.catalog_is_empty()
+            && (meta.return_chains.is_empty()
+                || meta.return_chains.values().all(|r| {
+                    self.surface.analog.config.hardware_chain(r.id).is_some()
+                        || self.surface.analog.config.plugin_chain(r.id).is_some()
+                }));
         if (meta.return_chains.is_empty() && !self.surface.analog.config.return_chains.is_empty())
             || meta.strips.is_empty()
+            || catalog_seed
         {
             self.persist_project_meta();
         }

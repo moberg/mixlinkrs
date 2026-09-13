@@ -78,17 +78,23 @@ pub fn paint(view: &MixerView<'_>) -> (Vec<DrawCmd>, Vec<(Rect, MixerExtraHit)>)
     cmds.push(DrawCmd::Layer);
     cmds.push(DrawCmd::Clip { rect: clip });
     let sends: Vec<ReturnLane> = view.engine.config.visible_send_lanes();
-    theme::mixer_chassis(
-        &mut cmds,
-        Rect { x: l.x, y: l.y, w: l.w, h: l.h },
-        Layout::upper_faceplate_height(&sends),
-    );
-
     let mut x = mixer_origin(&l);
-    paint_name_bar_rails(&mut cmds, x, l.y, l.ch_w, l.main_w, &sends);
     let fx_x = x + l.ch_w * 8.0 + 1.0;
     let bus_x = fx_x + l.ch_w * sends.len() as f32 + 1.0;
     let main_x = bus_x + l.ch_w * 2.0 + 1.0;
+    let strips_right = main_x + l.main_w;
+    let chassis_w = (strips_right - l.x).clamp(0.0, l.w);
+    theme::mixer_chassis(
+        &mut cmds,
+        Rect { x: l.x, y: l.y, w: chassis_w, h: l.h },
+        Layout::upper_faceplate_height(&sends),
+    );
+    theme::mixer_overflow(
+        &mut cmds,
+        Rect { x: l.x + chassis_w, y: l.y, w: (l.w - chassis_w).max(0.0), h: l.h },
+    );
+
+    paint_name_bar_rails(&mut cmds, x, l.y, l.ch_w, l.main_w, &sends);
     let pan_bar_y = pan_name_bar_y(&l, sends.len());
     for i in 0..8 {
         paint_strip(
@@ -172,7 +178,8 @@ pub fn paint(view: &MixerView<'_>) -> (Vec<DrawCmd>, Vec<(Rect, MixerExtraHit)>)
 }
 
 /// Group split (inputs | FX | bus | Main). Starts at the PAN title row so the
-/// empty send-stack above returns/Main stays one sheet.
+/// empty send-stack above returns/Main stays one sheet, then runs through the
+/// leftover bay and the faders.
 fn group_divider(cmds: &mut Vec<DrawCmd>, x: f32, mixer_y: f32, mixer_h: f32, from_y: f32) {
     let y = from_y.max(mixer_y);
     let h = (mixer_y + mixer_h - y).max(0.0);
@@ -358,9 +365,10 @@ fn paint_strip(
     y += Layout::PAN_ROW;
 
     let bay_h = (l.y + l.h - y - Layout::NAME_ROW - Layout::BUTTON_STACK).max(80.0);
+    let used_top = FaderBay::layout(x, y, w, bay_h).track_top;
     theme::channel_bay_shading(
         cmds,
-        Rect { x, y, w, h: bay_h + Layout::NAME_ROW + Layout::BUTTON_STACK },
+        Rect { x, y: used_top, w, h: (l.y + l.h - used_top).max(0.0) },
     );
     paint_fader(
         cmds,
@@ -418,6 +426,7 @@ fn paint_strip(
 
     // Returns / Main have no send knobs — keep that empty faceplate seamless
     // down to the PAN title row. Inputs keep seams through the send stack.
+    // Seams continue through the leftover above capped faders.
     let send_area: f32 = sends.iter().copied().map(Layout::send_lane_h).sum();
     let skip_upper = !matches!(kind, StripKind::Input(_));
     let body_y = y0 + if skip_upper { send_area } else { 0.0 };
@@ -589,8 +598,9 @@ impl FaderBay {
         let slot_left = origin + flex;
         let cap_cx = slot_left + slot_reserve * 0.5;
         let trailing_x = slot_left + slot_reserve;
-        let track_top = strip_y + Layout::FADER_BAY_PAD_Y;
-        let track_h = (bay_h - Layout::FADER_BAY_PAD_Y * 2.0).max(Layout::FADER_CAP_H);
+        let avail = (bay_h - Layout::FADER_BAY_PAD_Y * 2.0).max(Layout::FADER_CAP_H);
+        let track_h = Layout::FADER_TRACK_H.min(avail);
+        let track_top = strip_y + bay_h - Layout::FADER_BAY_PAD_Y - track_h;
         let travel = (track_h - Layout::FADER_CAP_H).max(0.0);
         Self {
             track_top,
@@ -961,6 +971,111 @@ mod tests {
         assert!((pan_row_y(&layout, 3) - (y + Layout::SEND_NAME_BAR)).abs() < 0.01);
         let (bay_y, _) = fader_bay_frame(&layout, 3);
         assert!((bay_y - (y + Layout::SEND_NAME_BAR + Layout::PAN_ROW)).abs() < 0.01);
+    }
+
+    #[test]
+    fn fader_track_caps_without_collapsing_bay() {
+        let layout = MixerLayout::new(0.0, 0.0, 1600.0, 1400.0, 3);
+        let (y, h) = fader_bay_frame(&layout, 3);
+        assert!(h > Layout::FADER_TRACK_H + 80.0, "fixture should leave leftover bay metal");
+        let bay = FaderBay::layout(0.0, y, 100.0, h);
+        assert!((bay.track_h - Layout::FADER_TRACK_H).abs() < 0.01);
+        assert!((bay.track_top + bay.track_h - (y + h - Layout::FADER_BAY_PAD_Y)).abs() < 0.01);
+        assert!(bay.track_top - y > 40.0, "channel bay stays tall above the fixed throw");
+        let short = FaderBay::layout(0.0, 0.0, 100.0, 160.0);
+        assert!(short.track_h < Layout::FADER_TRACK_H);
+        assert!((short.track_top - Layout::FADER_BAY_PAD_Y).abs() < 0.01);
+    }
+
+    #[test]
+    fn unused_bay_is_one_smooth_sheet() {
+        let engine = test_engine();
+        let send_count = engine.config.visible_send_lanes().len();
+        let layout = MixerLayout::new(0.0, 0.0, 1800.0, 1400.0, send_count);
+        let (bay_y, bay_h) = fader_bay_frame(&layout, send_count);
+        let used_top = FaderBay::layout(0.0, bay_y, 100.0, bay_h).track_top;
+        assert!(used_top - bay_y > 40.0, "fixture should leave unused bay metal");
+        let gap0 = bay_y + 8.0;
+        let gap1 = used_top - 8.0;
+        let peaks = [0.0f32; 17];
+        let (cmds, _) = paint(&MixerView {
+            engine: &engine,
+            peaks: &peaks,
+            layout,
+            deck: crate::deck::DeckView::default(),
+        });
+        let seams = cmds.iter().any(|c| {
+            let rect = match c {
+                DrawCmd::Rect { rect, .. } | DrawCmd::HorzGradient { rect, .. } => rect,
+                _ => return false,
+            };
+            rect.w <= 2.5 && rect.h > 20.0 && rect.y <= gap0 && rect.y + rect.h >= gap1
+        });
+        assert!(seams, "channel separators should stretch through the leftover bay");
+        let grain = cmds.iter().any(|c| match c {
+            DrawCmd::Line { a, b, thickness, .. } => {
+                (b.0 - a.0).abs() > 200.0
+                    && *thickness <= 1.0
+                    && a.1 >= gap0
+                    && a.1 <= gap1
+                    && (b.1 - a.1).abs() < 1.0
+            }
+            _ => false,
+        });
+        assert!(!grain, "grain and metal lines must not run through the unused bay");
+        let bands = cmds.iter().any(|c| match c {
+            DrawCmd::VertGradient { rect, .. } => {
+                rect.w > 200.0
+                    && rect.h > 4.0
+                    && rect.h < 20.0
+                    && rect.y >= gap0
+                    && rect.y + rect.h <= gap1
+            }
+            _ => false,
+        });
+        assert!(!bands, "metal gradient bands must not sit in the unused bay");
+    }
+
+    #[test]
+    fn overflow_right_of_strips_is_flat_bay() {
+        let engine = test_engine();
+        let send_count = engine.config.visible_send_lanes().len();
+        let layout = MixerLayout::new(0.0, 0.0, 1800.0, 1400.0, send_count);
+        let origin = mixer_origin(&layout);
+        let main_x = origin
+            + layout.ch_w * 8.0
+            + 1.0
+            + layout.ch_w * send_count as f32
+            + 1.0
+            + layout.ch_w * 2.0
+            + 1.0;
+        let strips_right = main_x + layout.main_w;
+        assert!(layout.w - strips_right > 80.0, "fixture should leave overflow past Main");
+        let peaks = [0.0f32; 17];
+        let (cmds, _) = paint(&MixerView {
+            engine: &engine,
+            peaks: &peaks,
+            layout,
+            deck: crate::deck::DeckView::default(),
+        });
+        let dark = theme::material_for(theme::SurfaceStyle::FaderBay).middle;
+        let overflow = cmds.iter().any(|c| match c {
+            DrawCmd::Rect { rect, color } => {
+                (rect.x - strips_right).abs() < 1.0
+                    && rect.w > 40.0
+                    && (rect.h - layout.h).abs() < 1.0
+                    && *color == dark
+            }
+            _ => false,
+        });
+        assert!(overflow, "overflow past Main should be the unused-bay fill");
+        let grain_past = cmds.iter().any(|c| match c {
+            DrawCmd::Line { a, b, thickness, .. } => {
+                *thickness <= 1.0 && a.0.min(b.0) < strips_right && a.0.max(b.0) > strips_right + 20.0
+            }
+            _ => false,
+        });
+        assert!(!grain_past, "faceplate / fader grain must stop at the last strip");
     }
 
     fn test_engine() -> AnalogEngine {

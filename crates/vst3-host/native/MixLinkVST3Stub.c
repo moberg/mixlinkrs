@@ -24,6 +24,7 @@ void *MixLinkVST3SlotExchange(uint32_t slot, void *next) { (void)slot; return ne
 void MixLinkVST3Unload(void *instance) { (void)instance; }
 void MixLinkVST3ShowEditor(void *instance, const void *title) { (void)instance; (void)title; }
 void MixLinkVST3CloseEditor(void *instance) { (void)instance; }
+void *MixLinkVST3CaptureEditor(void *instance) { (void)instance; return 0; }
 void MixLinkVST3SetTempo(void *instance, double bpm) { (void)instance; (void)bpm; }
 void MixLinkVST3SetParameter(void *instance, uint32_t id, double v) { (void)instance; (void)id; (void)v; }
 uint32_t MixLinkVST3ParameterCount(void *instance) { (void)instance; return 0; }

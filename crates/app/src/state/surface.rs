@@ -18,9 +18,23 @@ pub(crate) struct Surface {
 
 impl Surface {
     pub(crate) fn send_led_frame(&mut self, frame: LedFrame) {
+        self.send_led_frame_refresh(frame, true);
+    }
+
+    /// Follow-up write after the XL's momentary flash. Must not schedule
+    /// another refresh — that loop marked Focus/Control as LED echoes forever.
+    pub(crate) fn send_led_refresh(&mut self, frame: LedFrame) {
+        self.send_led_frame_refresh(frame, false);
+    }
+
+    fn send_led_frame_refresh(&mut self, frame: LedFrame, schedule: bool) {
         self.midi.send_leds(&frame);
         self.last_led = Some(frame);
-        self.led_refresh_at = Some(Instant::now() + schedule_refresh());
+        self.led_refresh_at = if schedule {
+            Some(Instant::now() + schedule_refresh())
+        } else {
+            None
+        };
     }
 
     pub(crate) fn current_knob(&self, kind: StripKind, lane: Option<ReturnLane>) -> f32 {

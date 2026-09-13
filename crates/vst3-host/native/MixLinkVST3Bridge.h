@@ -61,6 +61,8 @@ BOOL MixLinkVST3Reconfigure(MixLinkVST3Ref instance, double sampleRate, uint32_t
 BOOL MixLinkVST3HasEditor(MixLinkVST3Ref instance);
 void MixLinkVST3ShowEditor(MixLinkVST3Ref instance, NSString *title);
 void MixLinkVST3CloseEditor(MixLinkVST3Ref instance);
+/// PNG of the open editor, or the last snapshot taken before it closed.
+NSData *_Nullable MixLinkVST3CaptureEditor(MixLinkVST3Ref instance);
 
 #pragma mark - State (main thread)
 

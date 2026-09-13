@@ -21,6 +21,7 @@ pub struct SidebarView<'a> {
     pub scroll: f32,
     pub focus: &'a TextFocus,
     pub caret: bool,
+    pub thumbs: &'a std::collections::HashSet<uuid::Uuid>,
 }
 
 #[derive(Clone, Debug)]
@@ -142,8 +143,11 @@ fn record_content_h(view: &SidebarView<'_>) -> f32 {
     h += 18.0 + HEAD_GAP;
     for lane in record_lanes(view) {
         let chain = view.engine.config.chain_ref(lane);
-        h += assign_row_h(is_plugin_assign(chain), plugin_stage_count(&view.engine.config, chain), false)
-            + GAP;
+        h += assign_row_h(
+            is_plugin_assign(chain),
+            &plugin_stages(&view.engine.config, chain),
+            false,
+        ) + GAP;
     }
     h += Layout::HEADER_BUTTON + GAP;
     h += 8.0;
@@ -167,8 +171,8 @@ fn mix_content_h(view: &SidebarView<'_>) -> f32 {
     h += 18.0 + 12.0;
     if let Some(lane) = view.selected_lane {
         let chain = view.mix.and_then(|m| m.track(lane)).and_then(|t| t.effect_chain);
-        let stages = plugin_stage_count(&view.engine.config, chain);
-        h += assign_row_h(false, stages, chain.is_some()) + CARD_GAP;
+        h += assign_row_h(false, &plugin_stages(&view.engine.config, chain), chain.is_some())
+            + CARD_GAP;
         if chain.is_some_and(|c| c.kind == ChainKind::Hardware) {
             h += Layout::HEADER_BUTTON + CARD_GAP;
         }
@@ -221,9 +225,13 @@ fn paint_record(
             SidebarHit::AssignReturn { lane },
             None,
             true,
+            view.thumbs,
         );
-        *y += assign_row_h(is_plugin_assign(chain), plugin_stage_count(&view.engine.config, chain), false)
-            + GAP;
+        *y += assign_row_h(
+            is_plugin_assign(chain),
+            &plugin_stages(&view.engine.config, chain),
+            false,
+        ) + GAP;
     }
 
     let open = Rect { x: inner_x, y: *y, w: inner_w, h: Layout::HEADER_BUTTON };
@@ -237,7 +245,8 @@ const PICKER_GAP: f32 = 4.0;
 const LABEL_H: f32 = 16.0;
 const MENU_H: f32 = 24.0;
 const STAGE_GAP: f32 = 6.0;
-const OPEN_W: f32 = 52.0;
+const THUMB_W: f32 = 112.0;
+const THUMB_H: f32 = 63.0;
 
 fn record_lanes(view: &SidebarView<'_>) -> Vec<ReturnLane> {
     let mut lanes = view.engine.config.visible_send_lanes();
@@ -245,13 +254,21 @@ fn record_lanes(view: &SidebarView<'_>) -> Vec<ReturnLane> {
     lanes
 }
 
-fn assign_inner_h(playback: bool, stages: usize, clear: bool) -> f32 {
+fn stage_row_h(stage: &analog::PluginStage) -> f32 {
+    if stage.is_loaded() {
+        THUMB_H + STAGE_GAP
+    } else {
+        MENU_H + STAGE_GAP
+    }
+}
+
+fn assign_inner_h(playback: bool, stages: &[analog::PluginStage], clear: bool) -> f32 {
     let mut h = LABEL_H + PICKER_GAP + MENU_H;
     if playback {
         h += 8.0 + LABEL_H + PICKER_GAP + MENU_H;
     }
-    if stages > 0 {
-        h += 8.0 + stages as f32 * (MENU_H + STAGE_GAP);
+    if !stages.is_empty() {
+        h += 8.0 + stages.iter().map(stage_row_h).sum::<f32>();
     }
     if clear {
         h += 14.0;
@@ -261,16 +278,12 @@ fn assign_inner_h(playback: bool, stages: usize, clear: bool) -> f32 {
     h
 }
 
-fn assign_row_h(playback: bool, stages: usize, clear: bool) -> f32 {
+fn assign_row_h(playback: bool, stages: &[analog::PluginStage], clear: bool) -> f32 {
     Layout::MODULE_PAD * 2.0 + assign_inner_h(playback, stages, clear)
 }
 
 fn is_plugin_assign(chain: Option<analog::ChainRef>) -> bool {
     chain.is_some_and(|r| r.kind == ChainKind::Plugin)
-}
-
-fn plugin_stage_count(config: &analog::SessionConfig, chain: Option<analog::ChainRef>) -> usize {
-    plugin_stages(config, chain).len()
 }
 
 fn plugin_stages(
@@ -311,20 +324,21 @@ fn paint_assign_row(
     assign: SidebarHit,
     clear: Option<SidebarHit>,
     show_playback: bool,
+    thumbs: &std::collections::HashSet<uuid::Uuid>,
 ) {
     let (label, kind) = match chain {
         Some(r) => {
             let name = config.chain_title(r);
             let kind = match r.kind {
                 ChainKind::Hardware => "Hardware",
-                ChainKind::Plugin => "Plugins",
+                ChainKind::Plugin => "Plugin",
             };
             (name, kind)
         }
         None => ("No effect".into(), ""),
     };
     let playback = show_playback && is_plugin_assign(chain);
-    let stages = plugin_stage_count(config, chain);
+    let stages = plugin_stages(config, chain);
     let card_h = assign_row_h(playback, stages, clear.is_some() && chain.is_some());
     widgets::hardware_module(cmds, Rect { x, y, w, h: card_h });
     let x = x + Layout::MODULE_PAD;
@@ -369,22 +383,28 @@ fn paint_assign_row(
             }
         }
     }
-    for stage in plugin_stages(config, chain) {
+    for stage in stages {
         let loaded = stage.is_loaded();
+        let row_h = if loaded { THUMB_H } else { MENU_H };
         theme::text(
             cmds,
-            Rect { x, y: extra_y, w: w - OPEN_W - 6.0, h: MENU_H },
+            Rect {
+                x,
+                y: extra_y,
+                w: if loaded { (w - THUMB_W - 6.0).max(0.0) } else { w },
+                h: row_h,
+            },
             stage_label(stage),
             11.0,
             if loaded { theme::PRIMARY_TEXT } else { theme::TEXT_DIM },
             false,
         );
-        let open = Rect { x: x + w - OPEN_W, y: extra_y, w: OPEN_W, h: MENU_H };
-        widgets::hardware_pad_enabled(cmds, open, "Open", false, theme::PRIMARY_TEXT, loaded);
         if loaded {
-            hits.push((open, SidebarHit::OpenPlugin { id: stage.id }));
+            let thumb = Rect { x: x + w - THUMB_W, y: extra_y, w: THUMB_W, h: THUMB_H };
+            widgets::plugin_thumb(cmds, thumb, stage.id.as_u128(), thumbs.contains(&stage.id));
+            hits.push((thumb, SidebarHit::OpenPlugin { id: stage.id }));
         }
-        extra_y += MENU_H + STAGE_GAP;
+        extra_y += stage_row_h(stage);
     }
     if let Some(clear) = clear {
         if chain.is_some() {
@@ -498,8 +518,9 @@ fn paint_mix(
         SidebarHit::AssignMix,
         Some(SidebarHit::ClearMixChain),
         false,
+        view.thumbs,
     );
-    *y += assign_row_h(false, plugin_stage_count(&view.engine.config, chain), chain.is_some())
+    *y += assign_row_h(false, &plugin_stages(&view.engine.config, chain), chain.is_some())
         + CARD_GAP;
     if chain.is_some_and(|c| c.kind == ChainKind::Hardware) {
         let on = track.map(|t| t.hardware_chain_enabled).unwrap_or(true);
@@ -570,7 +591,11 @@ mod tests {
         )
     }
 
-    fn record_view<'a>(engine: &'a AnalogEngine, focus: &'a TextFocus) -> SidebarView<'a> {
+    fn record_view<'a>(
+        engine: &'a AnalogEngine,
+        focus: &'a TextFocus,
+        thumbs: &'a std::collections::HashSet<uuid::Uuid>,
+    ) -> SidebarView<'a> {
         SidebarView {
             page: Page::Record,
             engine,
@@ -583,6 +608,7 @@ mod tests {
             scroll: 0.0,
             focus,
             caret: false,
+            thumbs,
         }
     }
 
@@ -601,7 +627,8 @@ mod tests {
         engine.config.hardware_effects.clear();
         engine.config.plugins.clear();
         let focus = TextFocus::None;
-        let view = record_view(&engine, &focus);
+        let thumbs = std::collections::HashSet::new();
+        let view = record_view(&engine, &focus, &thumbs);
         let (cmds, hits) = paint(&view, 1200.0, 800.0);
         let labels = texts(&cmds);
         assert!(labels.contains(&"SETTINGS"), "{labels:?}");
@@ -630,7 +657,8 @@ mod tests {
         let id = engine.config.plugin_chains[0].id;
         engine.config.set_return_chain(ReturnLane::SendB, Some(analog::ChainRef::plugin(id)));
         let focus = TextFocus::None;
-        let view = record_view(&engine, &focus);
+        let thumbs = std::collections::HashSet::new();
+        let view = record_view(&engine, &focus, &thumbs);
         let (cmds, hits) = paint(&view, 1200.0, 800.0);
         let labels = texts(&cmds);
         assert!(labels.contains(&"Software playback"), "{labels:?}");
@@ -659,11 +687,15 @@ mod tests {
         let stage = add_named_stage(&mut engine, chain, "Valhalla");
         engine.config.set_return_chain(ReturnLane::SendB, Some(analog::ChainRef::plugin(chain)));
         let focus = TextFocus::None;
-        let view = record_view(&engine, &focus);
+        let mut thumbs = std::collections::HashSet::new();
+        thumbs.insert(stage);
+        let view = record_view(&engine, &focus, &thumbs);
         let (cmds, hits) = paint(&view, 1200.0, 800.0);
         let labels = texts(&cmds);
         assert!(labels.contains(&"Valhalla"), "{labels:?}");
-        assert!(labels.iter().any(|t| t.eq_ignore_ascii_case("OPEN")), "{labels:?}");
+        assert!(!labels.contains(&"Edit"), "{labels:?}");
+        assert!(!labels.iter().any(|t| t.eq_ignore_ascii_case("OPEN")), "{labels:?}");
+        assert!(cmds.iter().any(|c| matches!(c, DrawCmd::Thumb { id, .. } if *id == stage.as_u128())));
         assert!(hits.iter().any(|(_, h)| matches!(h, SidebarHit::OpenPlugin { id } if *id == stage)));
         let hardware_lane = engine.config.chain_ref(ReturnLane::SendA);
         assert!(hardware_lane.is_some_and(|r| r.kind == ChainKind::Hardware));
@@ -681,6 +713,7 @@ mod tests {
             track.effect_chain = Some(analog::ChainRef::plugin(chain));
         }
         let focus = TextFocus::None;
+        let thumbs = std::collections::HashSet::new();
         let view = SidebarView {
             page: Page::Mix,
             engine: &engine,
@@ -693,11 +726,14 @@ mod tests {
             scroll: 0.0,
             focus: &focus,
             caret: false,
+            thumbs: &thumbs,
         };
         let (cmds, hits) = paint(&view, 1200.0, 800.0);
         let labels = texts(&cmds);
         assert!(labels.contains(&"Valhalla"), "{labels:?}");
+        assert!(labels.contains(&"Edit"), "{labels:?}");
         assert!(!labels.contains(&"Software playback"), "{labels:?}");
+        assert!(!cmds.iter().any(|c| matches!(c, DrawCmd::Thumb { .. })));
         assert!(hits.iter().any(|(_, h)| matches!(h, SidebarHit::OpenPlugin { id } if *id == stage)));
     }
 
@@ -715,13 +751,15 @@ mod tests {
         });
         engine.config.set_return_chain(ReturnLane::SendB, Some(analog::ChainRef::plugin(chain)));
         let focus = TextFocus::None;
-        let view = record_view(&engine, &focus);
+        let thumbs = std::collections::HashSet::new();
+        let view = record_view(&engine, &focus, &thumbs);
         let (cmds, hits) = paint(&view, 1200.0, 800.0);
         let labels = texts(&cmds);
         assert!(labels.contains(&"Big reverb"), "{labels:?}");
         assert!(labels.contains(&"No plugin"), "{labels:?}");
         assert!(!labels.contains(&"FX A"), "{labels:?}");
-        assert!(labels.iter().any(|t| t.eq_ignore_ascii_case("OPEN")), "{labels:?}");
+        assert!(!labels.contains(&"Edit"), "{labels:?}");
+        assert!(!labels.iter().any(|t| t.eq_ignore_ascii_case("OPEN")), "{labels:?}");
         assert!(!hits.iter().any(|(_, h)| matches!(h, SidebarHit::OpenPlugin { .. })), "{hits:?}");
     }
 }

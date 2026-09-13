@@ -59,6 +59,7 @@ impl AnalogEngine {
         }
         if just_connected || saw_mix {
             self.sync_surface_from_total_mix();
+            self.isolate_plugin_playback_from_hardware();
         }
     }
 
@@ -734,6 +735,39 @@ impl AnalogEngine {
         for lane in ReturnLane::ALL {
             self.apply_return_mix(lane as i32);
         }
+        self.isolate_plugin_playback_from_hardware();
+    }
+
+    /// Plugin wet is written to a software-playback pair. TotalMix's default
+    /// 1:1 would also send that pair to the matching hardware output — Heat
+    /// sits on 5/6 in this session, which is also Galaxy's playback pair.
+    pub fn isolate_plugin_playback_from_hardware(&mut self) {
+        let main = self.config.main_output;
+        let outs: Vec<i32> = self
+            .config
+            .hardware_io_pairs()
+            .into_iter()
+            .filter(|out| *out != main)
+            .collect();
+        let pairs: Vec<i32> = self
+            .config
+            .plugin_chains
+            .iter()
+            .map(|c| c.return_channel)
+            .filter(|pb| *pb >= 0)
+            .collect();
+        for pb in pairs {
+            for &out in &outs {
+                self.write_playback_send(pb, out, 0.0);
+            }
+        }
+    }
+
+    fn write_playback_send(&mut self, playback: i32, dest: i32, value: f32) {
+        let channel = ChannelID::new(MixerBus::Playback, playback);
+        self.mixer.set_send(channel, dest, value);
+        self.osc.send_float(mix_fader_lin(MixerBus::Playback.osc(), playback, dest), value);
+        self.osc.send_float(mix_fader(MixerBus::Playback.osc(), playback, dest), fader_db(value));
     }
 
     pub fn apply_return_mix(&mut self, id: i32) {

@@ -43,6 +43,7 @@ extern "C" {
     ) -> MixLinkVST3Ref;
     pub fn MixLinkVST3ShowEditor(instance: MixLinkVST3Ref, title: *const std::ffi::c_void);
     pub fn MixLinkVST3CloseEditor(instance: MixLinkVST3Ref);
+    pub fn MixLinkVST3CaptureEditor(instance: MixLinkVST3Ref) -> *const std::ffi::c_void;
     pub fn MixLinkVST3HasEditor(instance: MixLinkVST3Ref) -> i32;
     pub fn MixLinkVST3SetTempo(instance: MixLinkVST3Ref, bpm: f64);
     pub fn MixLinkVST3ScanPlugins() -> *const std::ffi::c_void;
@@ -178,6 +179,40 @@ pub fn show_editor(instance: MixLinkVST3Ref, title: &str) {
 pub fn close_editor(instance: MixLinkVST3Ref) {
     if !instance.is_null() {
         unsafe { MixLinkVST3CloseEditor(instance) }
+    }
+}
+
+/// PNG of the open editor, or the last snapshot from before it closed.
+pub fn capture_editor(instance: MixLinkVST3Ref) -> Option<Vec<u8>> {
+    if instance.is_null() {
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::ptr::NonNull;
+
+        use objc2::rc::Id;
+        use objc2_foundation::NSData;
+
+        let ptr = unsafe { MixLinkVST3CaptureEditor(instance) };
+        if ptr.is_null() {
+            return None;
+        }
+        let data = unsafe { Id::<NSData>::retain(ptr as *mut NSData) }?;
+        let len = data.length() as usize;
+        if len == 0 {
+            return None;
+        }
+        let mut out = vec![0u8; len];
+        unsafe {
+            data.getBytes_length(NonNull::new_unchecked(out.as_mut_ptr().cast()), len as _);
+        }
+        Some(out)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = instance;
+        None
     }
 }
 
