@@ -482,13 +482,15 @@ impl AppState {
         let returns_changed =
             self.surface.analog.config.apply_project_return_chains(&meta.return_chains);
         if catalog_changed || returns_changed {
-            self.surface.analog.rewrite_all_sends();
-            self.surface.analog.apply_all_returns();
+            // Routing only. rewrite_all_sends / apply_all_returns would push the
+            // default-0 surface into TotalMix and wipe sends and returns.
             self.surface.analog.persist();
         }
         if self.surface.analog.apply_project_strips(&meta.strips) {
             self.surface.analog.persist();
         }
+        // Project routing can retarget send lanes after AnalogEngine::new.
+        self.surface.analog.restore_software_levels();
         self.set_tempo(meta.tempo);
         self.timeline.grid = meta.grid;
         self.timeline.grid_enabled = meta.grid_enabled;

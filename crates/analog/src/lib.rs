@@ -15,8 +15,8 @@ pub use surface::{SurfaceState, TrackControlMode};
 pub use types::{
     unique_copy_name, ChainKind, ChainRef, ChannelID, EffectRef, HardwareChain, HardwareEffect,
     HardwarePreset, MixAssign, MixEvent, MixLane, MixNode, MixerBus, MixerChannel, PluginChain,
-    PluginSlot, PluginStage, ReturnLane, ReturnLaneConfig, ReturnStrip, RoutingSlot,
-    SendDestination, StripBinding, StripName, SurfaceStrip, ALL_SEND_LANES, BUS_LANES,
+    PluginSlot, PluginStage, PluginStripSends, ReturnLane, ReturnLaneConfig, ReturnStrip,
+    RoutingSlot, SendDestination, StripBinding, StripName, SurfaceStrip, ALL_SEND_LANES, BUS_LANES,
     MAX_PLUGIN_STAGES, MAX_SEND_COUNT, SEND_LANES,
 };
 pub use xl::{apply_xl, XlEffect, XlRuntime};
@@ -30,12 +30,31 @@ mod tests {
     };
 
     fn test_engine() -> AnalogEngine {
-        let config = SessionConfig::new();
+        engine_from_config(SessionConfig::new())
+    }
+
+    fn engine_from_config(config: SessionConfig) -> AnalogEngine {
         let mut mixer = MixerState::new();
         mixer.monitored_output = config.main_output;
         let mut surface = SurfaceState::new();
         surface.load_returns(&config);
         AnalogEngine::new(mixer, surface, config, OscSession::new())
+    }
+
+    fn assign_plugin_send(engine: &mut AnalogEngine, lane: ReturnLane, name: &str, playback: i32) {
+        let idx = match lane {
+            ReturnLane::SendC => 1,
+            _ => 0,
+        };
+        let chain = &mut engine.config.plugin_chains[idx];
+        chain.return_channel = playback;
+        if !chain.stages.iter().any(|s| s.name == name) {
+            let mut stage = PluginStage::new(name);
+            stage.bundle_path = Some(format!("/tmp/{name}.vst3"));
+            chain.stages.push(stage);
+        }
+        let id = chain.id;
+        engine.config.set_return_chain(lane, Some(ChainRef::plugin(id)));
     }
 
     #[test]
@@ -563,6 +582,252 @@ mod tests {
             m.address == format!("/mix/in/{}/{}/faderlin", src.index, dest)
                 && (m.values[0].float_value() - 0.6).abs() < 1e-5
         }));
+    }
+
+    #[test]
+    fn silent_unreported_nodes_leave_totalmix_alone() {
+        let mut engine = test_engine();
+        let dest = engine.config.main_output;
+        let src = engine.config.strips[0].channel_id();
+        let bus1 = engine.config.listen_output(MixAssign::Bus1).unwrap();
+        engine.mixer.set_send(src, bus1, 0.77);
+        engine.mixer.set_send(src, dest, 0.0);
+        engine.surface.strips[0].fader = 0.0;
+        engine.surface.strips[0].assign = MixAssign::Main;
+        engine.push_unreported_volumes();
+        assert!(
+            (engine.mixer.send_level(src, bus1) - 0.77).abs() < 1e-5,
+            "dump backfill must not zero a Bus send TotalMix still has"
+        );
+        assert!(!engine.osc.sent_messages().iter().any(|m| {
+            m.address.contains(&format!("/{}/faderlin", bus1))
+                || m.address.contains(&format!("/{dest}/faderlin"))
+        }));
+    }
+
+    #[test]
+    fn dump_restores_sends_and_plugin_return_without_writing_zero() {
+        let mut engine = test_engine();
+        let mut stage = PluginStage::new("Galaxy");
+        stage.bundle_path = Some("/tmp/Galaxy.vst3".into());
+        engine.config.plugin_chains[0].return_channel = 4;
+        engine.config.plugin_chains[0].stages.push(stage);
+        let galaxy = engine.config.plugin_chains[0].id;
+        engine.config.set_return_chain(ReturnLane::SendC, Some(ChainRef::plugin(galaxy)));
+
+        let src = engine.config.strips[0].channel_id();
+        let main = engine.config.main_output;
+        let send_a = engine.config.hardware_output(ReturnLane::SendA).expect("Send A hardware");
+        let fader = 0.8;
+        let send = 0.5;
+        let post = post_fader_lin(send, fader);
+        let return_level = 0.66;
+
+        ingest_mix(&mut engine, &format!("/mix/in/{}/{}/faderlin", src.index, main), fader);
+        ingest_mix(&mut engine, &format!("/mix/in/{}/{}/faderlin", src.index, send_a), post);
+        ingest_mix(&mut engine, &format!("/mix/pb/4/{main}/faderlin"), return_level);
+        engine.sync_surface_from_total_mix();
+        engine.push_unreported_volumes();
+
+        assert!((engine.surface.strips[0].fader - fader).abs() < 1e-5);
+        assert!((engine.surface.strips[0].aux(ReturnLane::SendA) - send).abs() < 1e-5);
+        let galaxy_fader = engine
+            .surface
+            .returns
+            .iter()
+            .find(|r| r.id == ReturnLane::SendC as i32)
+            .map(|r| r.fader)
+            .unwrap_or(0.0);
+        assert!((galaxy_fader - return_level).abs() < 1e-5);
+        assert!(
+            engine.osc.sent_messages().is_empty(),
+            "dump backfill must not push MixLink's default-0 surface: {:?}",
+            engine.osc.sent_messages()
+        );
+        assert!((engine.mixer.send_level(src, send_a) - post).abs() < 1e-5);
+        assert!(
+            (engine.mixer.send_level(ChannelID::new(MixerBus::Playback, 4), main) - return_level)
+                .abs()
+                < 1e-5
+        );
+    }
+
+    #[test]
+    fn plugin_sends_survive_restart_hardware_send_comes_from_dump() {
+        let mut engine = test_engine();
+        assign_plugin_send(&mut engine, ReturnLane::SendB, "Shimmerer", 2);
+        assign_plugin_send(&mut engine, ReturnLane::SendC, "Galaxy", 4);
+        engine.apply_aux(0, ReturnLane::SendA, 0.4);
+        engine.apply_aux(0, ReturnLane::SendB, 0.55);
+        engine.apply_aux(1, ReturnLane::SendC, 0.31);
+        engine.apply_return_fader(ReturnLane::SendC as i32, 0.66);
+        engine.apply_return_fader(ReturnLane::SendA as i32, 0.8);
+
+        let json = serde_json::to_value(&engine.config).unwrap();
+        let sends = json.get("pluginSends").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        assert_eq!(sends.len(), 2, "{sends:?}");
+        assert_eq!(sends[0]["id"], 0);
+        assert!((sends[0]["auxB"].as_f64().unwrap() - 0.55).abs() < 1e-5);
+        assert!(sends[0].get("auxA").is_none(), "hardware Send A must not persist: {sends:?}");
+        assert_eq!(sends[1]["id"], 1);
+        assert!((sends[1]["auxC"].as_f64().unwrap() - 0.31).abs() < 1e-5);
+        let heat = engine.config.returns.iter().find(|r| r.id == ReturnLane::SendA as i32);
+        assert!(
+            heat.is_none_or(|r| r.fader == 0.0),
+            "hardware Heat return must not persist: {heat:?}"
+        );
+        let json = serde_json::to_string(&engine.config).unwrap();
+
+        let config: SessionConfig = serde_json::from_str(&json).unwrap();
+        let mut restarted = engine_from_config(config);
+        assert!((restarted.surface.strips[0].aux(ReturnLane::SendB) - 0.55).abs() < 1e-5);
+        assert!((restarted.surface.strips[1].aux(ReturnLane::SendC) - 0.31).abs() < 1e-5);
+        assert_eq!(restarted.surface.strips[0].aux(ReturnLane::SendA), 0.0);
+        let galaxy = restarted
+            .surface
+            .returns
+            .iter()
+            .find(|r| r.id == ReturnLane::SendC as i32)
+            .map(|r| r.fader)
+            .unwrap_or(0.0);
+        assert!((galaxy - 0.66).abs() < 1e-5);
+
+        let src = restarted.config.strips[0].channel_id();
+        let send_a = restarted.config.hardware_output(ReturnLane::SendA).expect("Send A hardware");
+        let main = restarted.config.main_output;
+        let fader = 0.8;
+        let send = 0.42;
+        let post = post_fader_lin(send, fader);
+        ingest_mix(&mut restarted, &format!("/mix/in/{}/{}/faderlin", src.index, main), fader);
+        ingest_mix(&mut restarted, &format!("/mix/in/{}/{}/faderlin", src.index, send_a), post);
+        restarted.sync_surface_from_total_mix();
+        restarted.pull_send_levels_from_total_mix(None, None, true);
+        restarted.push_unreported_volumes();
+
+        assert!((restarted.surface.strips[0].aux(ReturnLane::SendA) - send).abs() < 1e-5);
+        assert!((restarted.surface.strips[0].aux(ReturnLane::SendB) - 0.55).abs() < 1e-5);
+        assert!((restarted.surface.strips[1].aux(ReturnLane::SendC) - 0.31).abs() < 1e-5);
+        assert!(
+            (restarted
+                .surface
+                .returns
+                .iter()
+                .find(|r| r.id == ReturnLane::SendC as i32)
+                .map(|r| r.fader)
+                .unwrap_or(0.0)
+                - 0.66)
+                .abs()
+                < 1e-5
+        );
+        assert!(
+            !restarted.osc.sent_messages().iter().any(|m| {
+                m.address.contains("faderlin") && m.values[0].float_value() <= LIN_EPS
+            }),
+            "dump backfill must not write 0: {:?}",
+            restarted.osc.sent_messages()
+        );
+    }
+
+    #[test]
+    fn dump_plugin_return_wins_when_totalmix_reports_it() {
+        let mut engine = test_engine();
+        assign_plugin_send(&mut engine, ReturnLane::SendC, "Galaxy", 4);
+        engine.apply_return_fader(ReturnLane::SendC as i32, 0.66);
+        let json = serde_json::to_string(&engine.config).unwrap();
+        let mut restarted = engine_from_config(serde_json::from_str(&json).unwrap());
+        let main = restarted.config.main_output;
+        ingest_mix(&mut restarted, &format!("/mix/pb/4/{main}/faderlin"), 0.5);
+        restarted.sync_surface_from_total_mix();
+        let galaxy = restarted
+            .surface
+            .returns
+            .iter()
+            .find(|r| r.id == ReturnLane::SendC as i32)
+            .map(|r| r.fader)
+            .unwrap_or(0.0);
+        assert!((galaxy - 0.5).abs() < 1e-5);
+        assert!(
+            (restarted.config.return_lane(ReturnLane::SendC as i32).map(|r| r.fader).unwrap_or(0.0)
+                - 0.5)
+                .abs()
+                < 1e-5
+        );
+    }
+
+    #[test]
+    fn dump_infers_bus_assign_before_pulling_fader() {
+        let mut engine = test_engine();
+        let src = engine.config.strips[0].channel_id();
+        let bus1 = engine.config.listen_output(MixAssign::Bus1).unwrap();
+        ingest_mix(&mut engine, &format!("/mix/in/{}/{}/faderlin", src.index, bus1), 0.7);
+        engine.surface.strips[0].assign = MixAssign::Main;
+        engine.surface.strips[0].fader = 0.0;
+        engine.sync_surface_from_total_mix();
+        assert_eq!(engine.surface.strips[0].assign, MixAssign::Bus1);
+        assert!((engine.surface.strips[0].fader - 0.7).abs() < 1e-5);
+        assert!(engine.osc.sent_messages().is_empty());
+    }
+
+    #[test]
+    fn backfill_does_not_zero_other_assign_dests() {
+        let mut engine = test_engine();
+        let src = engine.config.strips[0].channel_id();
+        let bus1 = engine.config.listen_output(MixAssign::Bus1).unwrap();
+        engine.mixer.set_send(src, bus1, 0.77);
+        engine.surface.strips[0].fader = 0.6;
+        engine.surface.strips[0].assign = MixAssign::Main;
+        engine.push_unreported_volumes();
+        assert!(
+            (engine.mixer.send_level(src, bus1) - 0.77).abs() < 1e-5,
+            "backfill must not write_assign_sends (zeros Bus dests)"
+        );
+        assert!(!engine.osc.sent_messages().iter().any(|m| {
+            m.address.contains(&format!("/{}/faderlin", bus1)) && m.values[0].float_value() == 0.0
+        }));
+    }
+
+    #[test]
+    fn isolate_playback_skips_main_and_unreported() {
+        let mut engine = test_engine();
+        let heat = engine.config.mix_bus1;
+        let main = engine.config.main_output;
+        engine.config.plugin_chains[0].return_channel = heat;
+        let src = ChannelID::new(MixerBus::Playback, heat);
+        engine.mixer.set_send(src, heat, 1.0);
+        engine.mixer.set_send(src, main, 0.75);
+        engine.isolate_plugin_playback_from_hardware();
+        assert_eq!(engine.mixer.send_level(src, heat), 0.0);
+        assert!((engine.mixer.send_level(src, main) - 0.75).abs() < 1e-5);
+        assert!(!engine.osc.sent_messages().iter().any(|m| {
+            m.address == format!("/mix/pb/{heat}/{main}/faderlin")
+        }));
+    }
+
+    #[test]
+    fn apply_all_returns_from_zero_surface_would_wipe_plugin_return() {
+        let mut engine = test_engine();
+        let mut stage = PluginStage::new("Galaxy");
+        stage.bundle_path = Some("/tmp/Galaxy.vst3".into());
+        engine.config.plugin_chains[0].return_channel = 4;
+        engine.config.plugin_chains[0].stages.push(stage);
+        let galaxy = engine.config.plugin_chains[0].id;
+        engine.config.set_return_chain(ReturnLane::SendC, Some(ChainRef::plugin(galaxy)));
+        let main = engine.config.main_output;
+        let src = ChannelID::new(MixerBus::Playback, 4);
+        engine.mixer.set_send(src, main, 0.66);
+        engine.apply_all_returns();
+        assert_eq!(
+            engine.mixer.send_level(src, main),
+            0.0,
+            "boot must not call apply_all_returns with a default-0 surface"
+        );
+    }
+
+    fn ingest_mix(engine: &mut AnalogEngine, addr: &str, value: f32) {
+        match apply_inbound(&mut engine.mixer, addr, &osc::OscValue::Float(value)) {
+            Some(MixEvent::Mix(node)) => engine.apply_inbound_mix(&node),
+            other => panic!("expected mix event for {addr}, got {other:?}"),
+        }
     }
 
     #[test]

@@ -66,7 +66,9 @@ impl AppState {
         }
         osc.send_dump_requests();
         let mut analog = AnalogEngine::new(mixer, surface_state, config.clone(), osc);
-        analog.apply_all_returns();
+        // Isolate only. apply_all_returns would write the default-0 surface
+        // into TotalMix (−∞ on Galaxy / Heat / hardware returns).
+        analog.isolate_plugin_playback_from_hardware();
 
         let (engine, handles) = Engine::new(48_000);
         let engine_leaked: &'static mut Engine = Box::leak(Box::new(engine));

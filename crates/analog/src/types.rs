@@ -559,6 +559,64 @@ impl SurfaceStrip {
     }
 }
 
+fn is_zero_f32(v: &f32) -> bool {
+    *v == 0.0
+}
+
+/// Per-strip plugin-send aux. Keys match [`SurfaceStrip`] (`auxA`…`auxF`).
+/// Hardware send knobs are not stored — TotalMix is that mix.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginStripSends {
+    pub id: i32,
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub aux_a: f32,
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub aux_b: f32,
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub aux_c: f32,
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub aux_d: f32,
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub aux_e: f32,
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub aux_f: f32,
+}
+
+impl PluginStripSends {
+    pub fn new(id: i32) -> Self {
+        Self { id, ..Self::default() }
+    }
+
+    pub fn aux(&self, lane: ReturnLane) -> f32 {
+        match lane {
+            ReturnLane::SendA => self.aux_a,
+            ReturnLane::SendB => self.aux_b,
+            ReturnLane::SendC => self.aux_c,
+            ReturnLane::SendD => self.aux_d,
+            ReturnLane::SendE => self.aux_e,
+            ReturnLane::SendF => self.aux_f,
+            ReturnLane::Bus1 | ReturnLane::Bus2 => 0.0,
+        }
+    }
+
+    pub fn set_aux(&mut self, value: f32, lane: ReturnLane) {
+        match lane {
+            ReturnLane::SendA => self.aux_a = value,
+            ReturnLane::SendB => self.aux_b = value,
+            ReturnLane::SendC => self.aux_c = value,
+            ReturnLane::SendD => self.aux_d = value,
+            ReturnLane::SendE => self.aux_e = value,
+            ReturnLane::SendF => self.aux_f = value,
+            ReturnLane::Bus1 | ReturnLane::Bus2 => {}
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        ALL_SEND_LANES.iter().all(|lane| self.aux(*lane) == 0.0)
+    }
+}
+
 impl Default for MixAssign {
     fn default() -> Self {
         Self::Main

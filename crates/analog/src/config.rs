@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use crate::types::{
     unique_copy_name, ChainRef, ChannelID, EffectRef, HardwareChain, HardwareEffect,
     HardwarePreset, MixAssign, MixLane, MixerBus, PluginChain, PluginSlot, PluginStage,
-    ReturnLane, ReturnLaneConfig, RoutingSlot, SendDestination, StripBinding, ALL_SEND_LANES,
-    MAX_PLUGIN_STAGES, MAX_SEND_COUNT,
+    PluginStripSends, ReturnLane, ReturnLaneConfig, RoutingSlot, SendDestination, StripBinding,
+    ALL_SEND_LANES, MAX_PLUGIN_STAGES, MAX_SEND_COUNT,
 };
 
 /// MixLink session. Field names are camelCase on the wire (`CodingKeys`).
@@ -54,6 +54,9 @@ pub struct SessionConfig {
     pub return_chains: HashMap<String, ChainRef>,
     #[serde(default = "ReturnLaneConfig::defaults")]
     pub returns: Vec<ReturnLaneConfig>,
+    /// Per-strip aux for `SendDestination::Plugin` lanes. Hardware sends live in TotalMix.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugin_sends: Vec<PluginStripSends>,
     #[serde(default = "default_effect_return_count")]
     pub effect_return_count: i32,
     #[serde(default)]
@@ -118,6 +121,7 @@ impl SessionConfig {
             plugin_chains: Self::default_plugin_chains(),
             return_chains,
             returns: ReturnLaneConfig::defaults(),
+            plugin_sends: Vec::new(),
             effect_return_count: 2,
             pan_knobs_control_send_c: false,
             sends_post_fader: true,
@@ -220,6 +224,38 @@ impl SessionConfig {
 
     pub fn return_lane(&self, id: i32) -> Option<&ReturnLaneConfig> {
         self.returns.iter().find(|r| r.id == id)
+    }
+
+    pub fn is_plugin_return(&self, lane: ReturnLane) -> bool {
+        matches!(
+            self.chain_ref(lane),
+            Some(ChainRef { kind: crate::types::ChainKind::Plugin, .. })
+        )
+    }
+
+    pub fn plugin_send(&self, strip: usize, lane: ReturnLane) -> Option<f32> {
+        self.plugin_sends.iter().find(|r| r.id == strip as i32).map(|r| r.aux(lane))
+    }
+
+    pub fn set_plugin_send(&mut self, strip: usize, lane: ReturnLane, value: f32) {
+        let id = strip as i32;
+        let empty = if let Some(row) = self.plugin_sends.iter_mut().find(|r| r.id == id) {
+            row.set_aux(value, lane);
+            Some(row.is_empty())
+        } else {
+            None
+        };
+        match empty {
+            Some(true) => self.plugin_sends.retain(|r| r.id != id),
+            Some(false) => {}
+            None if value != 0.0 => {
+                let mut row = PluginStripSends::new(id);
+                row.set_aux(value, lane);
+                self.plugin_sends.push(row);
+                self.plugin_sends.sort_by_key(|r| r.id);
+            }
+            None => {}
+        }
     }
 
     pub fn visible_send_lanes(&self) -> Vec<ReturnLane> {
@@ -960,8 +996,24 @@ impl SessionConfig {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Ok(data) = serde_json::to_vec(self) {
+        let mut wire = self.clone();
+        wire.clear_persisted_hardware_levels();
+        if let Ok(data) = serde_json::to_vec(&wire) {
             let _ = std::fs::write(path, data);
+        }
+    }
+
+    /// Hardware mixer levels live in TotalMix. Do not write them into the session map.
+    fn clear_persisted_hardware_levels(&mut self) {
+        for i in 0..self.returns.len() {
+            let id = self.returns[i].id;
+            let Some(lane) = ReturnLane::from_i32(id) else {
+                continue;
+            };
+            if self.is_plugin_return(lane) {
+                continue;
+            }
+            self.returns[i].fader = 0.0;
         }
     }
 

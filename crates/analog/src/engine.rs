@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use osc::{
     balpan_to_pan_unit, fader_db, fader_lin_to_amp, mix_balpan, mix_fader, mix_fader_lin,
     pan_unit_to_balpan, post_fader_lin, send_lin_from_post, strip_mute, strip_solo, OscSession,
-    OscValue, FADER_LIN_0DB,
+    OscValue, FADER_LIN_0DB, LIN_EPS,
 };
 
 use crate::config::SessionConfig;
@@ -34,7 +34,33 @@ impl AnalogEngine {
         config: SessionConfig,
         osc: OscSession,
     ) -> Self {
-        Self { mixer, surface, config, osc, mix_backfill_at: None }
+        let mut engine = Self { mixer, surface, config, osc, mix_backfill_at: None };
+        engine.restore_software_levels();
+        engine
+    }
+
+    /// Plugin send knobs and plugin-return faders live in MixLink, not TotalMix.
+    /// Restore them before the dump so hardware pull cannot start from zeros.
+    pub fn restore_software_levels(&mut self) {
+        for i in 0..self.surface.strips.len() {
+            for lane in ALL_SEND_LANES {
+                if !matches!(self.config.send_destination(lane), Some(SendDestination::Plugin(_))) {
+                    continue;
+                }
+                if let Some(value) = self.config.plugin_send(i, lane) {
+                    self.surface.strips[i].set_aux(value, lane);
+                }
+            }
+        }
+        for lane in ReturnLane::ALL {
+            if !self.config.is_plugin_return(lane) {
+                continue;
+            }
+            let Some(fader) = self.config.return_lane(lane as i32).map(|r| r.fader) else {
+                continue;
+            };
+            self.upsert_return(lane as i32, |r| r.fader = fader);
+        }
     }
 
     /// Drain inbound OSC. Sets `mixer.connected` from the session flag.
@@ -89,7 +115,8 @@ impl AnalogEngine {
         self.mix_backfill_at = Some(Instant::now() + MIX_BACKFILL_SETTLE);
     }
 
-    /// Write the on-screen volume for every mix node TotalMix did not report.
+    /// Push MixLink values TotalMix never mentioned. TotalMix omits silent
+    /// nodes — never invent 0, or a restart would wipe the hardware mix.
     pub fn push_unreported_volumes(&mut self) {
         for i in 0..self.surface.strips.len() {
             if !self.config.is_strip_enabled(i)
@@ -103,8 +130,11 @@ impl AnalogEngine {
                 let Some(SendDestination::Output(index)) = dest else {
                     continue;
                 };
-                if self.strip_send_unreported(i, index) {
-                    let value = self.aux_write_level(i, self.surface.strips[i].aux(lane));
+                if !self.strip_send_unreported(i, index) {
+                    continue;
+                }
+                let value = self.aux_write_level(i, self.surface.strips[i].aux(lane));
+                if value > LIN_EPS {
                     self.write_aux(i, dest, value);
                 }
             }
@@ -117,7 +147,17 @@ impl AnalogEngine {
                 continue;
             };
             let id = ChannelID::new(source.0, source.1);
-            if !self.mixer.send_reported(id, self.config.main_output) {
+            if self.mixer.send_reported(id, self.config.main_output) {
+                continue;
+            }
+            let level = self
+                .surface
+                .returns
+                .iter()
+                .find(|r| r.id == lane as i32)
+                .map(|r| r.fader)
+                .unwrap_or(0.0);
+            if level > LIN_EPS {
                 self.apply_return_mix(lane as i32);
             }
         }
@@ -128,21 +168,12 @@ impl AnalogEngine {
             return;
         };
         let assign = s.assign;
-        if let Some(dest) = self.config.listen_output(assign) {
-            if self.strip_send_unreported(strip, dest) {
-                self.write_assign_sends(strip);
-                return;
-            }
-        }
-        for other in MixAssign::ALL {
-            if other == assign {
-                continue;
-            }
-            if let Some(dest) = self.config.listen_output(other) {
-                if self.strip_send_unreported(strip, dest) {
-                    self.zero_assign_dest(strip, dest);
-                }
-            }
+        let Some(dest) = self.config.listen_output(assign) else {
+            return;
+        };
+        if self.strip_send_unreported(strip, dest) && s.fader > LIN_EPS {
+            // Write the assigned dest only. write_assign_sends zeros Bus1/Bus2.
+            self.write_send(strip, dest, s.fader);
         }
     }
 
@@ -224,14 +255,21 @@ impl AnalogEngine {
         if let Some(s) = self.surface.strips.get_mut(strip) {
             s.set_aux(value, lane);
         }
+        if matches!(self.config.send_destination(lane), Some(SendDestination::Plugin(_))) {
+            self.config.set_plugin_send(strip, lane, value);
+            self.persist();
+        }
         let dest = self.config.send_destination(lane);
         let written = self.aux_write_level(strip, value);
         self.write_aux(strip, dest, written);
     }
 
     pub fn apply_return_fader(&mut self, id: i32, value: f32) {
-        self.upsert_return(id, |r| r.fader = value);
+        self.set_return_fader_state(id, value);
         self.write_return_fader(id, value, None, None);
+        if ReturnLane::from_i32(id).is_some_and(|lane| self.config.is_plugin_return(lane)) {
+            self.persist();
+        }
     }
 
     pub fn apply_return_pan(&mut self, id: i32, value: f32) {
@@ -489,12 +527,52 @@ impl AnalogEngine {
 
     /// Copy TotalMix mix-matrix levels onto every on-screen control.
     pub fn sync_surface_from_total_mix(&mut self) {
+        self.infer_strip_assigns_from_sends();
         self.pull_strip_faders_from_sends();
         self.pull_strip_pans_from_sends();
         self.pull_send_levels_from_total_mix(None, None, false);
         self.pull_return_faders_from_sends();
         self.pull_return_pans_from_sends();
         self.pull_main_fader_from_total_mix();
+    }
+
+    /// Assign is routing, stored in TotalMix as which listen dest has the fader.
+    /// Session does not persist it — recover from the dump before pulling levels.
+    fn infer_strip_assigns_from_sends(&mut self) {
+        for i in 0..self.surface.strips.len() {
+            if !self.config.is_strip_enabled(i) {
+                continue;
+            }
+            if let Some(assign) = self.inferred_assign(i) {
+                self.surface.strips[i].assign = assign;
+            }
+        }
+    }
+
+    fn inferred_assign(&self, strip: usize) -> Option<MixAssign> {
+        let mut best: Option<(MixAssign, f32)> = None;
+        for assign in MixAssign::ALL {
+            let Some(dest) = self.config.listen_output(assign) else {
+                continue;
+            };
+            let mut level = None;
+            for src in self.osc_sources(strip) {
+                if let Some(v) = self.mixer.send_level_if_present(src, dest) {
+                    level = Some(v);
+                    break;
+                }
+            }
+            let Some(level) = level else {
+                continue;
+            };
+            if level <= LIN_EPS {
+                continue;
+            }
+            if best.is_none_or(|(_, prev)| level > prev) {
+                best = Some((assign, level));
+            }
+        }
+        best.map(|(assign, _)| assign)
     }
 
     /// TotalMix send from this strip into the Main mix (`main_output`).
@@ -656,9 +734,7 @@ impl AnalogEngine {
                     _ => None,
                 };
                 if index.is_none() {
-                    if reset_unreadable {
-                        self.surface.strips[i].set_aux(0.0, *send_lane);
-                    }
+                    // Plugin dest has no TotalMix mix node. Never wipe MixLink engine gains.
                     continue;
                 }
                 let index = index.unwrap();
@@ -858,8 +934,11 @@ impl AnalogEngine {
             .filter(|pb| *pb >= 0)
             .collect();
         for pb in pairs {
+            let src = ChannelID::new(MixerBus::Playback, pb);
             for &out in &outs {
-                self.write_playback_send(pb, out, 0.0);
+                if self.mixer.send_level_if_present(src, out).is_some_and(|v| v > LIN_EPS) {
+                    self.write_playback_send(pb, out, 0.0);
+                }
             }
         }
     }
@@ -978,6 +1057,13 @@ impl AnalogEngine {
 
     fn set_return_fader_state(&mut self, id: i32, value: f32) {
         self.upsert_return(id, |r| r.fader = value);
+        let Some(lane) = ReturnLane::from_i32(id) else {
+            return;
+        };
+        if !self.config.is_plugin_return(lane) {
+            return;
+        }
+        self.config.ensure_return_lane(lane);
         if let Some(row) = self.config.returns.iter_mut().find(|r| r.id == id) {
             row.fader = value;
         }
@@ -1253,8 +1339,9 @@ impl AnalogEngine {
         if let Some(dest) = self.config.send_destination(lane) {
             self.clear_send_mix(dest);
         }
-        for strip in &mut self.surface.strips {
-            strip.set_aux(0.0, lane);
+        for i in 0..self.surface.strips.len() {
+            self.surface.strips[i].set_aux(0.0, lane);
+            self.config.set_plugin_send(i, lane, 0.0);
         }
         self.config.set_return_chain(lane, None);
         self.config.effect_return_count -= 1;
