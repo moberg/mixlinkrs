@@ -70,6 +70,19 @@ pub fn hardware_pad(cmds: &mut Vec<DrawCmd>, rect: Rect, title: &str, on: bool, 
     theme::text_center(cmds, rect, title.to_uppercase(), 10.5, label, true);
 }
 
+pub fn hardware_pad_enabled(
+    cmds: &mut Vec<DrawCmd>,
+    rect: Rect,
+    title: &str,
+    on: bool,
+    accent: Color,
+    enabled: bool,
+) {
+    pad_face(cmds, rect, on && enabled, accent);
+    let label = if enabled { [1.0, 1.0, 1.0, 0.72] } else { theme::TEXT_DIM };
+    theme::text_center(cmds, rect, title.to_uppercase(), 10.5, label, true);
+}
+
 /// Header project dropdown: RECORD/MIX pad, left-aligned name, trailing chevron.
 pub fn chrome_menu_pad(cmds: &mut Vec<DrawCmd>, rect: Rect, title: &str, on: bool) {
     pad_face(cmds, rect, on, theme::PRIMARY_TEXT);
@@ -1063,6 +1076,20 @@ pub struct MenuItem {
     pub section: Option<String>,
 }
 
+impl MenuItem {
+    pub fn action(id: impl Into<String>, label: impl Into<String>, section: Option<String>) -> Self {
+        Self { id: id.into(), label: label.into(), checked: false, section }
+    }
+
+    pub fn info(label: impl Into<String>, section: impl Into<String>) -> Self {
+        Self { id: String::new(), label: label.into(), checked: false, section: Some(section.into()) }
+    }
+
+    pub fn is_action(&self) -> bool {
+        !self.id.is_empty()
+    }
+}
+
 /// MixLink `StripSourceMenu` / `ReturnEffectMenu` is SwiftUI `Menu` +
 /// `.menuStyle(.borderlessButton)` — native AppKit dark NSMenu. wgpu recreates that chrome.
 ///
@@ -1120,7 +1147,7 @@ pub fn popup_menu(cmds: &mut Vec<DrawCmd>, rect: Rect, items: &[MenuItem], hover
                 last_section = Some(sec);
             }
         }
-        if hover == Some(i) {
+        if hover == Some(i) && item.is_action() {
             cmds.push(DrawCmd::RoundedRect {
                 rect: Rect {
                     x: rect.x + MENU_HIGHLIGHT_INSET,
@@ -1142,6 +1169,7 @@ pub fn popup_menu(cmds: &mut Vec<DrawCmd>, rect: Rect, items: &[MenuItem], hover
                 false,
             );
         }
+        let info = !item.is_action();
         theme::text_clip(
             cmds,
             Rect {
@@ -1151,8 +1179,14 @@ pub fn popup_menu(cmds: &mut Vec<DrawCmd>, rect: Rect, items: &[MenuItem], hover
                 h: MENU_ITEM_H,
             },
             item.label.as_str(),
-            13.0,
-            if item.checked { MENU_ITEM_SELECTED } else { MENU_ITEM },
+            if info { 12.0 } else { 13.0 },
+            if item.checked {
+                MENU_ITEM_SELECTED
+            } else if info {
+                MENU_SECTION
+            } else {
+                MENU_ITEM
+            },
             item.checked,
             Some(clip),
         );
@@ -1171,7 +1205,7 @@ pub fn item_at(rect: Rect, items: &[MenuItem], y: f32) -> Option<usize> {
             }
         }
         if y >= yy && y < yy + MENU_ITEM_H {
-            return Some(i);
+            return item.is_action().then_some(i);
         }
         yy += MENU_ITEM_H;
     }
@@ -1455,5 +1489,19 @@ mod tests {
         assert!((line_x - (40.0 + layout.diamond_cx)).abs() < STRIP_NAME_DIA);
         assert!((text_x - (40.0 + layout.text_x)).abs() < 0.05);
         assert!(text_x > 40.0 + STRIP_NAME_PAD + STRIP_NAME_DIA);
+    }
+
+    #[test]
+    fn menu_info_rows_are_not_selectable() {
+        let items = vec![
+            MenuItem::info("This session · Bus 2", "Used in"),
+            MenuItem::action("delete", "Delete anyway", None),
+            MenuItem::action("cancel", "Cancel", None),
+        ];
+        let rect = Rect { x: 0.0, y: 0.0, w: 240.0, h: menu_height(&items) };
+        let info_y = rect.y + MENU_PAD_Y + MENU_SECTION_H + 4.0;
+        let delete_y = rect.y + MENU_PAD_Y + MENU_SECTION_H + MENU_ITEM_H + 4.0;
+        assert_eq!(item_at(rect, &items, info_y), None);
+        assert_eq!(item_at(rect, &items, delete_y), Some(1));
     }
 }

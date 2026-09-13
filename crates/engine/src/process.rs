@@ -256,8 +256,7 @@ impl Engine {
         self.master_r[..frames].fill(0.0);
 
         if !mix_playing {
-            for slot in 0..8 {
-                let route = &schedule.routes[slot];
+            for (slot, route) in schedule.routes.iter().enumerate() {
                 if !route.enabled {
                     if recording {
                         for tap in 0..TAP_COUNT {
@@ -286,12 +285,13 @@ impl Engine {
                         &mut self.scratch_in_r,
                     );
                 }
-                vst3_host::process_slot(
-                    slot as u32,
-                    &self.scratch_in_l[..frames],
-                    &self.scratch_in_r[..frames],
-                    &mut self.scratch_out_l[..frames],
-                    &mut self.scratch_out_r[..frames],
+                apply_insert_chain(
+                    &route.stages,
+                    frames,
+                    &mut self.scratch_in_l,
+                    &mut self.scratch_in_r,
+                    &mut self.scratch_out_l,
+                    &mut self.scratch_out_r,
                 );
                 if route.return_channel >= 0 {
                     write_output_pair(
@@ -357,7 +357,7 @@ impl Engine {
         }
 
         if mix_playing {
-            mix_playback(self, &schedule, &output, frames);
+            mix_playback(self, &schedule, &input, &output, frames);
         }
 
         if mix_playing {
@@ -625,7 +625,48 @@ fn write_stem_and_sum_master(
     }
 }
 
-fn mix_playback(engine: &mut Engine, schedule: &Schedule, output: &BufferList<'_>, frames: usize) {
+fn apply_insert_chain(
+    stages: &[crate::schedule::InsertStage],
+    frames: usize,
+    in_l: &mut [f32],
+    in_r: &mut [f32],
+    out_l: &mut [f32],
+    out_r: &mut [f32],
+) {
+    if stages.is_empty() {
+        out_l[..frames].copy_from_slice(&in_l[..frames]);
+        out_r[..frames].copy_from_slice(&in_r[..frames]);
+        return;
+    }
+    let mut src_is_in = true;
+    for stage in stages {
+        let inst = stage.instance as vst3_host::MixLinkVST3Ref;
+        let (src_l, src_r, dst_l, dst_r) = if src_is_in {
+            (&in_l[..frames], &in_r[..frames], &mut out_l[..frames], &mut out_r[..frames])
+        } else {
+            (&out_l[..frames], &out_r[..frames], &mut in_l[..frames], &mut in_r[..frames])
+        };
+        if inst.is_null() {
+            dst_l.copy_from_slice(src_l);
+            dst_r.copy_from_slice(src_r);
+        } else {
+            vst3_host::process_instance(inst, stage.bypassed, src_l, src_r, dst_l, dst_r);
+        }
+        src_is_in = !src_is_in;
+    }
+    if src_is_in {
+        out_l[..frames].copy_from_slice(&in_l[..frames]);
+        out_r[..frames].copy_from_slice(&in_r[..frames]);
+    }
+}
+
+fn mix_playback(
+    engine: &mut Engine,
+    schedule: &Schedule,
+    input: &BufferList<'_>,
+    output: &BufferList<'_>,
+    frames: usize,
+) {
     if engine.controls.flush.swap(false, Ordering::Relaxed) {
         for i in 0..MIX_PLAY_MAX_LANES {
             engine.lane_read[i] = engine.lane_write[i];
@@ -660,12 +701,43 @@ fn mix_playback(engine: &mut Engine, schedule: &Schedule, output: &BufferList<'_
             let _ = engine.ev_tx.try_push(EngineEvent::Underrun { lane: i as u8 });
         }
         let silenced = lane.muted || (any_solo && !lane.is_main && !lane.soloed);
-        let mut peak = 0.0f32;
+        engine.scratch_in_l[..frames].fill(0.0);
+        engine.scratch_in_r[..frames].fill(0.0);
         for f in 0..n {
             let r = engine.lane_read[i];
-            let mut l = engine.lane_rings_l[i][r] * lane.gain_l;
-            let mut rr = engine.lane_rings_r[i][r] * lane.gain_r;
+            engine.scratch_in_l[f] = engine.lane_rings_l[i][r] * lane.gain_l;
+            engine.scratch_in_r[f] = engine.lane_rings_r[i][r] * lane.gain_r;
             engine.lane_read[i] = (r + 1) % cap;
+        }
+        if !lane.insert_stages.is_empty() {
+            apply_insert_chain(
+                &lane.insert_stages,
+                frames,
+                &mut engine.scratch_in_l,
+                &mut engine.scratch_in_r,
+                &mut engine.scratch_out_l,
+                &mut engine.scratch_out_r,
+            );
+            engine.scratch_in_l[..frames].copy_from_slice(&engine.scratch_out_l[..frames]);
+            engine.scratch_in_r[..frames].copy_from_slice(&engine.scratch_out_r[..frames]);
+        }
+        if lane.hw_enabled && lane.hw_out >= 0 && lane.hw_in >= 0 {
+            write_output_pair(
+                output,
+                lane.hw_out,
+                frames,
+                &engine.scratch_in_l,
+                &engine.scratch_in_r,
+            );
+            for f in 0..frames {
+                engine.scratch_in_l[f] = input.locate_sample(lane.hw_in, f);
+                engine.scratch_in_r[f] = input.locate_sample(lane.hw_in + 1, f);
+            }
+        }
+        let mut peak = 0.0f32;
+        for f in 0..frames {
+            let mut l = engine.scratch_in_l[f];
+            let mut rr = engine.scratch_in_r[f];
             if silenced {
                 l = 0.0;
                 rr = 0.0;
@@ -749,8 +821,11 @@ mod tests {
     fn mix_playing_skips_live_sends() {
         let (mut engine, handles) = Engine::new(48_000);
         let mut schedule = Schedule::empty();
-        schedule.routes[0].enabled = true;
-        schedule.routes[0].return_channel = 2;
+        schedule.routes.push(crate::schedule::SendRoute {
+            enabled: true,
+            return_channel: 2,
+            ..crate::schedule::SendRoute::default()
+        });
         handles.schedule.store(std::sync::Arc::new(schedule));
         handles.controls.mix_playing.store(true, Ordering::Relaxed);
         let (_keep, input) = interleaved(16, 1.0, 1.0);

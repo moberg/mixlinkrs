@@ -1,7 +1,7 @@
 //! Record EFFECTS/SETTINGS sidebar and Mix INSERTS column. 248 pt.
 
-use analog::{AnalogEngine, HardwareEffect, PluginSlot, ReturnLane};
-use project::{MixDocument, MixLane, MixTrack};
+use analog::{AnalogEngine, ChainKind, ReturnLane};
+use project::{MixDocument, MixLane};
 use render::{DrawCmd, Rect};
 
 use crate::chrome::Page;
@@ -25,27 +25,17 @@ pub struct SidebarView<'a> {
 
 #[derive(Clone, Debug)]
 pub enum SidebarHit {
-    AddHardware,
-    RemoveHardware(i32),
-    EditHardwareName(i32),
-    HardwareOutput(i32),
-    HardwareInput(i32),
-    AddPlugin,
-    RemovePlugin(i32),
-    EditPluginName(i32),
-    PluginBundle(i32),
-    PluginEdit(i32),
-    PluginBypass(i32),
-    PluginPlayback(i32),
+    OpenChains,
+    AssignReturn { lane: ReturnLane },
+    AssignPlayback { id: uuid::Uuid },
+    OpenPlugin { id: uuid::Uuid },
+    AssignMix,
+    ClearMixChain,
+    ToggleMixHardware,
     AudioDevice,
     AudioBuffer,
     Channels,
     Settings,
-    AddInsert,
-    RemoveInsert(uuid::Uuid),
-    InsertBundle(uuid::Uuid),
-    InsertEdit(uuid::Uuid),
-    InsertBypass(uuid::Uuid),
 }
 
 const FOOT_H: f32 = 40.0;
@@ -54,7 +44,8 @@ pub fn body_rect(window_w: f32, window_h: f32, page: Page) -> Rect {
     let x = window_w - Layout::SIDEBAR_WIDTH;
     let y = crate::chrome::HEADER_H;
     let sh = window_h - crate::chrome::HEADER_H - crate::chrome::footer_height(page);
-    Rect { x, y, w: Layout::SIDEBAR_WIDTH, h: (sh - FOOT_H).max(0.0) }
+    let dock = if page == Page::Record { settings_dock_h() } else { 0.0 };
+    Rect { x, y, w: Layout::SIDEBAR_WIDTH, h: (sh - FOOT_H - dock).max(0.0) }
 }
 
 pub fn max_scroll(view: &SidebarView<'_>, window_h: f32) -> f32 {
@@ -95,6 +86,9 @@ pub fn paint(view: &SidebarView<'_>, w: f32, h: f32) -> (Vec<DrawCmd>, Vec<(Rect
     hits.retain(|(r, _)| rects_overlap(*r, clip));
 
     cmds.push(DrawCmd::Layer);
+    if view.page == Page::Record {
+        paint_settings_dock(view, &mut cmds, &mut hits, x, y + sh - FOOT_H - settings_dock_h());
+    }
     let by = y + sh - 36.0;
     theme::hardware_surface(
         &mut cmds,
@@ -104,12 +98,20 @@ pub fn paint(view: &SidebarView<'_>, w: f32, h: f32) -> (Vec<DrawCmd>, Vec<(Rect
     theme::seam_h(&mut cmds, x, by - 4.0, Layout::SIDEBAR_WIDTH, false);
     widgets::hardware_pad(
         &mut cmds,
+        Rect { x: x + 56.0, y: by, w: 72.0, h: 26.0 },
+        "Effects",
+        false,
+        theme::PRIMARY_TEXT,
+    );
+    widgets::hardware_pad(
+        &mut cmds,
         Rect { x: x + 136.0, y: by, w: 72.0, h: 26.0 },
         "Channels",
         false,
         theme::PRIMARY_TEXT,
     );
     widgets::icon_pad(&mut cmds, Rect { x: x + 214.0, y: by, w: 26.0, h: 26.0 }, "⚙", true);
+    hits.push((Rect { x: x + 56.0, y: by, w: 72.0, h: 26.0 }, SidebarHit::OpenChains));
     hits.push((Rect { x: x + 136.0, y: by, w: 72.0, h: 26.0 }, SidebarHit::Channels));
     hits.push((Rect { x: x + 214.0, y: by, w: 26.0, h: 26.0 }, SidebarHit::Settings));
 
@@ -134,50 +136,43 @@ fn rects_overlap(a: Rect, b: Rect) -> bool {
 }
 
 fn record_content_h(view: &SidebarView<'_>) -> f32 {
-    const GAP: f32 = 6.0;
-    const OUTER: f32 = 10.0;
+    const GAP: f32 = 8.0;
     const HEAD_GAP: f32 = 12.0;
-    let n_hw = view.engine.config.hardware_effects.len() as f32;
-    let n_plug = view.engine.config.plugins.len() as f32;
     let mut h = 8.0;
     h += 18.0 + HEAD_GAP;
+    for lane in record_lanes(view) {
+        let chain = view.engine.config.chain_ref(lane);
+        h += assign_row_h(is_plugin_assign(chain), plugin_stage_count(&view.engine.config, chain), false)
+            + GAP;
+    }
     h += Layout::HEADER_BUTTON + GAP;
-    h += n_hw * (hardware_card_h() + GAP);
-    h += OUTER - GAP;
-    h += Layout::HEADER_BUTTON + GAP;
-    h += n_plug * (plugin_card_h() + GAP);
-    h += OUTER - GAP;
-    h += 16.0 + 8.0;
-    h += settings_content_h();
     h += 8.0;
     h
 }
 
+fn settings_heading_h() -> f32 {
+    16.0 + 8.0
+}
+
 fn settings_content_h() -> f32 {
-    let mut h = LABEL_H + PICKER_GAP + MENU_H + 4.0;
-    h += 16.0;
-    h
+    LABEL_H + PICKER_GAP + MENU_H + 4.0 + 16.0
+}
+
+fn settings_dock_h() -> f32 {
+    8.0 + settings_heading_h() + settings_content_h() + 8.0
 }
 
 fn mix_content_h(view: &SidebarView<'_>) -> f32 {
-    let insert_h = Layout::MODULE_PAD
-        + Layout::HEADER_BUTTON
-        + CARD_GAP
-        + MENU_H
-        + CARD_GAP
-        + PLUGIN_PAD_H
-        + Layout::MODULE_PAD;
-    let lane = view.selected_lane.unwrap_or(MixLane::Main);
-    let n = view
-        .mix
-        .and_then(|m| m.tracks.iter().find(|t| t.lane == lane))
-        .map(|t| t.inserts.len())
-        .unwrap_or(0) as f32;
     let mut h = 8.0;
-    h += Layout::HEADER_BUTTON + CARD_GAP;
-    h += 16.0 + CARD_GAP;
-    if n > 0.0 {
-        h += n * (insert_h + CARD_GAP);
+    h += 18.0 + 12.0;
+    if let Some(lane) = view.selected_lane {
+        let chain = view.mix.and_then(|m| m.track(lane)).and_then(|t| t.effect_chain);
+        let stages = plugin_stage_count(&view.engine.config, chain);
+        h += assign_row_h(false, stages, chain.is_some()) + CARD_GAP;
+        if chain.is_some_and(|c| c.kind == ChainKind::Hardware) {
+            h += Layout::HEADER_BUTTON + CARD_GAP;
+        }
+        h += Layout::HEADER_BUTTON;
     } else {
         h += 18.0;
     }
@@ -193,17 +188,12 @@ fn paint_record(
     y: &mut f32,
     clip: Rect,
 ) {
-    // MixLink SidebarView: VStack spacing 10, .padding(8).
-    // Header→first content is MixLink 10 (EFFECTS) / 6 (SETTINGS); +2 so
-    // the title is not flush against the first row.
     const SIDE: f32 = 8.0;
-    const GAP: f32 = 6.0;
-    const OUTER: f32 = 10.0;
+    const GAP: f32 = 8.0;
     const HEAD_GAP: f32 = 12.0;
     let inner_x = x + SIDE;
     let inner_w = Layout::SIDEBAR_WIDTH - SIDE * 2.0;
 
-    // MixLink EFFECTS: 13 semibold MixerTheme.primaryText
     theme::text(
         cmds,
         Rect { x: inner_x, y: *y, w: inner_w, h: 18.0 },
@@ -214,225 +204,229 @@ fn paint_record(
     );
     *y += 18.0 + HEAD_GAP;
 
-    row_plus(cmds, hits, x, *y, "Hardware effects", SidebarHit::AddHardware, true);
-    *y += Layout::HEADER_BUTTON + GAP;
-    for hw in &view.engine.config.hardware_effects {
+    for lane in record_lanes(view) {
         if *y > clip.y + clip.h {
             break;
         }
-        paint_hardware_card(view, cmds, hits, inner_x, *y, inner_w, hw);
-        *y += hardware_card_h() + GAP;
+        let chain = view.engine.config.chain_ref(lane);
+        paint_assign_row(
+            cmds,
+            hits,
+            inner_x,
+            *y,
+            inner_w,
+            lane.title(),
+            chain,
+            &view.engine.config,
+            SidebarHit::AssignReturn { lane },
+            None,
+            true,
+        );
+        *y += assign_row_h(is_plugin_assign(chain), plugin_stage_count(&view.engine.config, chain), false)
+            + GAP;
     }
 
-    let can_add_plugin = view.engine.config.next_free_plugin_id().is_some();
-    *y += OUTER - GAP;
-    row_plus(cmds, hits, x, *y, "Plugins", SidebarHit::AddPlugin, can_add_plugin);
+    let open = Rect { x: inner_x, y: *y, w: inner_w, h: Layout::HEADER_BUTTON };
+    widgets::hardware_pad(cmds, open, "Open Effects", false, theme::PRIMARY_TEXT);
+    hits.push((open, SidebarHit::OpenChains));
     *y += Layout::HEADER_BUTTON + GAP;
-    for plug in &view.engine.config.plugins {
-        if *y > clip.y + clip.h {
-            break;
-        }
-        paint_plugin_card(view, cmds, hits, inner_x, *y, inner_w, plug);
-        *y += plugin_card_h() + GAP;
-    }
+}
 
-    if *y > clip.y + clip.h {
-        return;
+const CARD_GAP: f32 = 6.0;
+const PICKER_GAP: f32 = 4.0;
+const LABEL_H: f32 = 16.0;
+const MENU_H: f32 = 24.0;
+const STAGE_GAP: f32 = 6.0;
+const OPEN_W: f32 = 52.0;
+
+fn record_lanes(view: &SidebarView<'_>) -> Vec<ReturnLane> {
+    let mut lanes = view.engine.config.visible_send_lanes();
+    lanes.extend(analog::BUS_LANES);
+    lanes
+}
+
+fn assign_inner_h(playback: bool, stages: usize, clear: bool) -> f32 {
+    let mut h = LABEL_H + PICKER_GAP + MENU_H;
+    if playback {
+        h += 8.0 + LABEL_H + PICKER_GAP + MENU_H;
     }
-    *y += OUTER - GAP;
-    // MixLink SETTINGS: 12 semibold MixerTheme.secondaryText, VStack spacing 6.
+    if stages > 0 {
+        h += 8.0 + stages as f32 * (MENU_H + STAGE_GAP);
+    }
+    if clear {
+        h += 14.0;
+    } else {
+        h += 8.0;
+    }
+    h
+}
+
+fn assign_row_h(playback: bool, stages: usize, clear: bool) -> f32 {
+    Layout::MODULE_PAD * 2.0 + assign_inner_h(playback, stages, clear)
+}
+
+fn is_plugin_assign(chain: Option<analog::ChainRef>) -> bool {
+    chain.is_some_and(|r| r.kind == ChainKind::Plugin)
+}
+
+fn plugin_stage_count(config: &analog::SessionConfig, chain: Option<analog::ChainRef>) -> usize {
+    plugin_stages(config, chain).len()
+}
+
+fn plugin_stages(
+    config: &analog::SessionConfig,
+    chain: Option<analog::ChainRef>,
+) -> &[analog::PluginStage] {
+    chain
+        .filter(|r| r.kind == ChainKind::Plugin)
+        .and_then(|r| config.plugin_chain(r.id))
+        .map(|c| c.stages.as_slice())
+        .unwrap_or(&[])
+}
+
+fn stage_label(stage: &analog::PluginStage) -> String {
+    if !stage.is_loaded() {
+        return "No plugin".into();
+    }
+    if !stage.name.is_empty() {
+        return stage.title();
+    }
+    stage
+        .bundle_path
+        .as_deref()
+        .and_then(|p| std::path::Path::new(p).file_stem().and_then(|s| s.to_str()))
+        .unwrap_or("No plugin")
+        .to_string()
+}
+
+fn paint_assign_row(
+    cmds: &mut Vec<DrawCmd>,
+    hits: &mut Vec<(Rect, SidebarHit)>,
+    x: f32,
+    y: f32,
+    w: f32,
+    title: &str,
+    chain: Option<analog::ChainRef>,
+    config: &analog::SessionConfig,
+    assign: SidebarHit,
+    clear: Option<SidebarHit>,
+    show_playback: bool,
+) {
+    let (label, kind) = match chain {
+        Some(r) => {
+            let name = config.chain_title(r);
+            let kind = match r.kind {
+                ChainKind::Hardware => "Hardware",
+                ChainKind::Plugin => "Plugins",
+            };
+            (name, kind)
+        }
+        None => ("No effect".into(), ""),
+    };
+    let playback = show_playback && is_plugin_assign(chain);
+    let stages = plugin_stage_count(config, chain);
+    let card_h = assign_row_h(playback, stages, clear.is_some() && chain.is_some());
+    widgets::hardware_module(cmds, Rect { x, y, w, h: card_h });
+    let x = x + Layout::MODULE_PAD;
+    let y = y + Layout::MODULE_PAD;
+    let w = w - Layout::MODULE_PAD * 2.0;
+    theme::text(cmds, Rect { x, y, w: w - 48.0, h: LABEL_H }, title, 11.0, theme::TEXT_DIM, false);
+    if !kind.is_empty() {
+        theme::text(
+            cmds,
+            Rect { x: x + w - 64.0, y, w: 64.0, h: LABEL_H },
+            kind,
+            10.0,
+            theme::SECONDARY_TEXT,
+            false,
+        );
+    }
+    let menu = Rect { x, y: y + LABEL_H + PICKER_GAP, w, h: MENU_H };
+    widgets::channel_picker(cmds, menu, &label, widgets::ChannelPickerStyle::value());
+    hits.push((menu, assign));
+    let mut extra_y = y + LABEL_H + PICKER_GAP + MENU_H + 8.0;
+    if show_playback {
+        if let Some(r) = chain.filter(|r| r.kind == ChainKind::Plugin) {
+            if let Some(pc) = config.plugin_chain(r.id) {
+                theme::text(
+                    cmds,
+                    Rect { x, y: extra_y, w, h: LABEL_H },
+                    "Software playback",
+                    11.0,
+                    theme::TEXT_DIM,
+                    false,
+                );
+                extra_y += LABEL_H + PICKER_GAP;
+                let pb = Rect { x, y: extra_y, w, h: MENU_H };
+                widgets::channel_picker(
+                    cmds,
+                    pb,
+                    &analog::SessionConfig::playback_pair_label(pc.return_channel),
+                    widgets::ChannelPickerStyle::playback(),
+                );
+                hits.push((pb, SidebarHit::AssignPlayback { id: pc.id }));
+                extra_y += MENU_H + 8.0;
+            }
+        }
+    }
+    for stage in plugin_stages(config, chain) {
+        let loaded = stage.is_loaded();
+        theme::text(
+            cmds,
+            Rect { x, y: extra_y, w: w - OPEN_W - 6.0, h: MENU_H },
+            stage_label(stage),
+            11.0,
+            if loaded { theme::PRIMARY_TEXT } else { theme::TEXT_DIM },
+            false,
+        );
+        let open = Rect { x: x + w - OPEN_W, y: extra_y, w: OPEN_W, h: MENU_H };
+        widgets::hardware_pad_enabled(cmds, open, "Open", false, theme::PRIMARY_TEXT, loaded);
+        if loaded {
+            hits.push((open, SidebarHit::OpenPlugin { id: stage.id }));
+        }
+        extra_y += MENU_H + STAGE_GAP;
+    }
+    if let Some(clear) = clear {
+        if chain.is_some() {
+            let minus = Rect {
+                x: x + w - Layout::HEADER_BUTTON,
+                y: extra_y,
+                w: Layout::HEADER_BUTTON,
+                h: 12.0,
+            };
+            theme::text(cmds, minus, "Clear", 10.0, theme::TEXT_DIM, false);
+            hits.push((minus, clear));
+        }
+    }
+}
+
+fn paint_settings_dock(
+    view: &SidebarView<'_>,
+    cmds: &mut Vec<DrawCmd>,
+    hits: &mut Vec<(Rect, SidebarHit)>,
+    x: f32,
+    y: f32,
+) {
+    const SIDE: f32 = 8.0;
+    let inner_x = x + SIDE;
+    let inner_w = Layout::SIDEBAR_WIDTH - SIDE * 2.0;
+    theme::hardware_surface(
+        cmds,
+        Rect { x, y, w: Layout::SIDEBAR_WIDTH, h: settings_dock_h() },
+        theme::SurfaceStyle::Sidebar,
+    );
+    theme::seam_h(cmds, x, y, Layout::SIDEBAR_WIDTH, false);
+    let mut yy = y + 8.0;
     theme::text(
         cmds,
-        Rect { x: inner_x, y: *y, w: inner_w, h: 16.0 },
+        Rect { x: inner_x, y: yy, w: inner_w, h: 16.0 },
         "SETTINGS",
         12.0,
         theme::SECONDARY_TEXT,
         true,
     );
-    *y += 16.0 + 8.0;
-    paint_settings(view, cmds, hits, inner_x, y, inner_w);
-    let _ = ReturnLane::SendA;
-}
-
-// MixLink `HardwareEffectCard` / `PluginSlotView`:
-//   VStack(alignment: .leading, spacing: 6) {
-//     HStack(spacing: 6) { NameField; HardwareIconButton("minus") }
-//     ChannelPicker(title: "Output"|"Input", ...)          // hardware
-//     Menu { MenuLabel(plugin) }                           // plugin
-//     HStack(spacing: 6) { SmallButton("Edit"); SmallButton("Bypass") }
-//     HStack(spacing: 8) { Text("Software playback"); ChannelPicker(title: nil) }
-//   }
-//   .hardwareModule()   // padding 7, recessed card, thin light rim
-// MixLink `ChannelPicker`: VStack(spacing: 4) { Text(11 medium textDim); Menu { MenuLabel } }
-//   .menuStyle(.borderlessButton) .menuIndicator(.hidden)
-// MixLink `MenuLabel` closed: HStack(spacing: 3) { Text; chevron.up.chevron.down }
-//   .padding(.vertical, 5) .padding(.horizontal, 6) — screenshot Heat/EffectRack
-//   drops the recessed well, leading chevron, no diamond.
-// Sidebar EDIT/BYPASS stay MixLink compact 26 (`Layout::BUTTON_H`); mixer SOLO unchanged.
-const CARD_GAP: f32 = 6.0;
-const PICKER_GAP: f32 = 4.0;
-const LABEL_H: f32 = 16.0;
-const MENU_H: f32 = 24.0;
-const PLUGIN_PAD_H: f32 = Layout::BUTTON_H;
-
-fn hardware_card_h() -> f32 {
-    Layout::MODULE_PAD
-        + Layout::HEADER_BUTTON
-        + CARD_GAP
-        + LABEL_H
-        + PICKER_GAP
-        + MENU_H
-        + CARD_GAP
-        + LABEL_H
-        + PICKER_GAP
-        + MENU_H
-        + Layout::MODULE_PAD
-}
-
-fn plugin_card_h() -> f32 {
-    Layout::MODULE_PAD
-        + Layout::HEADER_BUTTON
-        + CARD_GAP
-        + MENU_H
-        + CARD_GAP
-        + PLUGIN_PAD_H
-        + CARD_GAP
-        + MENU_H
-        + Layout::MODULE_PAD
-}
-
-fn paint_hardware_card(
-    view: &SidebarView<'_>,
-    cmds: &mut Vec<DrawCmd>,
-    hits: &mut Vec<(Rect, SidebarHit)>,
-    x: f32,
-    y: f32,
-    w: f32,
-    hw: &HardwareEffect,
-) {
-    let card = Rect { x, y, w, h: hardware_card_h() };
-    widgets::hardware_module(cmds, card);
-    let mut cy = card.y + Layout::MODULE_PAD;
-    let cx = card.x + Layout::MODULE_PAD;
-    let cw = card.w - Layout::MODULE_PAD * 2.0;
-    name_row(
-        cmds,
-        hits,
-        cx,
-        cy,
-        cw,
-        if hw.name.is_empty() { "Name" } else { &hw.name },
-        hw.name.is_empty(),
-        *view.focus == TextFocus::HardwareName(hw.id),
-        view.caret,
-        SidebarHit::EditHardwareName(hw.id),
-        SidebarHit::RemoveHardware(hw.id),
-    );
-    cy += Layout::HEADER_BUTTON + CARD_GAP;
-    picker_stack(
-        cmds,
-        hits,
-        cx,
-        cy,
-        cw,
-        "Output",
-        &view.engine.output_name(hw.output),
-        SidebarHit::HardwareOutput(hw.id),
-    );
-    cy += LABEL_H + PICKER_GAP + MENU_H + CARD_GAP;
-    picker_stack(
-        cmds,
-        hits,
-        cx,
-        cy,
-        cw,
-        "Input",
-        &view.engine.display_name(analog::ChannelID::new(analog::MixerBus::Input, hw.input)),
-        SidebarHit::HardwareInput(hw.id),
-    );
-}
-
-fn paint_plugin_card(
-    view: &SidebarView<'_>,
-    cmds: &mut Vec<DrawCmd>,
-    hits: &mut Vec<(Rect, SidebarHit)>,
-    x: f32,
-    y: f32,
-    w: f32,
-    plug: &PluginSlot,
-) {
-    let card = Rect { x, y, w, h: plugin_card_h() };
-    widgets::hardware_module(cmds, card);
-    let mut cy = card.y + Layout::MODULE_PAD;
-    let cx = card.x + Layout::MODULE_PAD;
-    let cw = card.w - Layout::MODULE_PAD * 2.0;
-    name_row(
-        cmds,
-        hits,
-        cx,
-        cy,
-        cw,
-        if plug.name.is_empty() { "Name" } else { &plug.name },
-        plug.name.is_empty(),
-        *view.focus == TextFocus::PluginName(plug.id),
-        view.caret,
-        SidebarHit::EditPluginName(plug.id),
-        SidebarHit::RemovePlugin(plug.id),
-    );
-    cy += Layout::HEADER_BUTTON + CARD_GAP;
-    let bundle = plug
-        .bundle_path
-        .as_deref()
-        .and_then(|p| std::path::Path::new(p).file_stem().and_then(|s| s.to_str()))
-        .unwrap_or("No plugin");
-    let bundle_row = Rect { x: cx, y: cy, w: cw, h: MENU_H };
-    widgets::channel_picker(cmds, bundle_row, bundle, widgets::ChannelPickerStyle::plugin());
-    hits.push((bundle_row, SidebarHit::PluginBundle(plug.id)));
-    cy += MENU_H + CARD_GAP;
-    let btn_gap = CARD_GAP;
-    let btn_w = (cw - btn_gap) * 0.5;
-    let btn_h = PLUGIN_PAD_H;
-    widgets::hardware_pad(
-        cmds,
-        Rect { x: cx, y: cy, w: btn_w, h: btn_h },
-        "Edit",
-        false,
-        theme::PRIMARY_TEXT,
-    );
-    widgets::hardware_pad(
-        cmds,
-        Rect { x: cx + btn_w + btn_gap, y: cy, w: btn_w, h: btn_h },
-        "Bypass",
-        plug.bypassed,
-        theme::AMBER,
-    );
-    hits.push((Rect { x: cx, y: cy, w: btn_w, h: btn_h }, SidebarHit::PluginEdit(plug.id)));
-    hits.push((
-        Rect { x: cx + btn_w + btn_gap, y: cy, w: btn_w, h: btn_h },
-        SidebarHit::PluginBypass(plug.id),
-    ));
-    cy += btn_h + CARD_GAP;
-    // MixLink PluginSlotView: HStack spacing 8, 11 medium textDim + ChannelPicker(title: nil).
-    const PLAYBACK_LABEL_W: f32 = 108.0;
-    const PLAYBACK_GAP: f32 = 8.0;
-    theme::text(
-        cmds,
-        Rect { x: cx, y: cy, w: PLAYBACK_LABEL_W, h: MENU_H },
-        "Software playback",
-        11.0,
-        theme::TEXT_DIM,
-        false,
-    );
-    let menu_x = cx + PLAYBACK_LABEL_W + PLAYBACK_GAP;
-    let menu_w = (cx + cw - menu_x).max(36.0);
-    let playback = Rect { x: menu_x, y: cy, w: menu_w, h: MENU_H };
-    widgets::channel_picker(
-        cmds,
-        playback,
-        &format!("{}/{}", plug.return_channel + 1, plug.return_channel + 2),
-        widgets::ChannelPickerStyle::playback(),
-    );
-    hits.push((playback, SidebarHit::PluginPlayback(plug.id)));
+    yy += settings_heading_h();
+    paint_settings(view, cmds, hits, inner_x, &mut yy, inner_w);
 }
 
 fn paint_settings(
@@ -465,157 +459,75 @@ fn paint_mix(
     hits: &mut Vec<(Rect, SidebarHit)>,
     x: f32,
     y: &mut f32,
-    clip: Rect,
+    _clip: Rect,
 ) {
-    let lane = view.selected_lane.unwrap_or(MixLane::Main);
-    let plus = Rect {
-        x: x + Layout::SIDEBAR_WIDTH - 8.0 - Layout::HEADER_BUTTON,
-        y: *y,
-        w: Layout::HEADER_BUTTON,
-        h: Layout::HEADER_BUTTON,
-    };
-    theme::text(
-        cmds,
-        Rect { x: x + 8.0, y: *y, w: 180.0, h: Layout::HEADER_BUTTON },
-        lane.title().to_uppercase(),
-        13.0,
-        theme::PRIMARY_TEXT,
-        true,
-    );
-    widgets::icon_pad(cmds, plus, "+", true);
-    hits.push((plus, SidebarHit::AddInsert));
-    *y += Layout::HEADER_BUTTON + CARD_GAP;
-    theme::text(
-        cmds,
-        Rect { x: x + 8.0, y: *y, w: 120.0, h: 16.0 },
-        "INSERTS",
-        11.0,
-        theme::SECONDARY_TEXT,
-        true,
-    );
-    *y += 16.0 + CARD_GAP;
-    let track: Option<&MixTrack> = view.mix.and_then(|m| m.tracks.iter().find(|t| t.lane == lane));
-    if let Some(track) = track {
-        let insert_h = Layout::MODULE_PAD
-            + Layout::HEADER_BUTTON
-            + CARD_GAP
-            + MENU_H
-            + CARD_GAP
-            + PLUGIN_PAD_H
-            + Layout::MODULE_PAD;
-        for insert in &track.inserts {
-            if *y > clip.y + clip.h {
-                break;
-            }
-            let card = Rect { x: x + 8.0, y: *y, w: Layout::SIDEBAR_WIDTH - 16.0, h: insert_h };
-            widgets::hardware_module(cmds, card);
-            let cx = card.x + Layout::MODULE_PAD;
-            let cy0 = card.y + Layout::MODULE_PAD;
-            let cw = card.w - Layout::MODULE_PAD * 2.0;
-            let icon = Rect {
-                x: cx + cw - Layout::HEADER_BUTTON,
-                y: cy0,
-                w: Layout::HEADER_BUTTON,
-                h: Layout::HEADER_BUTTON,
-            };
-            theme::text(
-                cmds,
-                Rect {
-                    x: cx,
-                    y: cy0,
-                    w: cw - Layout::HEADER_BUTTON - CARD_GAP,
-                    h: Layout::HEADER_BUTTON,
-                },
-                insert.title(),
-                12.0,
-                theme::PRIMARY_TEXT,
-                true,
-            );
-            widgets::icon_pad(cmds, icon, "−", true);
-            hits.push((icon, SidebarHit::RemoveInsert(insert.id)));
-            let menu = Rect { x: cx, y: cy0 + Layout::HEADER_BUTTON + CARD_GAP, w: cw, h: MENU_H };
-            widgets::channel_picker(
-                cmds,
-                menu,
-                insert
-                    .bundle_path
-                    .as_deref()
-                    .and_then(|p| std::path::Path::new(p).file_name().and_then(|s| s.to_str()))
-                    .unwrap_or("No plugin"),
-                widgets::ChannelPickerStyle::plugin(),
-            );
-            hits.push((menu, SidebarHit::InsertBundle(insert.id)));
-            let by = menu.y + MENU_H + CARD_GAP;
-            let btn_w = (cw - CARD_GAP) * 0.5;
-            let btn_h = PLUGIN_PAD_H;
-            widgets::hardware_pad(
-                cmds,
-                Rect { x: cx, y: by, w: btn_w, h: btn_h },
-                "Edit",
-                false,
-                theme::PRIMARY_TEXT,
-            );
-            widgets::hardware_pad(
-                cmds,
-                Rect { x: cx + btn_w + CARD_GAP, y: by, w: btn_w, h: btn_h },
-                "Bypass",
-                insert.bypassed,
-                theme::AMBER,
-            );
-            hits.push((
-                Rect { x: cx, y: by, w: btn_w, h: btn_h },
-                SidebarHit::InsertEdit(insert.id),
-            ));
-            hits.push((
-                Rect { x: cx + btn_w + CARD_GAP, y: by, w: btn_w, h: btn_h },
-                SidebarHit::InsertBypass(insert.id),
-            ));
-            *y += insert_h + CARD_GAP;
-        }
-    } else {
+    const SIDE: f32 = 8.0;
+    let inner_x = x + SIDE;
+    let inner_w = Layout::SIDEBAR_WIDTH - SIDE * 2.0;
+    let Some(lane) = view.selected_lane else {
         theme::text(
             cmds,
-            Rect { x: x + 8.0, y: *y, w: 200.0, h: 18.0 },
+            Rect { x: inner_x, y: *y, w: inner_w, h: 18.0 },
             "Select a channel",
             11.0,
             theme::TEXT_DIM,
             false,
         );
-    }
-}
-
-fn name_row(
-    cmds: &mut Vec<DrawCmd>,
-    hits: &mut Vec<(Rect, SidebarHit)>,
-    x: f32,
-    y: f32,
-    w: f32,
-    title: &str,
-    placeholder: bool,
-    focused: bool,
-    caret: bool,
-    edit: SidebarHit,
-    remove: SidebarHit,
-) {
-    let icon = Rect {
-        x: x + w - Layout::HEADER_BUTTON,
-        y,
-        w: Layout::HEADER_BUTTON,
-        h: Layout::HEADER_BUTTON,
+        return;
     };
-    let name = Rect { x, y, w: w - Layout::HEADER_BUTTON - CARD_GAP, h: Layout::HEADER_BUTTON };
-    let shown = if focused && caret { format!("{title}|") } else { title.to_string() };
     theme::text(
         cmds,
-        name,
-        shown,
-        12.0,
-        if placeholder { theme::TEXT_DIM } else { theme::PRIMARY_TEXT },
+        Rect { x: inner_x, y: *y, w: inner_w, h: 18.0 },
+        lane.title().to_uppercase(),
+        13.0,
+        theme::PRIMARY_TEXT,
         true,
     );
-    widgets::icon_pad(cmds, icon, "−", true);
-    hits.push((name, edit));
-    hits.push((icon, remove));
+    *y += 18.0 + 12.0;
+    let track = view.mix.and_then(|m| m.track(lane));
+    let chain = track.and_then(|t| t.effect_chain);
+    paint_assign_row(
+        cmds,
+        hits,
+        inner_x,
+        *y,
+        inner_w,
+        "CHAIN",
+        chain,
+        &view.engine.config,
+        SidebarHit::AssignMix,
+        Some(SidebarHit::ClearMixChain),
+        false,
+    );
+    *y += assign_row_h(false, plugin_stage_count(&view.engine.config, chain), chain.is_some())
+        + CARD_GAP;
+    if chain.is_some_and(|c| c.kind == ChainKind::Hardware) {
+        let on = track.map(|t| t.hardware_chain_enabled).unwrap_or(true);
+        let toggle = Rect { x: inner_x, y: *y, w: Layout::HEADER_BUTTON, h: Layout::HEADER_BUTTON };
+        widgets::enable_toggle(cmds, toggle, on);
+        theme::text(
+            cmds,
+            Rect {
+                x: inner_x + Layout::HEADER_BUTTON + 8.0,
+                y: *y,
+                w: 120.0,
+                h: Layout::HEADER_BUTTON,
+            },
+            if on { "Hardware on" } else { "Hardware off" },
+            11.0,
+            theme::PRIMARY_TEXT,
+            false,
+        );
+        hits.push((
+            Rect { x: inner_x, y: *y, w: inner_w, h: Layout::HEADER_BUTTON },
+            SidebarHit::ToggleMixHardware,
+        ));
+        *y += Layout::HEADER_BUTTON + CARD_GAP;
+    }
+    let open = Rect { x: inner_x, y: *y, w: inner_w, h: Layout::HEADER_BUTTON };
+    widgets::hardware_pad(cmds, open, "Open Effects", false, theme::PRIMARY_TEXT);
+    hits.push((open, SidebarHit::OpenChains));
+    *y += Layout::HEADER_BUTTON;
 }
 
 fn picker_stack(
@@ -638,36 +550,6 @@ fn field_label(cmds: &mut Vec<DrawCmd>, x: f32, y: f32, w: f32, label: &str) {
     theme::text(cmds, Rect { x, y, w, h: LABEL_H }, label, 11.0, theme::TEXT_DIM, false);
 }
 
-fn row_plus(
-    cmds: &mut Vec<DrawCmd>,
-    hits: &mut Vec<(Rect, SidebarHit)>,
-    x: f32,
-    y: f32,
-    title: &str,
-    add: SidebarHit,
-    enabled: bool,
-) {
-    // MixLink effectSection: 11 semibold MixerTheme.secondaryText, headerMini 22.
-    theme::text(
-        cmds,
-        Rect { x: x + 8.0, y, w: 180.0, h: Layout::HEADER_BUTTON },
-        title,
-        11.0,
-        theme::SECONDARY_TEXT,
-        true,
-    );
-    let plus = Rect {
-        x: x + Layout::SIDEBAR_WIDTH - 8.0 - Layout::HEADER_BUTTON,
-        y,
-        w: Layout::HEADER_BUTTON,
-        h: Layout::HEADER_BUTTON,
-    };
-    widgets::icon_pad(cmds, plus, "+", enabled);
-    if enabled {
-        hits.push((plus, add));
-    }
-}
-
 pub fn hit(hits: &[(Rect, SidebarHit)], x: f32, y: f32) -> Option<SidebarHit> {
     hits.iter().rev().find(|(r, _)| widgets::contains(*r, x, y)).map(|(_, h)| h.clone())
 }
@@ -675,6 +557,7 @@ pub fn hit(hits: &[(Rect, SidebarHit)], x: f32, y: f32) -> Option<SidebarHit> {
 #[cfg(test)]
 mod tests {
     use analog::{AnalogEngine, MixerState, OscSession, SessionConfig, SurfaceState};
+    use project::MixDocument;
 
     use super::*;
 
@@ -726,5 +609,119 @@ mod tests {
         assert!(!labels.contains(&"Projects folder"), "{labels:?}");
         assert!(hits.iter().any(|(_, h)| matches!(h, SidebarHit::AudioDevice)));
         assert!(hits.iter().any(|(_, h)| matches!(h, SidebarHit::Settings)));
+        assert!(hits.iter().any(|(_, h)| matches!(h, SidebarHit::OpenChains)));
+        assert!(labels.contains(&"EFFECTS"), "{labels:?}");
+        assert!(labels.contains(&"OPEN EFFECTS"), "{labels:?}");
+        let settings_y = cmds.iter().find_map(|c| match c {
+            DrawCmd::Text(t) if t.text == "SETTINGS" => Some(t.rect.y),
+            _ => None,
+        });
+        let settings_y = settings_y.expect("SETTINGS heading");
+        let foot = crate::chrome::footer_height(Page::Record);
+        assert!(
+            settings_y > 800.0 - foot - FOOT_H - settings_dock_h() - 1.0,
+            "SETTINGS should dock above the Effects/Channels footer, y={settings_y}"
+        );
+    }
+
+    #[test]
+    fn record_plugin_assign_shows_software_playback() {
+        let mut engine = test_engine();
+        let id = engine.config.plugin_chains[0].id;
+        engine.config.set_return_chain(ReturnLane::SendB, Some(analog::ChainRef::plugin(id)));
+        let focus = TextFocus::None;
+        let view = record_view(&engine, &focus);
+        let (cmds, hits) = paint(&view, 1200.0, 800.0);
+        let labels = texts(&cmds);
+        assert!(labels.contains(&"Software playback"), "{labels:?}");
+        assert!(labels.contains(&"3/4"), "{labels:?}");
+        assert!(hits.iter().any(|(_, h)| matches!(h, SidebarHit::AssignPlayback { id: hit } if *hit == id)));
+        assert!(!hits.iter().any(|(_, h)| matches!(h, SidebarHit::AssignPlayback { id: hit } if *hit != id)));
+    }
+
+    fn add_named_stage(engine: &mut AnalogEngine, chain: uuid::Uuid, name: &str) -> uuid::Uuid {
+        let stage = analog::PluginStage {
+            id: uuid::Uuid::new_v4(),
+            name: name.into(),
+            bundle_path: Some(format!("/plugins/{name}.vst3")),
+            class_uid: None,
+            bypassed: false,
+        };
+        let id = stage.id;
+        engine.config.plugin_chain_mut(chain).unwrap().stages.push(stage);
+        id
+    }
+
+    #[test]
+    fn record_plugin_assign_lists_stages_and_open() {
+        let mut engine = test_engine();
+        let chain = engine.config.plugin_chains[0].id;
+        let stage = add_named_stage(&mut engine, chain, "Valhalla");
+        engine.config.set_return_chain(ReturnLane::SendB, Some(analog::ChainRef::plugin(chain)));
+        let focus = TextFocus::None;
+        let view = record_view(&engine, &focus);
+        let (cmds, hits) = paint(&view, 1200.0, 800.0);
+        let labels = texts(&cmds);
+        assert!(labels.contains(&"Valhalla"), "{labels:?}");
+        assert!(labels.iter().any(|t| t.eq_ignore_ascii_case("OPEN")), "{labels:?}");
+        assert!(hits.iter().any(|(_, h)| matches!(h, SidebarHit::OpenPlugin { id } if *id == stage)));
+        let hardware_lane = engine.config.chain_ref(ReturnLane::SendA);
+        assert!(hardware_lane.is_some_and(|r| r.kind == ChainKind::Hardware));
+        assert_eq!(hits.iter().filter(|(_, h)| matches!(h, SidebarHit::OpenPlugin { .. })).count(), 1);
+    }
+
+    #[test]
+    fn mix_plugin_assign_lists_stages_and_open() {
+        let mut engine = test_engine();
+        let chain = engine.config.plugin_chains[0].id;
+        let stage = add_named_stage(&mut engine, chain, "Valhalla");
+        let mut mix = MixDocument::empty("Mix 1", 2);
+        let lane = MixLane::Strip(0);
+        if let Some(track) = mix.track_mut(lane) {
+            track.effect_chain = Some(analog::ChainRef::plugin(chain));
+        }
+        let focus = TextFocus::None;
+        let view = SidebarView {
+            page: Page::Mix,
+            engine: &engine,
+            sample_rate: 48_000,
+            buffer_frames: 128,
+            latency_ms: 2.7,
+            device_name: "Test Device",
+            mix: Some(&mix),
+            selected_lane: Some(lane),
+            scroll: 0.0,
+            focus: &focus,
+            caret: false,
+        };
+        let (cmds, hits) = paint(&view, 1200.0, 800.0);
+        let labels = texts(&cmds);
+        assert!(labels.contains(&"Valhalla"), "{labels:?}");
+        assert!(!labels.contains(&"Software playback"), "{labels:?}");
+        assert!(hits.iter().any(|(_, h)| matches!(h, SidebarHit::OpenPlugin { id } if *id == stage)));
+    }
+
+    #[test]
+    fn empty_plugin_stage_shows_no_plugin_and_disables_open() {
+        let mut engine = test_engine();
+        let chain = engine.config.plugin_chains[0].id;
+        engine.config.rename_plugin_chain(chain, "Big reverb");
+        engine.config.plugin_chain_mut(chain).unwrap().stages.push(analog::PluginStage {
+            id: uuid::Uuid::new_v4(),
+            name: "FX A".into(),
+            bundle_path: None,
+            class_uid: None,
+            bypassed: false,
+        });
+        engine.config.set_return_chain(ReturnLane::SendB, Some(analog::ChainRef::plugin(chain)));
+        let focus = TextFocus::None;
+        let view = record_view(&engine, &focus);
+        let (cmds, hits) = paint(&view, 1200.0, 800.0);
+        let labels = texts(&cmds);
+        assert!(labels.contains(&"Big reverb"), "{labels:?}");
+        assert!(labels.contains(&"No plugin"), "{labels:?}");
+        assert!(!labels.contains(&"FX A"), "{labels:?}");
+        assert!(labels.iter().any(|t| t.eq_ignore_ascii_case("OPEN")), "{labels:?}");
+        assert!(!hits.iter().any(|(_, h)| matches!(h, SidebarHit::OpenPlugin { .. })), "{hits:?}");
     }
 }

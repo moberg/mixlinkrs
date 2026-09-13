@@ -134,7 +134,7 @@ impl AppState {
                 let _ = ch.window.drag_window();
             }
         } else if matches!(self.chrome.text_focus, TextFocus::GearAlias(_)) {
-            self.chrome.text_focus = TextFocus::None;
+            self.commit_focus();
         }
     }
 
@@ -148,7 +148,7 @@ impl AppState {
                 return;
             }
             if matches!(self.chrome.text_focus, TextFocus::GearAlias(_)) {
-                self.chrome.text_focus = TextFocus::None;
+                self.commit_focus();
             }
             return;
         }
@@ -160,10 +160,7 @@ impl AppState {
             Key::Named(NamedKey::Backspace) => self.edit_focus(|s| {
                 s.pop();
             }),
-            Key::Character(c) if c.chars().all(|ch| !ch.is_control()) => {
-                let add = c.to_string();
-                self.edit_focus(|s| s.push_str(&add));
-            }
+            other if self.type_into_focus(other) => {}
             _ => {}
         }
     }

@@ -1,6 +1,7 @@
 //! MixLink look: paint + hit from Copy layout structs. Not rustest Live widgets.
 
 pub mod arrangement;
+pub mod chains;
 pub mod chrome;
 pub mod deck;
 pub mod hit;

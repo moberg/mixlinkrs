@@ -280,7 +280,7 @@ fn paint_strip(
             let r = view.engine.surface.returns.iter().find(|r| r.id == lane as i32);
             let f = r.map(|r| r.fader).unwrap_or(0.0);
             let p = r.map(|r| r.pan).unwrap_or(0.5);
-            let unused = lane.is_send() && view.engine.config.effect_ref(lane).is_none();
+            let unused = lane.is_send() && view.engine.config.chain_ref(lane).is_none();
             let enabled = view.engine.config.is_return_enabled(lane);
             (
                 f,

@@ -25,6 +25,7 @@ pub(crate) struct Chrome {
     pub overlay: Option<Overlay>,
     pub menu_action: Option<MenuAction>,
     pub channels: Option<ChannelsWindow>,
+    pub chains: Option<ChainsWindow>,
     pub settings: Option<SettingsWindow>,
     pub modifiers: ModifiersState,
     pub text_focus: TextFocus,
@@ -50,6 +51,16 @@ pub(crate) struct ChannelsWindow {
     pub window: Arc<Window>,
     pub cursor: (f32, f32),
     pub scroll: f32,
+    pub menu: Option<Overlay>,
+}
+
+/// Catalog editor for hardware presets and effect chains.
+pub(crate) struct ChainsWindow {
+    pub renderer: render::Renderer,
+    pub window: Arc<Window>,
+    pub cursor: (f32, f32),
+    pub scroll: f32,
+    pub tab: ui_mixlink::chains::ChainsTab,
     pub menu: Option<Overlay>,
 }
 

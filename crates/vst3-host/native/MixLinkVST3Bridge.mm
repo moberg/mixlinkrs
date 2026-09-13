@@ -68,36 +68,37 @@ std::string uidString (const VST3::UID &uid)
 
 } // namespace
 
+struct MixLinkVST3Instance;
+
 namespace {
 
-static MixLinkVST3StateDirtyBlock gStateDirtyHandler;
+static MixLinkVST3StateDirtyFn gStateDirtyHandler;
 
-void notifyStateDirty (BOOL immediate)
+void notifyStateDirty (MixLinkVST3Instance *instance, BOOL immediate)
 {
-	MixLinkVST3StateDirtyBlock handler = gStateDirtyHandler;
-	if (handler == nil)
+	MixLinkVST3StateDirtyFn handler = gStateDirtyHandler;
+	if (handler == nullptr || instance == nullptr)
 		return;
+	const int flag = immediate ? 1 : 0;
 	if (NSThread.isMainThread)
-		handler (immediate);
+		handler (instance, flag);
 	else
 		dispatch_async (dispatch_get_main_queue (), ^{
 			if (gStateDirtyHandler)
-				gStateDirtyHandler (immediate);
+				gStateDirtyHandler (instance, flag);
 		});
 }
 
 } // namespace
 
-void MixLinkVST3SetStateDirtyHandler (MixLinkVST3StateDirtyBlock handler)
+void MixLinkVST3SetStateDirtyHandler (MixLinkVST3StateDirtyFn fn)
 {
-	gStateDirtyHandler = handler ? [handler copy] : nil;
+	gStateDirtyHandler = fn;
 }
 
 #pragma mark - Plug frame
 
 @class MixLinkEditorWindowDelegate;
-
-struct MixLinkVST3Instance;
 
 namespace {
 
@@ -124,14 +125,14 @@ public:
 	tresult PLUGIN_API performEdit (ParamID id, ParamValue value) SMTG_OVERRIDE;
 	tresult PLUGIN_API endEdit (ParamID) SMTG_OVERRIDE
 	{
-		notifyStateDirty (NO);
+		notifyStateDirty (owner, NO);
 		return kResultOk;
 	}
 	tresult PLUGIN_API restartComponent (int32) SMTG_OVERRIDE { return kResultOk; }
 	tresult PLUGIN_API setDirty (TBool state) SMTG_OVERRIDE
 	{
 		if (state)
-			notifyStateDirty (NO);
+			notifyStateDirty (owner, NO);
 		return kResultOk;
 	}
 	tresult PLUGIN_API requestOpenEditor (FIDString) SMTG_OVERRIDE { return kResultFalse; }
@@ -316,7 +317,7 @@ tresult MixLinkComponentHandler::performEdit (ParamID id, ParamValue value)
 	MixLinkVST3Instance *instance = self.instance;
 	if (instance == nullptr)
 		return;
-	notifyStateDirty (YES);
+	notifyStateDirty (instance, YES);
 	if (instance->view)
 	{
 		instance->view->setFrame (nullptr);

@@ -46,6 +46,14 @@ extern "C" {
     pub fn MixLinkVST3HasEditor(instance: MixLinkVST3Ref) -> i32;
     pub fn MixLinkVST3SetTempo(instance: MixLinkVST3Ref, bpm: f64);
     pub fn MixLinkVST3ScanPlugins() -> *const std::ffi::c_void;
+    pub fn MixLinkVST3SaveState(instance: MixLinkVST3Ref) -> *const std::ffi::c_void;
+    pub fn MixLinkVST3RestoreState(
+        instance: MixLinkVST3Ref,
+        state: *const std::ffi::c_void,
+    ) -> i32;
+    pub fn MixLinkVST3SetStateDirtyHandler(
+        fn_ptr: Option<extern "C" fn(MixLinkVST3Ref, i32)>,
+    );
 }
 
 /// IOProc: process a published send slot. Lock-free.
@@ -181,6 +189,103 @@ pub fn set_tempo(instance: MixLinkVST3Ref, bpm: f64) {
     if !instance.is_null() {
         unsafe { MixLinkVST3SetTempo(instance, bpm) }
     }
+}
+
+/// UI thread: serialize component + controller state (MixLink `.state` blob).
+pub fn save_state(instance: MixLinkVST3Ref) -> Option<Vec<u8>> {
+    if instance.is_null() {
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::ptr::NonNull;
+
+        use objc2::rc::Id;
+        use objc2_foundation::NSData;
+
+        let ptr = unsafe { MixLinkVST3SaveState(instance) };
+        if ptr.is_null() {
+            return None;
+        }
+        let data = unsafe { Id::<NSData>::retain(ptr as *mut NSData) }?;
+        let len = data.length() as usize;
+        if len == 0 {
+            return None;
+        }
+        let mut out = vec![0u8; len];
+        unsafe {
+            data.getBytes_length(NonNull::new_unchecked(out.as_mut_ptr().cast()), len as _);
+        }
+        Some(out)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = instance;
+        None
+    }
+}
+
+/// UI thread: restore a blob from [`save_state`].
+pub fn restore_state(instance: MixLinkVST3Ref, bytes: &[u8]) -> bool {
+    if instance.is_null() || bytes.is_empty() {
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_foundation::NSData;
+
+        let data = unsafe {
+            NSData::dataWithBytes_length(bytes.as_ptr() as *mut _, bytes.len() as _)
+        };
+        unsafe {
+            MixLinkVST3RestoreState(
+                instance,
+                &*data as *const NSData as *const std::ffi::c_void,
+            ) != 0
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (instance, bytes);
+        false
+    }
+}
+
+use std::sync::Mutex;
+
+#[derive(Clone, Copy, Debug)]
+pub struct DirtyEvent {
+    pub instance: MixLinkVST3Ref,
+    pub immediate: bool,
+}
+
+// Pointers are only read on the main thread after draining; the queue itself is
+// Sync so the ObjC callback can push from the main queue.
+struct DirtyQueue(Mutex<Vec<DirtyEvent>>);
+unsafe impl Sync for DirtyQueue {}
+
+static DIRTY_QUEUE: DirtyQueue = DirtyQueue(Mutex::new(Vec::new()));
+
+extern "C" fn dirty_handler(instance: MixLinkVST3Ref, immediate: i32) {
+    if instance.is_null() {
+        return;
+    }
+    if let Ok(mut q) = DIRTY_QUEUE.0.lock() {
+        q.push(DirtyEvent {
+            instance,
+            immediate: immediate != 0,
+        });
+    }
+}
+
+/// Install the host dirty callback (idempotent). Call once at app boot.
+pub fn install_state_dirty_handler() {
+    unsafe { MixLinkVST3SetStateDirtyHandler(Some(dirty_handler)) }
+}
+
+/// Drain pending dirty notifications (main / UI thread).
+pub fn take_dirty_events() -> Vec<DirtyEvent> {
+    DIRTY_QUEUE.0.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
 }
 
 /// Publish `next` to a live send slot and retire the previous instance.

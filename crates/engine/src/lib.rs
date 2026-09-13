@@ -7,5 +7,5 @@ pub mod schedule;
 pub mod taps;
 
 pub use process::{AudioBuf, BufferList, Engine, EngineHandles};
-pub use schedule::{LanePlayer, MixGain, RtControls, Schedule, SendRoute, StripFeed};
+pub use schedule::{InsertStage, LanePlayer, MixGain, RtControls, Schedule, SendRoute, StripFeed};
 pub use taps::{display_level, AudioTapBinding, TAP_COUNT};

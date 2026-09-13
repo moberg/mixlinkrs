@@ -426,6 +426,8 @@ impl AppState {
         if let Some(n) = self.session.viewing_take {
             meta.set_take_start_frame(n, self.timeline.arrangement_origin);
         }
+        meta.return_chains = self.surface.analog.config.return_chains.clone();
+        meta.strips = self.surface.analog.config.strips.clone();
         let _ = self.session.project.save_meta(&meta, &folder);
     }
 
@@ -455,6 +457,14 @@ impl AppState {
         }
         let sr = self.audio._stream.as_ref().map(|s| s.sample_rate() as f64).unwrap_or(48_000.0);
         let meta = self.session.project.load_meta(&folder);
+        if self.surface.analog.config.apply_project_return_chains(&meta.return_chains) {
+            self.surface.analog.rewrite_all_sends();
+            self.surface.analog.apply_all_returns();
+            self.surface.analog.persist();
+        }
+        if self.surface.analog.apply_project_strips(&meta.strips) {
+            self.surface.analog.persist();
+        }
         self.set_tempo(meta.tempo);
         self.timeline.grid = meta.grid;
         self.timeline.grid_enabled = meta.grid_enabled;
@@ -516,6 +526,14 @@ impl AppState {
             }
         }
         self.sync_origin();
+        self.convert_mix_inserts_to_chains();
+        self.reset_plugin_scopes_for_project();
+        self.load_configured_plugins();
+        if (meta.return_chains.is_empty() && !self.surface.analog.config.return_chains.is_empty())
+            || meta.strips.is_empty()
+        {
+            self.persist_project_meta();
+        }
         log::info!(
             "project {} — {} mix(es), take(s) {:?}",
             folder.display(),

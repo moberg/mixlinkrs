@@ -2,7 +2,10 @@
 //!
 //! Session config load/save is in [`analog::SessionConfig`]. Live send-slot
 //! state lives under Application Support (`plugin-slot-{n}-{bundle}.state`);
-//! mix inserts use [`insert_state_url`] next to the mix JSON.
+//! plugin-chain stage state is dual-scope:
+//! - global: [`plugin_stage_global_state_url`] next to session config
+//! - project: [`plugin_stage_state_url`] inside the project folder
+//! Mix inserts use [`insert_state_url`] next to the mix JSON.
 
 use std::path::{Path, PathBuf};
 
@@ -46,6 +49,36 @@ pub fn insert_state_url(
         uuid_upper(&mix_id),
         uuid_upper(&insert_id),
         bundle_name
+    ))
+}
+
+/// `{project}/plugin-stage-{stageUUID}-{bundleName}.state`
+pub fn plugin_stage_state_url(
+    project: &Path,
+    stage_id: Uuid,
+    bundle_path: &str,
+) -> PathBuf {
+    let bundle_name =
+        Path::new(bundle_path).file_name().and_then(|s| s.to_str()).unwrap_or(bundle_path);
+    project.join(format!(
+        "plugin-stage-{}-{}.state",
+        uuid_upper(&stage_id),
+        bundle_name
+    ))
+}
+
+/// `~/Library/Application Support/MixLink/plugin-stage-{stageUUID}-{bundle}.state`
+///
+/// Global chain preset state (survives across projects).
+pub fn plugin_stage_global_state_url(stage_id: Uuid, bundle_path: &str) -> PathBuf {
+    let name = Path::new(bundle_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(bundle_path);
+    app_support_dir().join(format!(
+        "plugin-stage-{}-{}.state",
+        uuid_upper(&stage_id),
+        name
     ))
 }
 
@@ -246,5 +279,23 @@ mod tests {
         );
         let fallback = plugin_slot_state_url(2, None);
         assert_eq!(fallback.file_name().unwrap().to_str().unwrap(), "plugin-slot-2.state");
+
+        let stage = Uuid::from_u128(0x99);
+        let project = plugin_stage_state_url(
+            Path::new("/proj"),
+            stage,
+            "/Library/Audio/Plug-Ins/VST3/Presswerk.vst3",
+        );
+        assert_eq!(
+            project.file_name().unwrap().to_str().unwrap(),
+            &format!("plugin-stage-{}-Presswerk.vst3.state", uuid_upper(&stage))
+        );
+        let global = plugin_stage_global_state_url(stage, "/plugins/Presswerk.vst3");
+        assert!(global
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .ends_with("-Presswerk.vst3.state"));
     }
 }

@@ -5,6 +5,22 @@ use std::time::Instant;
 
 use engine::{Engine, EngineHandles};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum PluginStateScope {
+    #[default]
+    Project,
+    Global,
+}
+
+impl PluginStateScope {
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Project => Self::Global,
+            Self::Global => Self::Project,
+        }
+    }
+}
+
 pub(crate) struct Audio {
     pub engine: *mut Engine,
     pub engine_handles: EngineHandles,
@@ -14,6 +30,8 @@ pub(crate) struct Audio {
     pub recording: bool,
     pub record_started: Option<Instant>,
     pub playing: bool,
-    pub plugin_refs: HashMap<i32, vst3_host::MixLinkVST3Ref>,
+    pub plugin_refs: HashMap<uuid::Uuid, vst3_host::MixLinkVST3Ref>,
     pub insert_refs: HashMap<uuid::Uuid, vst3_host::MixLinkVST3Ref>,
+    /// Per-stage Project vs Global chunk-state selection.
+    pub plugin_state_scope: HashMap<uuid::Uuid, PluginStateScope>,
 }

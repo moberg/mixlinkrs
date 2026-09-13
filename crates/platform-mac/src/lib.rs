@@ -34,7 +34,7 @@ pub mod stub {
     }
     impl DeviceInfo {
         pub fn usable(&self) -> bool {
-            self.inputs >= 2 && self.outputs >= 2
+            self.outputs >= 2
         }
     }
     pub fn enumerate_devices() -> Vec<DeviceInfo> {

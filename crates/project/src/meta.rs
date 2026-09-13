@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use analog::{ChainRef, StripBinding};
+
 use crate::document::{MixArrangement, MixGrid, MixLane};
 
 /// One mix in the project browser list.
@@ -42,6 +44,12 @@ pub struct ProjectMeta {
     pub grid: MixGrid,
     #[serde(default = "default_pixels_per_bar")]
     pub pixels_per_bar: f64,
+    /// Send/bus effect assignments for this project (`"0"` = Send A, …).
+    #[serde(default)]
+    pub return_chains: HashMap<String, ChainRef>,
+    /// Mixer strip → hardware input assignments for this project.
+    #[serde(default)]
+    pub strips: Vec<StripBinding>,
 }
 
 fn default_next_take() -> i32 {
@@ -74,6 +82,8 @@ impl Default for ProjectMeta {
             grid_enabled: true,
             grid: MixGrid::Bar1,
             pixels_per_bar: 48.0,
+            return_chains: HashMap::new(),
+            strips: Vec::new(),
         }
     }
 }

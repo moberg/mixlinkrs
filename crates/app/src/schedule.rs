@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use analog::{ReturnLane, SessionConfig};
-use engine::{AudioTapBinding, Engine, LanePlayer, MixGain, Schedule, StripFeed};
+use analog::{ChainKind, ReturnLane, SessionConfig};
+use engine::{AudioTapBinding, Engine, InsertStage, LanePlayer, MixGain, Schedule, StripFeed};
 use engine_api::{MASTER_TAP, MIX_PLAY_MAX_LANES, TAP_COUNT};
 use project::MixLane;
 
@@ -69,38 +69,40 @@ impl AppState {
         schedule.taps[MASTER_TAP] = AudioTapBinding::master_mix();
         self.publish_record_main_mix(&mut schedule);
 
-        for slot in 0..8 {
-            let id = slot as i32;
-            let Some(plugin) = cfg.plugin(id) else {
-                continue;
-            };
-            if !plugin.is_loaded() {
+        for chain in &cfg.plugin_chains {
+            if !chain.is_loaded() {
                 continue;
             }
-            let used = analog::ALL_SEND_LANES.iter().any(|lane| {
+            let used = analog::ReturnLane::ALL.iter().any(|lane| {
                 matches!(
                     cfg.send_destination(*lane),
-                    Some(analog::SendDestination::Plugin(pid)) if pid == id
+                    Some(analog::SendDestination::Plugin(pid)) if pid == chain.id
                 )
-            }) || matches!(
-                cfg.send_destination(ReturnLane::Bus1),
-                Some(analog::SendDestination::Plugin(pid)) if pid == id
-            ) || matches!(
-                cfg.send_destination(ReturnLane::Bus2),
-                Some(analog::SendDestination::Plugin(pid)) if pid == id
-            );
+            });
             if !used {
                 continue;
             }
-            schedule.routes[slot].enabled = true;
-            schedule.routes[slot].return_channel = plugin.return_channel;
+            let mut route = engine::SendRoute {
+                enabled: true,
+                return_channel: chain.return_channel,
+                ..engine::SendRoute::default()
+            };
             for (i, strip) in cfg.strips.iter().enumerate().take(8) {
-                schedule.routes[slot].feeds[i] = StripFeed {
+                route.feeds[i] = StripFeed {
                     channel: strip.index,
-                    gain: self.surface.analog.plugin_send_gain(id, i),
+                    gain: self.surface.analog.plugin_send_gain(chain.id, i),
                     linked: strip.linked_stereo,
                 };
             }
+            route.stages = chain
+                .stages
+                .iter()
+                .filter_map(|stage| {
+                    let inst = self.audio.plugin_refs.get(&stage.id).copied()?;
+                    Some(InsertStage { instance: inst as usize, bypassed: stage.bypassed })
+                })
+                .collect();
+            schedule.routes.push(route);
         }
 
         let play_tracks = self.mixer_tracks();
@@ -112,6 +114,44 @@ impl AppState {
             let amp = osc::fader_lin_to_amp(track.fader);
             let pan = if track.lane == MixLane::Main { 0.5 } else { track.pan };
             let (gain_l, gain_r) = osc::stereo_pan_amps(amp, pan);
+            let mut insert_stages = Vec::new();
+            let mut hw_out = -1;
+            let mut hw_in = -1;
+            let mut hw_enabled = false;
+            if let Some(chain) = track.effect_chain {
+                match chain.kind {
+                    ChainKind::Plugin => {
+                        if let Some(pc) = cfg.plugin_chain(chain.id) {
+                            insert_stages = pc
+                                .stages
+                                .iter()
+                                .filter_map(|stage| {
+                                    let inst = self.audio.plugin_refs.get(&stage.id).copied()?;
+                                    Some(InsertStage {
+                                        instance: inst as usize,
+                                        bypassed: stage.bypassed,
+                                    })
+                                })
+                                .collect();
+                        }
+                    }
+                    ChainKind::Hardware => {
+                        if let Some(hc) = cfg.hardware_chain(chain.id) {
+                            if let (Some(&first), Some(&last)) =
+                                (hc.stages.first(), hc.stages.last())
+                            {
+                                if let (Some(a), Some(b)) =
+                                    (cfg.hardware_preset(first), cfg.hardware_preset(last))
+                                {
+                                    hw_out = a.output;
+                                    hw_in = b.input;
+                                    hw_enabled = track.hardware_chain_enabled;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             schedule.lanes[i] = LanePlayer {
                 active: self.audio.playing,
                 is_main: track.lane == MixLane::Main,
@@ -121,6 +161,10 @@ impl AppState {
                 gain_l,
                 gain_r,
                 insert: usize::MAX,
+                insert_stages,
+                hw_out,
+                hw_in,
+                hw_enabled,
             };
         }
         schedule.listen_amp = osc::fader_lin_to_amp(self.surface.control_room_fader);

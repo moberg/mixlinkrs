@@ -1,28 +1,31 @@
 //! Menu command enum and the domain mutations it applies.
 
-use analog::{ChannelID, EffectRef, MixerBus};
+use analog::{ChainRef, ChannelID, MixerBus};
 use project::MixGrid;
 use ui_mixlink::widgets::MenuItem;
 
+use crate::chains::DeleteKind;
 use crate::state::AppState;
 
 #[derive(Clone, Debug)]
 pub(crate) enum MenuAction {
     StripSource { strip: usize },
     ReturnEffect { lane: analog::ReturnLane },
-    HardwareOutput { id: i32 },
-    HardwareInput { id: i32 },
+    MixChain { lane: project::MixLane },
+    HardwarePresetOutput { id: uuid::Uuid },
+    HardwarePresetInput { id: uuid::Uuid },
     MixOut,
     AudioDevice,
     AudioBuffer,
-    PluginBundle { id: i32 },
-    PluginPlayback { id: i32 },
-    InsertBundle { insert: uuid::Uuid },
+    PluginStageBundle { id: uuid::Uuid },
+    PluginChainPlayback { id: uuid::Uuid },
+    HardwareStagePreset { chain: uuid::Uuid, index: usize },
     MixContext { id: uuid::Uuid },
     TakeContext { number: i32 },
     Arrange,
     Grid,
     SwitchProject,
+    ConfirmDelete { kind: DeleteKind, id: uuid::Uuid },
 }
 
 impl AppState {
@@ -33,28 +36,28 @@ impl AppState {
                     self.surface
                         .analog
                         .set_strip_source(strip, ChannelID::new(MixerBus::Input, idx));
+                    self.persist_project_meta();
                 }
             }
             MenuAction::ReturnEffect { lane } => {
-                let ref_ = if item.id == "none" || item.id.is_empty() {
-                    None
-                } else if let Some(id) = item.id.strip_prefix("hw:").and_then(|s| s.parse().ok()) {
-                    Some(EffectRef::Hardware(id))
-                } else if let Some(id) = item.id.strip_prefix("pl:").and_then(|s| s.parse().ok()) {
-                    Some(EffectRef::Plugin(id))
-                } else {
-                    None
-                };
-                self.surface.analog.set_return_effect(lane, ref_);
+                let ref_ = parse_chain_item(&item.id);
+                if let Some(r) = ref_ {
+                    self.clear_chain_elsewhere(r.id, None);
+                }
+                self.surface.analog.set_return_chain(lane, ref_);
+                self.persist_project_meta();
             }
-            MenuAction::HardwareOutput { id } => {
+            MenuAction::MixChain { lane } => {
+                self.set_mix_chain(lane, parse_chain_item(&item.id));
+            }
+            MenuAction::HardwarePresetOutput { id } => {
                 if let Ok(idx) = item.id.parse::<i32>() {
-                    self.surface.analog.set_hardware_effect_io(id, Some(idx), None);
+                    self.surface.analog.set_hardware_preset_io(id, Some(idx), None);
                 }
             }
-            MenuAction::HardwareInput { id } => {
+            MenuAction::HardwarePresetInput { id } => {
                 if let Ok(idx) = item.id.parse::<i32>() {
-                    self.surface.analog.set_hardware_effect_io(id, None, Some(idx));
+                    self.surface.analog.set_hardware_preset_io(id, None, Some(idx));
                 }
             }
             MenuAction::MixOut => {
@@ -72,19 +75,25 @@ impl AppState {
                     self.audio.restart_audio(&self.surface.analog.config);
                 }
             }
-            MenuAction::PluginBundle { id } => {
+            MenuAction::PluginStageBundle { id } => {
                 let path = if item.id.is_empty() { None } else { Some(item.id.clone()) };
                 let name = if item.label == "None" { None } else { Some(item.label.clone()) };
-                self.surface.analog.set_plugin_bundle(id, path, name);
-                self.load_plugin_slot(id);
-            }
-            MenuAction::PluginPlayback { id } => {
-                if let Ok(pair) = item.id.parse::<i32>() {
-                    self.surface.analog.set_plugin_playback(id, pair);
+                self.surface.analog.set_plugin_stage_bundle(id, path, name);
+                if item.id.is_empty() {
+                    self.unload_plugin_stage(id);
+                } else {
+                    self.load_plugin_stage(id);
                 }
             }
-            MenuAction::InsertBundle { insert } => {
-                self.set_insert_bundle(insert, &item.id, &item.label);
+            MenuAction::PluginChainPlayback { id } => {
+                if let Ok(pair) = item.id.parse::<i32>() {
+                    self.surface.analog.set_plugin_chain_playback(id, pair);
+                }
+            }
+            MenuAction::HardwareStagePreset { chain, index } => {
+                if let Ok(preset) = item.id.parse::<uuid::Uuid>() {
+                    self.surface.analog.set_hardware_chain_stage(chain, index, preset);
+                }
             }
             MenuAction::MixContext { id } => {
                 if item.id == "delete" {
@@ -116,6 +125,11 @@ impl AppState {
                 }
             }
             MenuAction::SwitchProject => self.switch_project(&item.id),
+            MenuAction::ConfirmDelete { kind, id } => {
+                if item.id == "delete" {
+                    self.apply_delete(kind, id);
+                }
+            }
         }
     }
 
@@ -141,4 +155,17 @@ impl AppState {
             }
         }
     }
+}
+
+fn parse_chain_item(id: &str) -> Option<ChainRef> {
+    if id == "none" || id.is_empty() {
+        return None;
+    }
+    if let Some(s) = id.strip_prefix("hw:") {
+        return s.parse().ok().map(ChainRef::hardware);
+    }
+    if let Some(s) = id.strip_prefix("pl:") {
+        return s.parse().ok().map(ChainRef::plugin);
+    }
+    None
 }

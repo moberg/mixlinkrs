@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use analog::{EffectRef, MixerBus};
+use analog::MixerBus;
 use engine_api::UiCommand;
 use project::{MixGrid, ProjectMeta, ProjectStore};
 use render::Rect;
@@ -13,6 +13,7 @@ use ui_mixlink::sidebar::SidebarHit;
 use ui_mixlink::theme::Layout;
 use ui_mixlink::widgets::MenuItem;
 use winit::event_loop::ActiveEventLoop;
+use winit::keyboard::{Key, NamedKey};
 
 use crate::menu_action::MenuAction;
 use crate::state::{AppState, Chrome};
@@ -87,57 +88,32 @@ impl AppState {
         event_loop: &ActiveEventLoop,
     ) {
         match hit {
-            SidebarHit::AddHardware => self.surface.analog.add_hardware_effect(),
-            SidebarHit::RemoveHardware(id) => self.surface.analog.remove_hardware_effect(id),
-            SidebarHit::EditHardwareName(id) => {
-                self.chrome.text_focus = TextFocus::HardwareName(id)
-            }
-            SidebarHit::HardwareOutput(id) => {
-                self.open_output_menu(MenuAction::HardwareOutput { id }, anchor)
-            }
-            SidebarHit::HardwareInput(id) => {
-                self.open_input_menu(MenuAction::HardwareInput { id }, anchor)
-            }
-            SidebarHit::AddPlugin => self.surface.analog.add_plugin(),
-            SidebarHit::RemovePlugin(id) => {
-                vst3_host::exchange_and_retire(id as u32, std::ptr::null_mut());
-                self.audio.plugin_refs.remove(&id);
-                self.surface.analog.remove_plugin(id);
-            }
-            SidebarHit::EditPluginName(id) => self.chrome.text_focus = TextFocus::PluginName(id),
-            SidebarHit::PluginBundle(id) => {
-                self.open_plugin_menu(MenuAction::PluginBundle { id }, anchor)
-            }
-            SidebarHit::PluginEdit(id) => {
-                if let Some(&inst) = self.audio.plugin_refs.get(&id) {
-                    let title = self
-                        .surface
-                        .analog
-                        .config
-                        .plugin(id)
-                        .map(|p| p.title())
-                        .unwrap_or_else(|| "Plugin".into());
-                    vst3_host::show_editor(inst, &title);
-                } else {
-                    self.load_plugin_slot(id);
-                    if let Some(&inst) = self.audio.plugin_refs.get(&id) {
-                        let title = self
-                            .surface
-                            .analog
-                            .config
-                            .plugin(id)
-                            .map(|p| p.title())
-                            .unwrap_or_else(|| "Plugin".into());
-                        vst3_host::show_editor(inst, &title);
-                    }
+            SidebarHit::OpenChains => self.chrome.open_or_focus_chains(event_loop),
+            SidebarHit::AssignReturn { lane } => self.open_return_chain_menu(lane, anchor),
+            SidebarHit::AssignPlayback { id } => self.open_playback_menu_chain(id, anchor),
+            SidebarHit::OpenPlugin { id } => self.open_plugin_editor(id),
+            SidebarHit::AssignMix => {
+                if let Some(lane) = self.timeline.selected_lane {
+                    self.open_mix_chain_menu(lane, anchor);
                 }
             }
-            SidebarHit::PluginBypass(id) => {
-                let on = self.surface.analog.config.plugin(id).map(|p| !p.bypassed).unwrap_or(true);
-                self.surface.analog.set_plugin_bypass(id, on);
-                vst3_host::slot_set_bypass(id as u32, on);
+            SidebarHit::ClearMixChain => {
+                if let Some(lane) = self.timeline.selected_lane {
+                    self.set_mix_chain(lane, None);
+                }
             }
-            SidebarHit::PluginPlayback(id) => self.open_playback_menu(id, anchor),
+            SidebarHit::ToggleMixHardware => {
+                if let Some(lane) = self.timeline.selected_lane {
+                    let on = self
+                        .session
+                        .mix
+                        .as_ref()
+                        .and_then(|m| m.track(lane))
+                        .map(|t| !t.hardware_chain_enabled)
+                        .unwrap_or(true);
+                    self.set_mix_hardware_enabled(lane, on);
+                }
+            }
             SidebarHit::AudioDevice => self.open_device_menu(anchor),
             SidebarHit::AudioBuffer => self.open_buffer_menu(anchor),
             SidebarHit::Channels => self.chrome.open_or_focus_channels(event_loop),
@@ -149,43 +125,6 @@ impl AppState {
                 }
                 self.chrome.open_or_focus_settings(event_loop);
             }
-            SidebarHit::AddInsert => self.add_insert(),
-            SidebarHit::RemoveInsert(id) => {
-                if let Some(inst) = self.audio.insert_refs.remove(&id) {
-                    vst3_host::retire_instance(inst);
-                }
-                if let Some(mut mix) = self.session.mix.take() {
-                    for t in &mut mix.tracks {
-                        t.inserts.retain(|i| i.id != id);
-                    }
-                    self.session.mix = Some(mix);
-                    self.persist_mix();
-                }
-            }
-            SidebarHit::InsertBundle(id) => {
-                self.open_plugin_menu(MenuAction::InsertBundle { insert: id }, anchor)
-            }
-            SidebarHit::InsertEdit(id) => {
-                if let Some(&inst) = self.audio.insert_refs.get(&id) {
-                    vst3_host::show_editor(inst, "Insert");
-                } else {
-                    self.load_insert(id);
-                    if let Some(&inst) = self.audio.insert_refs.get(&id) {
-                        vst3_host::show_editor(inst, "Insert");
-                    }
-                }
-            }
-            SidebarHit::InsertBypass(id) => {
-                if let Some(mut mix) = self.session.mix.take() {
-                    for t in &mut mix.tracks {
-                        if let Some(ins) = t.inserts.iter_mut().find(|i| i.id == id) {
-                            ins.bypassed = !ins.bypassed;
-                        }
-                    }
-                    self.session.mix = Some(mix);
-                    self.persist_mix();
-                }
-            }
         }
     }
 }
@@ -193,6 +132,9 @@ impl AppState {
 impl Chrome {
     pub(crate) fn place_menu(&mut self, anchor: Rect, items: Vec<MenuItem>, action: MenuAction) {
         if let Some(ch) = self.channels.as_mut() {
+            ch.menu = None;
+        }
+        if let Some(ch) = self.chains.as_mut() {
             ch.menu = None;
         }
         let (w, h) = self.renderer.logical_size();
@@ -253,39 +195,14 @@ impl AppState {
             }
             // MixLink `ReturnEffectMenu` applies to effect AND bus returns
             // (`case .effectReturn, .busReturn`). Main is plain Text — no menu.
-            StripKind::Return(lane) => {
-                let current = self.surface.analog.config.effect_ref(lane);
-                let mut items = vec![MenuItem {
-                    id: "none".into(),
-                    label: "No effect".into(),
-                    checked: current.is_none(),
-                    section: None,
-                }];
-                for hw in &self.surface.analog.config.hardware_effects {
-                    items.push(MenuItem {
-                        id: format!("hw:{}", hw.id),
-                        label: hw.title(),
-                        checked: current == Some(EffectRef::Hardware(hw.id)),
-                        section: Some("Hardware".into()),
-                    });
-                }
-                for p in &self.surface.analog.config.plugins {
-                    items.push(MenuItem {
-                        id: format!("pl:{}", p.id),
-                        label: p.title(),
-                        checked: current == Some(EffectRef::Plugin(p.id)),
-                        section: Some("Plugins".into()),
-                    });
-                }
-                self.chrome.place_menu(anchor, items, MenuAction::ReturnEffect { lane });
-            }
+            StripKind::Return(lane) => self.open_return_chain_menu(lane, anchor),
             StripKind::Main => {}
         }
     }
 
     pub(crate) fn open_output_menu(&mut self, action: MenuAction, anchor: Rect) {
         let items = self.output_menu_items(&action);
-        self.chrome.place_menu(anchor, items, action);
+        self.place_active_menu(anchor, items, action);
     }
 
     pub(crate) fn open_channels_mix_out_menu(&mut self, anchor: Rect) {
@@ -296,14 +213,9 @@ impl AppState {
     fn output_menu_items(&self, action: &MenuAction) -> Vec<MenuItem> {
         let current = match action {
             MenuAction::MixOut => Some(self.surface.analog.config.main_output),
-            MenuAction::HardwareOutput { id } => self
-                .surface
-                .analog
-                .config
-                .hardware_effects
-                .iter()
-                .find(|e| e.id == *id)
-                .map(|e| e.output),
+            MenuAction::HardwarePresetOutput { id } => {
+                self.surface.analog.config.hardware_preset(*id).map(|e| e.output)
+            }
             _ => None,
         };
         self.surface
@@ -322,14 +234,9 @@ impl AppState {
 
     pub(crate) fn open_input_menu(&mut self, action: MenuAction, anchor: Rect) {
         let current = match action {
-            MenuAction::HardwareInput { id } => self
-                .surface
-                .analog
-                .config
-                .hardware_effects
-                .iter()
-                .find(|e| e.id == id)
-                .map(|e| e.input),
+            MenuAction::HardwarePresetInput { id } => {
+                self.surface.analog.config.hardware_preset(id).map(|e| e.input)
+            }
             _ => None,
         };
         let items: Vec<MenuItem> = self
@@ -345,7 +252,7 @@ impl AppState {
                 section: None,
             })
             .collect();
-        self.chrome.place_menu(anchor, items, action);
+        self.place_active_menu(anchor, items, action);
     }
 
     pub(crate) fn open_plugin_menu(&mut self, action: MenuAction, anchor: Rect) {
@@ -363,25 +270,132 @@ impl AppState {
                 section: Some("VST3".into()),
             });
         }
-        self.chrome.place_menu(anchor, items, action);
+        self.place_active_menu(anchor, items, action);
     }
 
-    pub(crate) fn open_playback_menu(&mut self, id: i32, anchor: Rect) {
-        let current = self.surface.analog.config.plugin(id).map(|p| p.return_channel);
+    pub(crate) fn open_return_chain_menu(&mut self, lane: analog::ReturnLane, anchor: Rect) {
+        let current = self.surface.analog.config.chain_ref(lane);
+        let items = self.chain_menu_items(current, None);
+        self.place_active_menu(anchor, items, MenuAction::ReturnEffect { lane });
+    }
+
+    pub(crate) fn open_mix_chain_menu(&mut self, lane: project::MixLane, anchor: Rect) {
+        let current = self.session.mix.as_ref().and_then(|m| m.track(lane)).and_then(|t| t.effect_chain);
+        let items = self.chain_menu_items(current, Some(lane));
+        self.chrome.place_menu(anchor, items, MenuAction::MixChain { lane });
+    }
+
+    fn chain_menu_items(
+        &self,
+        current: Option<analog::ChainRef>,
+        keep_mix: Option<project::MixLane>,
+    ) -> Vec<MenuItem> {
+        let mut items = vec![MenuItem {
+            id: "none".into(),
+            label: "No effect".into(),
+            checked: current.is_none(),
+            section: None,
+        }];
+        for chain in &self.surface.analog.config.hardware_chains {
+            let used_elsewhere = self.chain_is_taken(chain.id, current, keep_mix);
+            if used_elsewhere && current.is_none_or(|c| c.id != chain.id) {
+                continue;
+            }
+            items.push(MenuItem {
+                id: format!("hw:{}", chain.id),
+                label: chain.title(),
+                checked: current.is_some_and(|c| c.id == chain.id),
+                section: Some("Hardware".into()),
+            });
+        }
+        for chain in &self.surface.analog.config.plugin_chains {
+            let used_elsewhere = self.chain_is_taken(chain.id, current, keep_mix);
+            if used_elsewhere && current.is_none_or(|c| c.id != chain.id) {
+                continue;
+            }
+            items.push(MenuItem {
+                id: format!("pl:{}", chain.id),
+                label: chain.title(),
+                checked: current.is_some_and(|c| c.id == chain.id),
+                section: Some("Plugins".into()),
+            });
+        }
+        items
+    }
+
+    fn chain_is_taken(
+        &self,
+        id: uuid::Uuid,
+        current: Option<analog::ChainRef>,
+        keep_mix: Option<project::MixLane>,
+    ) -> bool {
+        if current.is_some_and(|c| c.id == id) {
+            return false;
+        }
+        if self.surface.analog.config.lane_using_chain(id).is_some() {
+            return true;
+        }
+        self.chain_in_use_mix(id).is_some_and(|lane| keep_mix != Some(lane))
+    }
+
+    pub(crate) fn open_preset_menu(&mut self, chain: uuid::Uuid, index: usize, anchor: Rect) {
+        let current = self
+            .surface
+            .analog
+            .config
+            .hardware_chain(chain)
+            .and_then(|c| c.stages.get(index).copied());
         let items: Vec<MenuItem> = self
+            .surface
+            .analog
+            .config
+            .hardware_presets
+            .iter()
+            .map(|p| MenuItem {
+                id: p.id.to_string(),
+                label: p.title(),
+                checked: current == Some(p.id),
+                section: None,
+            })
+            .collect();
+        self.place_active_menu(anchor, items, MenuAction::HardwareStagePreset { chain, index });
+    }
+
+    pub(crate) fn open_playback_menu_chain(&mut self, id: uuid::Uuid, anchor: Rect) {
+        let cfg = &self.surface.analog.config;
+        let current = cfg.plugin_chain(id).map(|p| p.return_channel);
+        let last = self
             .surface
             .analog
             .mixer
             .strips(MixerBus::Playback)
             .into_iter()
-            .map(|ch| MenuItem {
-                id: ch.id.index.to_string(),
-                label: format!("{}/{}", ch.id.index + 1, ch.id.index + 2),
-                checked: current == Some(ch.id.index),
-                section: None,
+            .map(|ch| ch.id.index)
+            .max()
+            .unwrap_or(30);
+        let items: Vec<MenuItem> = (0..=last)
+            .step_by(2)
+            .map(|pair| {
+                let selectable = cfg.playback_pair_selectable(pair, id);
+                MenuItem {
+                    id: if selectable { pair.to_string() } else { String::new() },
+                    label: cfg.playback_menu_label(pair),
+                    checked: current == Some(pair),
+                    section: None,
+                }
             })
             .collect();
-        self.chrome.place_menu(anchor, items, MenuAction::PluginPlayback { id });
+        self.place_active_menu(anchor, items, MenuAction::PluginChainPlayback { id });
+    }
+
+    fn place_active_menu(&mut self, anchor: Rect, items: Vec<MenuItem>, action: MenuAction) {
+        if self.chrome.chains.is_some() {
+            self.chrome.place_chains_menu(anchor, items, action);
+        } else if self.chrome.channels.is_some() {
+            self.chrome.place_channels_menu(anchor, items, action);
+        } else {
+            self.chrome.place_menu(anchor, items, action);
+        }
     }
 
     pub(crate) fn open_device_menu(&mut self, anchor: Rect) {
@@ -499,34 +513,59 @@ impl AppState {
         self.chrome.place_menu(anchor, items, MenuAction::AudioBuffer);
     }
 
+    pub(crate) fn type_into_focus(&mut self, key: &Key) -> bool {
+        match key {
+            Key::Named(NamedKey::Space) => {
+                self.edit_focus(|s| s.push(' '));
+                true
+            }
+            Key::Character(c) if c.chars().all(|ch| !ch.is_control()) => {
+                let add = c.to_string();
+                self.edit_focus(|s| s.push_str(&add));
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn edit_focus(&mut self, f: impl FnOnce(&mut String)) {
         match self.chrome.text_focus {
             TextFocus::Tempo | TextFocus::ProjectName => {
                 f(&mut self.chrome.edit_buf);
             }
-            TextFocus::HardwareName(id) => {
+            TextFocus::HardwareName(_) | TextFocus::PluginName(_) => {}
+            TextFocus::HardwarePresetName(id) => {
                 let mut name = self
                     .surface
                     .analog
                     .config
-                    .hardware_effects
-                    .iter()
-                    .find(|h| h.id == id)
+                    .hardware_preset(id)
                     .map(|h| h.name.clone())
                     .unwrap_or_default();
                 f(&mut name);
-                self.surface.analog.set_hardware_effect_name(id, &name);
+                self.surface.analog.set_hardware_preset_name(id, &name);
             }
-            TextFocus::PluginName(id) => {
+            TextFocus::HardwareChainName(id) => {
                 let mut name = self
                     .surface
                     .analog
                     .config
-                    .plugin(id)
-                    .map(|p| p.name.clone())
+                    .hardware_chain(id)
+                    .map(|h| h.name.clone())
                     .unwrap_or_default();
                 f(&mut name);
-                self.surface.analog.set_plugin_name(id, &name);
+                self.surface.analog.set_hardware_chain_name(id, &name);
+            }
+            TextFocus::PluginChainName(id) => {
+                let mut name = self
+                    .surface
+                    .analog
+                    .config
+                    .plugin_chain(id)
+                    .map(|h| h.name.clone())
+                    .unwrap_or_default();
+                f(&mut name);
+                self.surface.analog.set_plugin_chain_name(id, &name);
             }
             TextFocus::GearAlias(id) => {
                 let mut name = self.surface.analog.config.gear_name(id);
@@ -585,6 +624,31 @@ impl AppState {
             }
             TextFocus::MixName(id) => self.rename_mix(id, self.chrome.edit_buf.clone()),
             TextFocus::TakeName(n) => self.rename_take(n, self.chrome.edit_buf.clone()),
+            TextFocus::HardwarePresetName(id) => {
+                if let Some(name) =
+                    self.surface.analog.config.hardware_preset(id).map(|h| h.name.trim().to_string())
+                {
+                    self.surface.analog.set_hardware_preset_name(id, &name);
+                }
+            }
+            TextFocus::HardwareChainName(id) => {
+                if let Some(name) =
+                    self.surface.analog.config.hardware_chain(id).map(|h| h.name.trim().to_string())
+                {
+                    self.surface.analog.set_hardware_chain_name(id, &name);
+                }
+            }
+            TextFocus::PluginChainName(id) => {
+                if let Some(name) =
+                    self.surface.analog.config.plugin_chain(id).map(|h| h.name.trim().to_string())
+                {
+                    self.surface.analog.set_plugin_chain_name(id, &name);
+                }
+            }
+            TextFocus::GearAlias(id) => {
+                let name = self.surface.analog.config.gear_name(id);
+                self.surface.analog.set_gear_name(id, name.trim());
+            }
             _ => {}
         }
         self.chrome.text_focus = TextFocus::None;

@@ -6,8 +6,8 @@ mod session;
 mod surface;
 mod timeline;
 
-pub(crate) use audio::Audio;
-pub(crate) use chrome::{ChannelsWindow, Chrome, Drag, SettingsWindow};
+pub(crate) use audio::{Audio, PluginStateScope};
+pub(crate) use chrome::{ChannelsWindow, ChainsWindow, Chrome, Drag, SettingsWindow};
 pub(crate) use session::Session;
 pub(crate) use surface::{MidiIo, Surface};
 pub(crate) use timeline::Timeline;
@@ -127,6 +127,7 @@ impl AppState {
                 playing: false,
                 plugin_refs: HashMap::new(),
                 insert_refs: HashMap::new(),
+                plugin_state_scope: HashMap::new(),
             },
             session: Session {
                 project: ProjectStore::new(),
@@ -166,6 +167,7 @@ impl AppState {
                 overlay: None,
                 menu_action: None,
                 channels: None,
+                chains: None,
                 settings: None,
                 modifiers: ModifiersState::empty(),
                 text_focus: TextFocus::None,
@@ -186,6 +188,7 @@ impl AppState {
             },
         };
         boot.surface.xl.clear_on_connect();
+        vst3_host::install_state_dirty_handler();
         boot.publish_schedule();
         boot.reload_mix();
         boot.load_configured_plugins();

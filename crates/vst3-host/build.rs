@@ -12,6 +12,8 @@ fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let root = manifest.parent().unwrap().parent().unwrap();
     let sdk_lib = root.join("build/vst3sdk/libvst3sdk.a");
+    // Re-run when the SDK appears/changes after `Scripts/build-vst3-sdk.sh`.
+    println!("cargo:rerun-if-changed={}", sdk_lib.display());
     let script = root.join("Scripts/build-vst3-sdk.sh");
 
     let have_sdk = sdk_lib.exists();

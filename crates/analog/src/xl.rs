@@ -212,7 +212,7 @@ mod tests {
     use crate::config::SessionConfig;
     use crate::mixer::MixerState;
     use crate::surface::SurfaceState;
-    use crate::types::{EffectRef, MixAssign};
+    use crate::types::{ChainRef, MixAssign};
     use crate::AnalogEngine;
     use midi_xl::{describe, identify, value_for, SessionEvent};
     use osc::OscSession;
@@ -377,19 +377,21 @@ mod tests {
     #[test]
     fn plugin_sends_follow_aux_assign_mute() {
         let mut engine = test_engine();
-        engine.config.set_return_effect(ReturnLane::SendA, Some(EffectRef::Plugin(0)));
-        engine.config.set_return_effect(ReturnLane::Bus1, Some(EffectRef::Plugin(0)));
+        let send = engine.config.plugin_chains[0].id;
+        let bus = engine.config.add_plugin_chain("FX Bus", 6);
+        engine.config.set_return_chain(ReturnLane::SendA, Some(ChainRef::plugin(send)));
+        engine.config.set_return_chain(ReturnLane::Bus1, Some(ChainRef::plugin(bus)));
         engine.apply_fader(0, 0.8);
         engine.apply_aux_a(0, 0.5);
-        let aux = engine.plugin_send_gain(0, 0);
+        let aux = engine.plugin_send_gain(send, 0);
         assert!(aux > 0.0);
 
         engine.apply_assign(0, MixAssign::Main, MixAssign::Bus1);
-        let with_bus = engine.plugin_send_gain(0, 0);
-        assert!(with_bus > aux);
+        let with_bus = engine.plugin_send_gain(bus, 0);
+        assert!(with_bus > 0.0);
 
         engine.apply_mute(0, true);
-        assert_eq!(engine.plugin_send_gain(0, 0), 0.0);
+        assert_eq!(engine.plugin_send_gain(send, 0), 0.0);
     }
 
     #[test]
