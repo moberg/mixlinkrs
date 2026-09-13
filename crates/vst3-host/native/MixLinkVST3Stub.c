@@ -41,3 +41,4 @@ void *MixLinkVST3SaveState(void *instance) { (void)instance; return 0; }
 int MixLinkVST3RestoreState(void *instance, const void *data) { (void)instance; (void)data; return 0; }
 void MixLinkVST3SetStateDirtyHandler(void (*fn)(void *, int)) { (void)fn; }
 int MixLinkVST3Reconfigure(void *instance, double sr, uint32_t block) { (void)instance; (void)sr; (void)block; return 1; }
+int MixLinkVST3Activate(void *instance) { (void)instance; return 1; }

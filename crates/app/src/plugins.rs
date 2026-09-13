@@ -36,7 +36,12 @@ impl AppState {
         }
         vst3_host::set_tempo(inst, self.timeline.tempo);
         self.audio.plugin_refs.insert(id, inst);
+        // Recall after the instance is already active. Effect Rack stores device
+        // power in a VST2 chunk and drops it if setActive runs again afterwards.
         self.restore_plugin_stage_state(id);
+        if !vst3_host::activate(inst) {
+            log::warn!("plugin activate failed {id}");
+        }
         self.load_plugin_preview(id);
     }
 
@@ -128,6 +133,17 @@ impl AppState {
                         .plugin_state_scope
                         .insert(stage.id, PluginStateScope::Project);
                 }
+            }
+        }
+    }
+
+    /// Write every live stage's VST3 blob. Call before quit — dirty events from
+    /// editor teardown never drain after `CloseRequested`.
+    pub(crate) fn persist_plugin_stage_state(&mut self) {
+        let ids: Vec<uuid::Uuid> = self.audio.plugin_refs.keys().copied().collect();
+        for id in ids {
+            if let Some(&inst) = self.audio.plugin_refs.get(&id) {
+                self.save_plugin_stage_state(id, inst);
             }
         }
     }
@@ -231,7 +247,9 @@ impl AppState {
         if bytes.is_empty() {
             return;
         }
-        let _ = vst3_host::restore_state(inst, &bytes);
+        if !vst3_host::restore_state(inst, &bytes) {
+            log::warn!("plugin state restore failed {}", path.display());
+        }
     }
 
     fn save_plugin_stage_state(&mut self, id: uuid::Uuid, inst: vst3_host::MixLinkVST3Ref) {

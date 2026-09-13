@@ -175,7 +175,7 @@ impl AnalogEngine {
                 if !self.strip_send_unreported(i, index) {
                     continue;
                 }
-                let value = self.aux_write_level(i, self.surface.strips[i].aux(lane));
+                let value = self.aux_write_level(i, lane, self.surface.strips[i].aux(lane));
                 if value > LIN_EPS {
                     self.write_aux(i, dest, value);
                 }
@@ -302,7 +302,7 @@ impl AnalogEngine {
             self.persist();
         }
         let dest = self.config.send_destination(lane);
-        let written = self.aux_write_level(strip, value);
+        let written = self.aux_write_level(strip, lane, value);
         self.write_aux(strip, dest, written);
     }
 
@@ -496,8 +496,15 @@ impl AnalogEngine {
     }
 
     pub fn any_solo_active(&self) -> bool {
+        self.any_strip_solo_active() || self.any_return_solo_active()
+    }
+
+    fn any_strip_solo_active(&self) -> bool {
         (0..self.surface.strips.len()).any(|i| self.strip_soloed(i))
-            || ReturnLane::ALL.iter().any(|lane| self.return_soloed(*lane))
+    }
+
+    fn any_return_solo_active(&self) -> bool {
+        ReturnLane::ALL.iter().any(|lane| self.return_soloed(*lane))
     }
 
     pub fn toggle_solo(&mut self, strip: usize) {
@@ -681,7 +688,7 @@ impl AnalogEngine {
             return;
         };
         let assign = s.assign;
-        let level = if self.config.is_strip_enabled(strip) && !self.strip_silenced_for_post_send(strip)
+        let level = if self.config.is_strip_enabled(strip) && !self.assign_silenced_by_solo(strip, assign)
         {
             s.fader
         } else {
@@ -1197,34 +1204,57 @@ impl AnalogEngine {
         for lane in ALL_SEND_LANES {
             let send = self.surface.strips[strip].aux(lane);
             let dest = self.config.send_destination(lane);
-            let value = self.aux_write_level(strip, send);
+            let value = self.aux_write_level(strip, lane, send);
             self.write_aux(strip, dest, value);
         }
     }
 
-    fn aux_write_level(&self, strip: usize, send: f32) -> f32 {
+    fn aux_write_level(&self, strip: usize, lane: ReturnLane, send: f32) -> f32 {
         if !self.config.is_strip_enabled(strip) {
             return 0.0;
         }
         if !self.config.sends_post_fader {
             return send;
         }
-        if self.strip_silenced_for_post_send(strip) {
+        if self.aux_silenced_by_solo(strip, lane) {
             return 0.0;
         }
         post_fader_lin(send, self.surface.strips[strip].fader)
     }
 
-    fn strip_silenced_for_post_send(&self, strip: usize) -> bool {
+    /// Dry mix bus (Main / other buses). Mute stays a TotalMix `/mute` so we
+    /// do not write 0 into the fader.
+    fn strip_silenced_on_mix(&self, strip: usize) -> bool {
         let Some(id) = self.osc_sources(strip).first().copied() else {
             return true;
         };
-        // Mute is `/mute` in TotalMix. Writing 0 into the send would wipe the
-        // stored fader (Take went to −∞ after a muted restart).
-        if self.any_solo_active() && !self.mixer.channel(id).is_some_and(|c| c.solo) {
-            return true;
+        self.any_solo_active() && !self.mixer.channel(id).is_some_and(|c| c.solo)
+    }
+
+    /// Keep feeding a soloed return (or a soloed strip's post-fader sends).
+    /// Starving the send is why return solo used to kill hardware and plugins.
+    fn aux_silenced_by_solo(&self, strip: usize, lane: ReturnLane) -> bool {
+        if self.any_return_solo_active() {
+            return !self.return_soloed(lane);
+        }
+        if self.any_strip_solo_active() {
+            return !self.strip_soloed(strip);
         }
         false
+    }
+
+    fn assign_silenced_by_solo(&self, strip: usize, assign: MixAssign) -> bool {
+        let lane = match assign {
+            MixAssign::Bus1 => Some(ReturnLane::Bus1),
+            MixAssign::Bus2 => Some(ReturnLane::Bus2),
+            MixAssign::Main => None,
+        };
+        if let Some(lane) = lane {
+            if self.return_soloed(lane) {
+                return false;
+            }
+        }
+        self.strip_silenced_on_mix(strip)
     }
 
     fn silence_strip(&mut self, strip: usize) {
@@ -1382,13 +1412,16 @@ impl AnalogEngine {
         let Some(row) = self.surface.strips.get(strip) else {
             return 0.0;
         };
-        if !self.config.is_strip_enabled(strip) {
+        if !self.config.is_strip_enabled(strip) || self.strip_muted(strip) {
             return 0.0;
         }
         let mut gain = 0.0;
         for lane in crate::types::ALL_SEND_LANES {
             if matches!(self.config.send_destination(lane), Some(SendDestination::Plugin(id)) if id == chain)
             {
+                if self.config.sends_post_fader && self.aux_silenced_by_solo(strip, lane) {
+                    continue;
+                }
                 let mut amount = row.aux(lane);
                 if self.config.sends_post_fader {
                     amount *= fader_lin_to_amp(row.fader);
@@ -1401,6 +1434,8 @@ impl AnalogEngine {
                 self.config.send_destination(ReturnLane::Bus1),
                 Some(SendDestination::Plugin(id)) if id == chain
             )
+            && !(self.config.sends_post_fader
+                && self.assign_silenced_by_solo(strip, MixAssign::Bus1))
         {
             gain += row.fader;
         }
@@ -1409,14 +1444,10 @@ impl AnalogEngine {
                 self.config.send_destination(ReturnLane::Bus2),
                 Some(SendDestination::Plugin(id)) if id == chain
             )
+            && !(self.config.sends_post_fader
+                && self.assign_silenced_by_solo(strip, MixAssign::Bus2))
         {
             gain += row.fader;
-        }
-        if gain > 0.0
-            && (self.strip_muted(strip)
-                || (self.config.sends_post_fader && self.strip_silenced_for_post_send(strip)))
-        {
-            return 0.0;
         }
         gain
     }

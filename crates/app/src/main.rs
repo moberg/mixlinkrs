@@ -84,6 +84,7 @@ impl ApplicationHandler for App {
                 if state.audio.playing {
                     state.halt_mix_play();
                 }
+                state.persist_plugin_stage_state();
                 state.surface.analog.config.save();
                 for inst in state.audio.plugin_refs.values() {
                     vst3_host::retire_instance(*inst);

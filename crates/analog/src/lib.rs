@@ -168,6 +168,58 @@ mod tests {
     }
 
     #[test]
+    fn return_solo_keeps_hardware_send_to_that_return() {
+        let mut engine = test_engine();
+        engine.apply_fader(0, 0.8);
+        engine.apply_aux(0, ReturnLane::SendA, 0.5);
+        let src = engine.config.strips[0].channel_id();
+        let send_a = engine.config.hardware_output(ReturnLane::SendA).expect("Send A hardware");
+        let post = post_fader_lin(0.5, 0.8);
+        engine.apply_return_solo(ReturnLane::SendA, true);
+        assert_eq!(engine.mixer.send_level(src, engine.config.main_output), 0.0);
+        assert!((engine.mixer.send_level(src, send_a) - post).abs() < 1e-5);
+    }
+
+    #[test]
+    fn return_solo_keeps_plugin_send_to_that_return() {
+        let mut engine = test_engine();
+        let send = engine.config.plugin_chains[0].id;
+        engine.config.set_return_chain(ReturnLane::SendA, Some(ChainRef::plugin(send)));
+        engine.apply_fader(0, 0.8);
+        engine.apply_aux_a(0, 0.5);
+        let before = engine.plugin_send_gain(send, 0);
+        assert!(before > 0.0);
+        engine.apply_return_solo(ReturnLane::SendA, true);
+        assert!((engine.plugin_send_gain(send, 0) - before).abs() < 1e-5);
+    }
+
+    #[test]
+    fn return_solo_zeros_other_plugin_return() {
+        let mut engine = test_engine();
+        let a = engine.config.plugin_chains[0].id;
+        let b = engine.config.add_plugin_chain("Other", 6);
+        engine.config.set_return_chain(ReturnLane::SendA, Some(ChainRef::plugin(a)));
+        engine.config.set_return_chain(ReturnLane::SendB, Some(ChainRef::plugin(b)));
+        engine.apply_fader(0, 0.8);
+        engine.apply_aux_a(0, 0.5);
+        engine.apply_aux_b(0, 0.4);
+        engine.apply_return_solo(ReturnLane::SendA, true);
+        assert!(engine.plugin_send_gain(a, 0) > 0.0);
+        assert_eq!(engine.plugin_send_gain(b, 0), 0.0);
+    }
+
+    #[test]
+    fn strip_solo_still_cuts_other_strips_plugin_send() {
+        let mut engine = test_engine();
+        let send = engine.config.plugin_chains[0].id;
+        engine.config.set_return_chain(ReturnLane::SendA, Some(ChainRef::plugin(send)));
+        engine.apply_fader(0, 0.8);
+        engine.apply_aux_a(0, 0.5);
+        engine.apply_solo(1, true);
+        assert_eq!(engine.plugin_send_gain(send, 0), 0.0);
+    }
+
+    #[test]
     fn mute_fades_send_before_totalmix_mute() {
         let mut engine = test_engine();
         engine.apply_fader(0, 0.8);

@@ -162,6 +162,9 @@ struct MixLinkVST3Instance
 	NSWindow *window = nil;
 	MixLinkEditorWindowDelegate *windowDelegate = nil;
 	NSData *previewPNG = nil;
+	/// Last component chunk applied by restore. Re-fed to the controller after
+	/// `createView` — Effect Rack builds device power switches in the editor.
+	NSData *recalledComponentState = nil;
 	/// True while the host is applying a plug-in-requested size, so windowDidResize
 	/// does not call onSize re-entrantly.
 	bool resizingEditor = false;
@@ -221,7 +224,7 @@ struct MixLinkVST3Instance
 		editRead.store (r, std::memory_order_release);
 	}
 
-	void teardownProcessing ()
+	void deactivateProcessing ()
 	{
 		if (processor && processing)
 		{
@@ -230,10 +233,29 @@ struct MixLinkVST3Instance
 		}
 		if (component)
 			component->setActive (false);
+	}
+
+	void teardownProcessing ()
+	{
+		deactivateProcessing ();
 		data.unprepare ();
 	}
 
-	bool setupProcessing (double rate, int32 block)
+	bool activateProcessing ()
+	{
+		if (!processor || !component)
+			return false;
+		if (processing)
+			return true;
+		if (component->setActive (true) != kResultOk)
+			return false;
+		processor->setProcessing (true);
+		processing = true;
+		return true;
+	}
+
+	/// Format + buffers only. Leaves the component inactive.
+	bool configureProcessing (double rate, int32 block)
 	{
 		if (!processor || !component)
 			return false;
@@ -275,12 +297,14 @@ struct MixLinkVST3Instance
 		context.state = ProcessContext::kPlaying | ProcessContext::kContTimeValid
 		                | ProcessContext::kProjectTimeMusicValid | ProcessContext::kTempoValid
 		                | ProcessContext::kTimeSigValid;
-
-		if (component->setActive (true) != kResultOk)
-			return false;
-		processor->setProcessing (true);
-		processing = true;
 		return true;
+	}
+
+	bool setupProcessing (double rate, int32 block)
+	{
+		if (!configureProcessing (rate, block))
+			return false;
+		return activateProcessing ();
 	}
 };
 
@@ -1064,6 +1088,20 @@ BOOL MixLinkVST3Reconfigure (MixLinkVST3Ref instance, double sampleRate, uint32_
 	}
 }
 
+BOOL MixLinkVST3Activate (MixLinkVST3Ref instance)
+{
+	if (instance == nullptr)
+		return NO;
+	@try
+	{
+		return instance->activateProcessing () ? YES : NO;
+	} @catch (...) {
+		return NO;
+	}
+}
+
+static void reapplyRecalledState (MixLinkVST3Instance *instance);
+
 #pragma mark - Editor
 
 BOOL MixLinkVST3HasEditor (MixLinkVST3Ref instance)
@@ -1152,6 +1190,10 @@ void MixLinkVST3ShowEditor (MixLinkVST3Ref instance, NSString *title)
 		view->onSize (&now);
 		instance->resizingEditor = false;
 	}
+
+	// Device power lives in the VST2 chunk and is applied to the view only
+	// after createView. Re-push the recalled blob now that the editor exists.
+	reapplyRecalledState (instance);
 
 	[window center];
 	[window makeKeyAndOrderFront:nil];
@@ -1274,6 +1316,72 @@ NSData *MixLinkVST3CaptureEditor (MixLinkVST3Ref instance)
 static const uint32_t kStateMagic = 0x4D4C5633; // 'MLV3'
 static const uint32_t kStateVersion = 1;
 
+static void pauseProcessing (MixLinkVST3Instance *instance)
+{
+	if (instance == nullptr || !instance->processor || !instance->processing)
+		return;
+	instance->processor->setProcessing (false);
+	instance->processing = false;
+}
+
+static void resumeProcessing (MixLinkVST3Instance *instance)
+{
+	if (instance == nullptr || !instance->processor || instance->processing)
+		return;
+	instance->processor->setProcessing (true);
+	instance->processing = true;
+}
+
+/// Stay `setActive`. Toggling that after recall is what zeros Effect Rack power.
+static void applyComponentBlob (MixLinkVST3Instance *instance, const uint8_t *data, size_t size)
+{
+	if (instance == nullptr || instance->component == nullptr || data == nullptr || size == 0)
+		return;
+	MemoryStream componentState (const_cast<uint8_t *> (data), static_cast<TSize> (size));
+	instance->component->setState (&componentState);
+	if (instance->controller)
+	{
+		int64 ignored = 0;
+		componentState.seek (0, IBStream::kIBSeekSet, &ignored);
+		instance->controller->setComponentState (&componentState);
+	}
+}
+
+static void reapplyRecalledState (MixLinkVST3Instance *instance)
+{
+	if (instance == nullptr || instance->recalledComponentState.length == 0)
+		return;
+	const bool wasProcessing = instance->processing;
+	if (wasProcessing)
+		pauseProcessing (instance);
+	const auto *bytes = static_cast<const uint8_t *> (instance->recalledComponentState.bytes);
+	applyComponentBlob (instance, bytes, static_cast<size_t> (instance->recalledComponentState.length));
+	if (wasProcessing)
+		resumeProcessing (instance);
+}
+
+static void flushEditsToComponent (MixLinkVST3Instance *instance)
+{
+	if (instance == nullptr || !instance->processor || !instance->processing)
+		return;
+	for (int i = 0; i < 40 && instance->instanceBusy.load (std::memory_order_acquire); ++i)
+		usleep (500);
+	if (instance->instanceBusy.load (std::memory_order_acquire))
+		return;
+	instance->inputChanges.clearQueue ();
+	instance->drainEdits (instance->inputChanges);
+	if (instance->inputChanges.getParameterCount () == 0)
+		return;
+	instance->outputChanges.clearQueue ();
+	instance->data.numSamples = 0;
+	try
+	{
+		instance->processor->process (instance->data);
+	}
+	catch (...) {
+	}
+}
+
 NSData *MixLinkVST3SaveState (MixLinkVST3Ref instance)
 {
 	if (instance == nullptr || !instance->component)
@@ -1281,6 +1389,7 @@ NSData *MixLinkVST3SaveState (MixLinkVST3Ref instance)
 
 	@try
 	{
+		flushEditsToComponent (instance);
 		MemoryStream componentState;
 		if (instance->component)
 			instance->component->getState (&componentState);
@@ -1311,6 +1420,7 @@ BOOL MixLinkVST3RestoreState (MixLinkVST3Ref instance, NSData *state)
 	if (instance == nullptr || !instance->component || state.length < 16)
 		return NO;
 
+	const bool wasProcessing = instance->processing;
 	@try
 	{
 		const uint8_t *bytes = static_cast<const uint8_t *> (state.bytes);
@@ -1335,22 +1445,16 @@ BOOL MixLinkVST3RestoreState (MixLinkVST3Ref instance, NSData *state)
 			cursor += size;
 		}
 
-		const bool wasProcessing = instance->processing;
-		const double rate = instance->sampleRate;
-		const int32 block = instance->maxBlock;
+		// Pause IAudioProcessor only. setActive(false) after a good setState is
+		// what Effect Rack treats as "all devices off".
 		if (wasProcessing)
-			instance->teardownProcessing ();
+			pauseProcessing (instance);
 
 		if (!blobs[0].empty ())
 		{
-			MemoryStream componentState (blobs[0].data (), static_cast<TSize> (blobs[0].size ()));
-			instance->component->setState (&componentState);
-			if (instance->controller)
-			{
-				int64 ignored = 0;
-				componentState.seek (0, IBStream::kIBSeekSet, &ignored);
-				instance->controller->setComponentState (&componentState);
-			}
+			instance->recalledComponentState =
+			    [NSData dataWithBytes:blobs[0].data () length:blobs[0].size ()];
+			applyComponentBlob (instance, blobs[0].data (), blobs[0].size ());
 		}
 		if (!blobs[1].empty () && instance->controller)
 		{
@@ -1359,9 +1463,11 @@ BOOL MixLinkVST3RestoreState (MixLinkVST3Ref instance, NSData *state)
 		}
 
 		if (wasProcessing)
-			instance->setupProcessing (rate, block);
+			resumeProcessing (instance);
 		return YES;
 	} @catch (...) {
+		if (wasProcessing)
+			resumeProcessing (instance);
 		return NO;
 	}
 }

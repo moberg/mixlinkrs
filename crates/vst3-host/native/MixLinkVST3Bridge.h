@@ -56,6 +56,9 @@ NSArray<NSDictionary<NSString *, NSString *> *> *MixLinkVST3ClassesInModule(MixL
 /// Re-runs `setupProcessing` for a new device rate or block size.
 BOOL MixLinkVST3Reconfigure(MixLinkVST3Ref instance, double sampleRate, uint32_t maxBlockSize);
 
+/// `setActive` + `setProcessing` after load + restore. Does not re-run format setup.
+BOOL MixLinkVST3Activate(MixLinkVST3Ref instance);
+
 #pragma mark - Editor (main thread)
 
 BOOL MixLinkVST3HasEditor(MixLinkVST3Ref instance);

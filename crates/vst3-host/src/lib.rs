@@ -52,6 +52,7 @@ extern "C" {
         instance: MixLinkVST3Ref,
         state: *const std::ffi::c_void,
     ) -> i32;
+    pub fn MixLinkVST3Activate(instance: MixLinkVST3Ref) -> i32;
     pub fn MixLinkVST3SetStateDirtyHandler(
         fn_ptr: Option<extern "C" fn(MixLinkVST3Ref, i32)>,
     );
@@ -261,6 +262,14 @@ pub fn save_state(instance: MixLinkVST3Ref) -> Option<Vec<u8>> {
     }
 }
 
+/// UI thread: `setActive` after [`load`] + [`restore_state`].
+pub fn activate(instance: MixLinkVST3Ref) -> bool {
+    if instance.is_null() {
+        return false;
+    }
+    unsafe { MixLinkVST3Activate(instance) != 0 }
+}
+
 /// UI thread: restore a blob from [`save_state`].
 pub fn restore_state(instance: MixLinkVST3Ref, bytes: &[u8]) -> bool {
     if instance.is_null() || bytes.is_empty() {
@@ -416,6 +425,17 @@ mod tests {
     #[test]
     fn capture_null_editor_returns_none() {
         assert!(capture_editor(std::ptr::null_mut()).is_none());
+    }
+
+    #[test]
+    fn activate_null_instance_returns_false() {
+        assert!(!activate(std::ptr::null_mut()));
+    }
+
+    #[test]
+    fn restore_empty_state_returns_false() {
+        assert!(!restore_state(std::ptr::null_mut(), &[]));
+        assert!(!restore_state(std::ptr::null_mut(), &[1, 2, 3]));
     }
 
     #[test]
